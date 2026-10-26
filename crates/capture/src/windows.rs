@@ -19,6 +19,7 @@ use windows::Win32::Media::Audio::{
 };
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 
+use crate::policy::LoopbackBuffer;
 use crate::source::{recover_default, send};
 use crate::{
     AudioFrame, AudioSource, CaptureEvent, CaptureMessage, Channel, DeviceInfo, FallbackPolicy,
@@ -456,6 +457,7 @@ fn capture_system(
     };
     let mut checked = Instant::now();
     let started = Instant::now();
+    let mut buffer = LoopbackBuffer::new(options.silence_timeout);
     while !stop.load(Ordering::Relaxed) {
         let endpoint_frames = endpoint.drain(Channel::System, clock, sender, stop)?;
         *healthy = true;
@@ -473,6 +475,7 @@ fn capture_system(
                 }
             }
         }
+        let process_audible = level(&process_frames) > SILENT_THRESHOLD;
         if process.is_some()
             && let Some(reason) = policy.observe(
                 started.elapsed(),
@@ -483,11 +486,13 @@ fn capture_system(
             fallback(sender, stop, clock, reason);
             process = None;
         }
-        let frames = if process.is_some() {
-            process_frames
-        } else {
-            endpoint_frames
-        };
+        let frames = buffer.select(
+            clock.origin.elapsed(),
+            process.is_some(),
+            process_audible,
+            process_frames,
+            endpoint_frames,
+        );
         for frame in frames {
             if !send(sender, stop, CaptureMessage::Frame(frame)) {
                 return Ok(());
@@ -498,6 +503,12 @@ fn capture_system(
             checked = Instant::now();
         }
         std::thread::sleep(Duration::from_millis(5));
+    }
+    if let Some(tail) = buffer.finish() {
+        // stop() joins before the consumer drains the channel. Never block here;
+        // only sub-threshold process audio can remain, and the recorder pads the
+        // timeline to the explicit stop even when its bounded queue is full.
+        let _ = sender.try_send(CaptureMessage::Frame(tail));
     }
     Ok(())
 }
