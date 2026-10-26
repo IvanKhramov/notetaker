@@ -19,6 +19,7 @@ directories = "6"
 egui_commonmark = { version = "0.26", default-features = false }
 notetaker-asr-proto = { path = "../asr-proto" }
 notetaker-capture = { path = "../capture" }
+notetaker-detect = { path = "../detect" }
 notetaker-core = { path = "../core" }
 notetaker-llm = { path = "../llm" }
 notetaker-pipeline = { path = "../pipeline" }

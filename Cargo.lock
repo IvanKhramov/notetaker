@@ -2253,6 +2253,7 @@ dependencies = [
  "notetaker-asr-proto",
  "notetaker-capture",
  "notetaker-core",
+ "notetaker-detect",
  "notetaker-llm",
  "notetaker-pipeline",
  "serde",

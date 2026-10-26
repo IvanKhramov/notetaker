@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::{
     config::{LlmSettings, Settings},
+    detection::{CallPrompt, Monitor, proposal},
     worker::{self, Command, DocumentData, Event, Fields, MeetingRow, RecordRequest, Save},
 };
 
@@ -34,6 +35,7 @@ pub enum Phase {
 #[derive(Default)]
 pub struct Recording {
     pub phase: Phase,
+    pub process_id: Option<u32>,
     pub path: Option<PathBuf>,
     pub started: Option<Instant>,
     pub stopped: Option<Duration>,
@@ -162,6 +164,8 @@ pub struct AppState {
     pub selected: Option<PathBuf>,
     pub tab: Tab,
     pub recording: Recording,
+    pub call_prompt: Option<CallPrompt>,
+    detector: Monitor,
     pub inventory: Inventory,
     pub inventory_pending: bool,
     pub inventory_error: Option<String>,
@@ -182,7 +186,9 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         let (tx, rx) = worker::spawn();
-        Self::with_channels(tx, rx)
+        let mut state = Self::with_channels(tx, rx);
+        state.detector.start();
+        state
     }
     fn with_channels(tx: Sender<Command>, rx: Receiver<Event>) -> Self {
         let settings = Settings::default();
@@ -202,6 +208,8 @@ impl AppState {
             selected: None,
             tab: Tab::Notes,
             recording: Recording::default(),
+            call_prompt: None,
+            detector: Monitor::default(),
             inventory: Inventory::default(),
             inventory_pending: false,
             inventory_error: None,
@@ -259,6 +267,30 @@ impl AppState {
             .any(|doc| doc.saving || doc.dirty.any())
     }
     pub fn start_recording(&mut self) {
+        self.start_recording_with_app(None);
+    }
+    pub fn accept_call(&mut self) {
+        match self.call_prompt.clone() {
+            Some(CallPrompt::Start { app, pid }) => {
+                self.process_id = Some(pid);
+                self.record_model = self.settings.model.clone();
+                self.record_mode = self.settings.mode;
+                self.title.clear();
+                self.start_recording_with_app(Some(app));
+            }
+            Some(CallPrompt::Stop { .. }) => {
+                self.recording.request_stop();
+                self.call_prompt = None;
+            }
+            None => {}
+        }
+    }
+    pub fn dismiss_call(&mut self) {
+        if let Some(CallPrompt::Start { pid, .. }) = self.call_prompt.take() {
+            self.detector.dismiss(pid);
+        }
+    }
+    fn start_recording_with_app(&mut self, app_override: Option<String>) {
         if !self.ready
             || self.recording.busy()
             || self.downloading
@@ -267,12 +299,13 @@ impl AppState {
         {
             return;
         }
-        let app = self
-            .inventory
-            .sessions
-            .iter()
-            .find(|s| Some(s.pid) == self.process_id)
-            .map(|s| s.exe.clone().unwrap_or_else(|| s.name.clone()));
+        let app = app_override.or_else(|| {
+            self.inventory
+                .sessions
+                .iter()
+                .find(|s| Some(s.pid) == self.process_id)
+                .map(|s| s.exe.clone().unwrap_or_else(|| s.name.clone()))
+        });
         let mut settings = self.settings.clone();
         settings.model = self.record_model.clone();
         settings.mode = self.record_mode;
@@ -283,8 +316,10 @@ impl AppState {
         } else {
             self.title.trim().to_owned()
         };
+        self.call_prompt = None;
         self.recording = Recording {
             phase: Phase::Starting,
+            process_id: self.process_id,
             ..Recording::default()
         };
         self.send(Command::Record(RecordRequest {
@@ -377,6 +412,7 @@ impl AppState {
             };
             self.apply(event);
         }
+        self.poll_detection();
         if self
             .query_changed
             .is_some_and(|time| time.elapsed() > Duration::from_millis(300))
@@ -406,6 +442,39 @@ impl AppState {
                 || doc.dirty.any()
                 || doc.saving
         });
+    }
+    fn poll_detection(&mut self) {
+        self.detector.configure(
+            self.ready && self.settings.detect_calls,
+            self.settings.detect_browsers,
+        );
+        if !self.settings.detect_calls || self.exit_requested {
+            self.call_prompt = None;
+        }
+        for event in self.detector.poll() {
+            if !self.settings.detect_calls || self.exit_requested {
+                continue;
+            }
+            if let notetaker_detect::DetectEvent::CallEnded { pid, .. } = &event
+                && matches!(&self.call_prompt, Some(CallPrompt::Start { pid: offered, .. }) if offered == pid)
+            {
+                self.call_prompt = None;
+            }
+            if let Some(prompt) = proposal(
+                &event,
+                self.recording.phase,
+                self.recording.process_id,
+                self.recording.stop_requested,
+            ) {
+                self.call_prompt = Some(prompt);
+            }
+        }
+        if matches!(self.call_prompt, Some(CallPrompt::Stop { .. }))
+            && (!matches!(self.recording.phase, Phase::Starting | Phase::Recording)
+                || self.recording.stop_requested)
+        {
+            self.call_prompt = None;
+        }
     }
     fn apply(&mut self, event: Event) {
         match event {
@@ -591,6 +660,11 @@ impl AppState {
                 match result {
                     Ok((settings, llm)) => {
                         let changed_library = self.settings.library != settings.library;
+                        if self.settings.detect_calls != settings.detect_calls
+                            || self.settings.detect_browsers != settings.detect_browsers
+                        {
+                            self.call_prompt = None;
+                        }
                         self.record_model = settings.model.clone();
                         self.record_mode = settings.mode;
                         self.settings = settings.clone();
@@ -743,6 +817,34 @@ mod tests {
         );
         state.selected = Some(path.clone());
         (state, commands, root, path)
+    }
+    #[test]
+    fn call_acceptance_uses_pid_and_defaults_without_audio_inventory() {
+        let (mut state, commands, _root, _path) = fixture();
+        state.ready = true;
+        state.settings.model = "gigaam-v3".into();
+        state.record_model = "parakeet-v3".into();
+        state.record_mode = notetaker_core::Mode::Hybrid;
+        state.title = "old title".into();
+        state.call_prompt = Some(CallPrompt::Start {
+            app: "Teams".into(),
+            pid: 42,
+        });
+        state.accept_call();
+        let Command::Record(request) = commands.try_recv().unwrap() else {
+            panic!("expected recording");
+        };
+        assert_eq!(request.process_id, Some(42));
+        assert_eq!(request.app.as_deref(), Some("Teams"));
+        assert_eq!(request.settings.model, "gigaam-v3");
+        assert_eq!(request.settings.mode, state.settings.mode);
+        assert_ne!(request.title, "old title");
+        assert_eq!(state.recording.process_id, Some(42));
+        assert!(state.call_prompt.is_none());
+        state.call_prompt = Some(CallPrompt::Stop { pid: 42 });
+        state.dismiss_call();
+        assert!(!state.recording.stop_requested);
+        assert!(state.call_prompt.is_none());
     }
     #[test]
     fn save_failure_prevents_exit_and_keeps_latest_notes() {

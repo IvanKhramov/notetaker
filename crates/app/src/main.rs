@@ -3,6 +3,7 @@
 mod config;
 #[cfg(windows)]
 mod desktop;
+mod detection;
 mod state;
 mod ui;
 mod worker;

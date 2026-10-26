@@ -21,6 +21,10 @@ pub struct Settings {
     #[serde(default)]
     pub retention_days: Option<u32>,
     pub hotkey: String,
+    pub detect_calls: bool,
+    pub detect_browsers: bool,
+    /// Zero disables the silence timeout.
+    pub auto_stop_minutes: u32,
 }
 
 impl Default for Settings {
@@ -36,6 +40,9 @@ impl Default for Settings {
             mode: Mode::Local,
             retention_days: Some(7),
             hotkey: "Ctrl+Alt+R".into(),
+            detect_calls: true,
+            detect_browsers: false,
+            auto_stop_minutes: 15,
         }
     }
 }
@@ -196,6 +203,19 @@ pub fn validate_hotkey(value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn existing_settings_get_detection_and_silence_defaults() {
+        let settings: Settings = toml::from_str("hotkey = 'Ctrl+Alt+R'").unwrap();
+        assert!(settings.detect_calls);
+        assert!(!settings.detect_browsers);
+        assert_eq!(settings.auto_stop_minutes, 15);
+        let settings: Settings =
+            toml::from_str("auto_stop_minutes = 0\ndetect_calls = false\ndetect_browsers = true")
+                .unwrap();
+        assert_eq!(settings.auto_stop_minutes, 0);
+        assert!(!settings.detect_calls);
+        assert!(settings.detect_browsers);
+    }
     #[test]
     fn validates_settings_and_roundtrip() {
         let mut settings = Settings {

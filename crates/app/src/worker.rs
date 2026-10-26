@@ -406,6 +406,9 @@ fn record(request: RecordRequest, events: &Sender<Event>) {
                     .settings
                     .retention_days
                     .map(|days| Duration::from_secs(u64::from(days) * 86400)),
+                auto_stop_after_silence: (request.settings.auto_stop_minutes > 0).then(|| {
+                    Duration::from_secs(u64::from(request.settings.auto_stop_minutes) * 60)
+                }),
                 ..RecordingConfig::default()
             },
         )?;

@@ -6,6 +6,7 @@ use notetaker_core::Mode;
 
 use crate::{
     config::{MODELS, ProviderSettings},
+    detection::CallPrompt,
     state::{AppState, Phase, Tab, edit_segment, speaker, timestamp},
     worker::Command,
 };
@@ -94,6 +95,21 @@ impl NotetakerApp {
                 ui.label("Завершаем задачи перед выходом…");
             }
         });
+        if let Some(prompt) = &self.state.call_prompt {
+            let message = match prompt {
+                CallPrompt::Start { app, .. } => format!("Похоже, идёт звонок в {app}. Записать?"),
+                CallPrompt::Stop { .. } => "Звонок закончился. Остановить запись?".into(),
+            };
+            ui.horizontal_wrapped(|ui| {
+                ui.label(message);
+                if ui.button("Да").clicked() {
+                    self.state.accept_call();
+                }
+                if ui.button("Не сейчас").clicked() {
+                    self.state.dismiss_call();
+                }
+            });
+        }
         let recording = &self.state.recording;
         if recording.busy() {
             ui.horizontal_wrapped(|ui| {
@@ -341,6 +357,17 @@ impl NotetakerApp {
                 ui.small("0 — удалить аудио после успешного чистового прохода. Срок применяется к новым записям; просроченное аудио очищается после записи.");
                 ui.label("Глобальная клавиша старт/стоп (Windows)"); ui.text_edit_singleline(&mut settings.hotkey);
                 ui.small("Например Ctrl+Alt+R. Модификаторы: Ctrl, Alt, Shift, Super; клавиша: A–Z, 0–9, F1–F24.");
+                ui.separator();
+                ui.add_enabled_ui(cfg!(windows), |ui| {
+                    ui.checkbox(&mut settings.detect_calls, "Предлагать запись при обнаружении звонка");
+                    ui.checkbox(&mut settings.detect_browsers, "Учитывать браузеры")
+                        .on_hover_text("Включите для Meet, Толка и Телемоста в браузере. Диктовка и голосовые сообщения тоже могут выглядеть как звонок.");
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Автостоп по тишине:");
+                    ui.add(egui::DragValue::new(&mut settings.auto_stop_minutes).range(0..=u32::MAX).suffix(" мин"));
+                });
+                ui.small("0 — выключено. Завершение звонка само по себе не останавливает запись.");
                 ui.separator(); ui.heading("Модели ASR");
                 ui.label("Загрузка выполняется отдельно через notetaker-asr. Прогресс показывает этапы загрузки и установки модели и Silero VAD.");
                 ui.horizontal(|ui| {
@@ -382,6 +409,55 @@ impl NotetakerApp {
             });
         });
         self.show_settings = open;
+    }
+    fn call_notification(&mut self, ctx: &egui::Context) {
+        if self.state.call_prompt.is_none() {
+            return;
+        }
+        let mut accept = false;
+        let mut dismiss = false;
+        ctx.show_viewport_immediate(
+            egui::ViewportId::from_hash_of("call-notification"),
+            egui::ViewportBuilder::default()
+                .with_title("notetaker · звонок")
+                .with_inner_size([420.0, 130.0])
+                .with_resizable(false)
+                .with_window_level(egui::WindowLevel::AlwaysOnTop)
+                .with_minimize_button(false)
+                .with_maximize_button(false)
+                .with_active(false),
+            |ui, _| {
+                let (message, button) = match &self.state.call_prompt {
+                    Some(CallPrompt::Start { app, .. }) => (
+                        format!("Похоже, идёт звонок в {app}. Записать?"),
+                        "Записать",
+                    ),
+                    _ => ("Звонок закончился. Остановить запись?".into(), "Остановить"),
+                };
+                ui.label(message);
+                ui.horizontal(|ui| {
+                    accept = ui
+                        .add_enabled(
+                            self.state.ready
+                                && !self.state.downloading
+                                && !self.state.settings_pending,
+                            egui::Button::new(button),
+                        )
+                        .clicked();
+                    dismiss = ui.button("Не сейчас").clicked();
+                });
+                if ui.input(|input| input.viewport().close_requested()) {
+                    dismiss = true;
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                }
+            },
+        );
+        if accept {
+            self.state.accept_call();
+        } else if dismiss {
+            self.state.dismiss_call();
+        }
     }
     fn indicator(&mut self, ctx: &egui::Context) {
         if !self.state.recording.busy() {
@@ -489,7 +565,7 @@ impl eframe::App for NotetakerApp {
         if self.state.can_exit() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-        if self.state.recording.busy() {
+        if self.state.recording.busy() || self.state.call_prompt.is_some() {
             // Allow the UI to create the indicator when a hotkey starts a
             // recording while the root window is hidden.
             ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaintWhileHidden);
@@ -533,6 +609,7 @@ impl eframe::App for NotetakerApp {
             self.settings_dialog(&ctx);
         }
         self.indicator(&ctx);
+        self.call_notification(&ctx);
     }
 }
 fn mode_label(mode: Mode) -> &'static str {
