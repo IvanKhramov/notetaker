@@ -381,7 +381,26 @@ fn edits_saved_during_recording_survive_the_real_replacement_path() {
             .segments
             .iter()
             .filter(|s| !s.edited)
-            .all(|s| s.source == Source::Final && s.start_ms >= 150)
+            .all(|s| s.source == Source::Final)
+    );
+    // The edit covers exactly half of the first 200 ms mic phrase, and must
+    // never suppress the simultaneous system phrase.
+    for channel in [
+        notetaker_core::Channel::Mic,
+        notetaker_core::Channel::System,
+    ] {
+        assert!(
+            transcript
+                .segments
+                .iter()
+                .any(|s| !s.edited && s.channel == channel && s.start_ms == 0)
+        );
+    }
+    assert!(
+        transcript
+            .segments
+            .iter()
+            .any(|s| !s.edited && s.end_ms == 400)
     );
 }
 

@@ -640,9 +640,24 @@ pub(crate) fn replace_final(existing: Vec<Segment>, final_segments: Vec<Segment>
     let retained: Vec<_> = final_segments
         .into_iter()
         .filter(|s| {
-            !edited
+            let mut ranges: Vec<_> = edited
                 .iter()
-                .any(|e| s.start_ms < e.end_ms && e.start_ms < s.end_ms)
+                .filter(|e| {
+                    e.channel == s.channel && s.start_ms < e.end_ms && e.start_ms < s.end_ms
+                })
+                .map(|e| (e.start_ms.max(s.start_ms), e.end_ms.min(s.end_ms)))
+                .collect();
+            ranges.sort_unstable();
+            let mut covered = 0;
+            let mut end = s.start_ms;
+            for (start, next_end) in ranges {
+                covered += next_end.saturating_sub(start.max(end));
+                end = end.max(next_end);
+            }
+            // Boundaries move between live and final ASR. Keep final evidence
+            // unless edits cover a strict majority; a small boundary overlap
+            // must not discard an entire phrase. Count the union, not duplicates.
+            covered <= s.end_ms.saturating_sub(s.start_ms) / 2
         })
         .collect();
     edited.extend(retained);
@@ -683,7 +698,7 @@ mod tests {
     }
 
     #[test]
-    fn final_replaces_unedited_live_but_keeps_edits_and_discards_intersections() {
+    fn final_replacement_preserves_other_channels_and_minor_overlaps() {
         let segment = |start, end, source, edited| {
             let mut s = convert(
                 vec![notetaker_asr_proto::Segment {
@@ -711,15 +726,49 @@ mod tests {
             vec![
                 segment(0, 100, Source::Final, false),
                 segment(90, 110, Source::Final, false),
-                other_channel,
+                other_channel.clone(),
+                segment(110, 190, Source::Final, false),
                 segment(200, 300, Source::Final, false),
                 segment(490, 510, Source::Final, false),
             ],
         );
-        assert_eq!(result.len(), 4);
-        assert_eq!(result[1], edit);
-        assert_eq!(result[3], final_edit);
-        assert_eq!(result[0].source, Source::Final);
-        assert_eq!(result[2].start_ms, 200); // Touching endpoints do not intersect.
+        assert_eq!(result.len(), 7);
+        assert!(result.contains(&edit));
+        assert!(result.contains(&final_edit));
+        assert!(result.contains(&other_channel));
+        assert!(result.iter().any(|s| s.start_ms == 90)); // Exactly half survives.
+        assert!(result.iter().any(|s| s.start_ms == 490));
+        assert!(!result.iter().any(|s| s.start_ms == 110)); // Majority edited.
+        assert!(result.iter().any(|s| s.start_ms == 200)); // Touching endpoints survive.
+    }
+    #[test]
+    fn final_overlap_counts_union_and_only_strict_majority() {
+        let base = convert(
+            vec![notetaker_asr_proto::Segment {
+                start_ms: 0,
+                end_ms: 100,
+                text: "final".into(),
+            }],
+            Channel::Mic,
+            Source::Final,
+        )
+        .remove(0);
+        let edit = |start, end| Segment {
+            id: Uuid::now_v7(),
+            start_ms: start,
+            end_ms: end,
+            edited: true,
+            ..base.clone()
+        };
+        for (edits, retained) in [
+            (vec![edit(0, 30), edit(20, 40)], true), // Overlap is not counted twice.
+            (vec![edit(0, 25), edit(75, 100)], true),
+            (vec![edit(0, 26), edit(75, 100)], false),
+        ] {
+            assert_eq!(
+                replace_final(edits, vec![base.clone()]).contains(&base),
+                retained
+            );
+        }
     }
 }
