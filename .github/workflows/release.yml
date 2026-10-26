@@ -18,7 +18,7 @@ jobs:
           cache-directories: target/sherpa-onnx-prebuilt
           prefix-key: v1-sherpa
       - name: Build Windows applications
-        run: cargo build --locked --release -p notetaker-cli -p notetaker-asr-worker -p notetaker-app -j 2
+        run: cargo build --locked --release -p notetaker-cli -p notetaker-asr-worker -p notetaker-app
       - name: Package Windows applications
         id: package
         shell: pwsh
