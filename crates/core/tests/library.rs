@@ -62,6 +62,11 @@ fn roundtrip_and_atomic_replacement() {
     expected.template = Some("standup".into());
     expected.audio_expires_at = Some(expected.started_at + chrono::Duration::days(7));
     assert_eq!(expected.id.get_version_num(), 7);
+    let defaults = meta("Defaults");
+    assert_eq!(
+        defaults.audio_expires_at,
+        Some(defaults.started_at + chrono::Duration::days(7))
+    );
     let meeting = library.create_meeting(expected.clone()).unwrap();
     assert_eq!(meeting.read_meta().unwrap(), expected);
     assert_eq!(meeting.read_transcript().unwrap(), Transcript::default());
@@ -274,7 +279,9 @@ fn sweep_removes_only_expired_audio_and_is_idempotent() {
     let mut future = meta("Future");
     future.audio_expires_at = Some(now + chrono::Duration::days(1));
     let future = library.create_meeting(future).unwrap();
-    let forever = library.create_meeting(meta("Forever")).unwrap();
+    let mut forever = meta("Forever");
+    forever.audio_expires_at = None;
+    let forever = library.create_meeting(forever).unwrap();
     let mut missing = meta("Missing audio");
     missing.audio_expires_at = Some(now - chrono::Duration::days(1));
     let missing = library.create_meeting(missing).unwrap();
@@ -296,6 +303,11 @@ fn sweep_removes_only_expired_audio_and_is_idempotent() {
     assert!(forever.system_audio_path().exists());
     assert!(expired.path().join("meta.yaml").exists());
     assert!(expired.path().join("transcript.json").exists());
+    library
+        .sweep_audio(now + chrono::Duration::days(8))
+        .unwrap();
+    assert!(!future.mic_audio_path().exists());
+    assert!(forever.mic_audio_path().exists());
 }
 
 #[test]

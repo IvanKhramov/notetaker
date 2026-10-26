@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -20,6 +20,7 @@ pub struct MeetingMeta {
 }
 
 impl MeetingMeta {
+    /// Create a local meeting with a UUID v7 and seven-day audio retention.
     pub fn new(title: impl Into<String>, started_at: DateTime<Utc>) -> Self {
         Self {
             id: Uuid::now_v7(),
@@ -29,7 +30,7 @@ impl MeetingMeta {
             app: None,
             mode: Mode::Local,
             template: None,
-            audio_expires_at: None,
+            audio_expires_at: started_at.checked_add_signed(TimeDelta::days(7)),
         }
     }
 }
