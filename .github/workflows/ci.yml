@@ -22,10 +22,14 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          # sherpa-onnx-sys downloads native libs here; without it a cached
-          # build-script fingerprint skips the download and linking fails.
-          cache-directories: target/sherpa-onnx-prebuilt
-          prefix-key: v1-sherpa
+          prefix-key: v2
+      - uses: actions/cache@v4
+        with:
+          path: ~/sherpa-onnx-libs
+          key: sherpa-onnx-libs-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      - name: Fetch sherpa-onnx native libraries
+        shell: bash
+        run: ./scripts/fetch-sherpa-libs.sh
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
