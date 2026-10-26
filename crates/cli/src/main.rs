@@ -1,6 +1,7 @@
 //! Command-line entry point for notetaker.
 
 mod cmd_probe;
+mod cmd_transcribe;
 
 use clap::{Parser, Subcommand};
 
@@ -15,10 +16,13 @@ struct Args {
 enum Command {
     /// Diagnose microphone and system audio capture on Windows.
     Probe(cmd_probe::Args),
+    /// Transcribe a mono WAV using the isolated local ASR worker.
+    Transcribe(cmd_transcribe::Args),
 }
 
 fn main() -> anyhow::Result<()> {
     match Args::parse().command {
         Command::Probe(args) => cmd_probe::run(args),
+        Command::Transcribe(args) => cmd_transcribe::run(args),
     }
 }

@@ -10,3 +10,29 @@ workspace = true
 [[bin]]
 name = "notetaker-asr"
 path = "src/main.rs"
+
+[features]
+default = []
+# Requires a CUDA-enabled sherpa native library via SHERPA_ONNX_LIB_DIR.
+cuda = ["sherpa-onnx/shared"]
+
+[dependencies]
+anyhow = "1"
+bzip2 = "0.6"
+directories = "6"
+hound = "3.5"
+notetaker-asr-proto = { path = "../asr-proto" }
+sha2 = "0.10"
+sherpa-onnx = { version = "=2.0.0", default-features = false }
+tar = "0.4"
+tempfile = "3"
+
+# Schannel avoids a target C toolchain just to check MSVC from Linux.
+[target.'cfg(windows)'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "native-tls"] }
+
+[target.'cfg(not(windows))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+
+[dev-dependencies]
+serde_json = "1"
