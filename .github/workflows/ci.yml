@@ -40,14 +40,16 @@ jobs:
         run: cargo test --workspace
       - name: Build Windows applications
         if: runner.os == 'Windows'
-        run: cargo build --release -p notetaker-cli -p notetaker-asr-worker -p notetaker-app -j 2
+        run: cargo build --locked --release -p notetaker-cli -p notetaker-asr-worker -p notetaker-app -j 2
+      - name: Package Windows applications
+        if: runner.os == 'Windows'
+        id: package
+        shell: pwsh
+        run: ./scripts/package-windows.ps1
       - name: Upload Windows applications
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: notetaker-windows-x64
-          path: |
-            target/release/notetaker.exe
-            target/release/notetaker-asr.exe
-            target/release/notetaker-app.exe
+          path: ${{ steps.package.outputs.payload }}
           if-no-files-found: error

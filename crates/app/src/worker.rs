@@ -115,6 +115,7 @@ pub enum Event {
         settings: Settings,
         llm: LlmSettings,
         warnings: Vec<String>,
+        needs_model: bool,
     },
     Listed {
         request: u64,
@@ -167,10 +168,23 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
             warnings.push(format!("{error:#}"));
             LlmSettings::default()
         });
+        // Reuse the worker's model manifest and path resolution; do not load
+        // hundreds of MB of weights just to check first-run readiness.
+        let needs_model = !crate::config::MODELS.iter().any(|model| {
+            asr_binary().is_ok_and(|binary| {
+                background_process(&binary)
+                    .args(["check-model", model])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .is_ok_and(|status| status.success())
+            })
+        });
         let _ = events.send(Event::Boot {
             settings,
             llm,
             warnings,
+            needs_model,
         });
         for command in rx {
             match command {

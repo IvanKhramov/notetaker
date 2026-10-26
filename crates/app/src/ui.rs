@@ -410,6 +410,43 @@ impl NotetakerApp {
         });
         self.show_settings = open;
     }
+    fn first_run(&mut self, ctx: &egui::Context) {
+        if !self.state.offer_model_download {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("Локальное распознавание речи")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label("Модели ещё не установлены. Скачать GigaAM v3 для русского языка?");
+                ui.small("Около 171 МБ вместе с Silero VAD. Аудио обрабатывается локально.");
+                if ui
+                    .add_enabled(
+                        !self.state.downloading && !self.state.recording.busy(),
+                        egui::Button::new("Скачать GigaAM v3"),
+                    )
+                    .clicked()
+                {
+                    self.state.download("gigaam-v3".into());
+                }
+                if self.state.downloading {
+                    ui.spinner();
+                }
+                for line in &self.state.download_messages {
+                    ui.small(line);
+                }
+                if ui
+                    .button("Позже / выбрать другую модель в настройках")
+                    .clicked()
+                {
+                    self.state.offer_model_download = false;
+                    self.show_settings = true;
+                }
+            });
+        self.state.offer_model_download &= open;
+    }
     fn call_notification(&mut self, ctx: &egui::Context) {
         if self.state.call_prompt.is_none() {
             return;
@@ -610,6 +647,7 @@ impl eframe::App for NotetakerApp {
         }
         self.indicator(&ctx);
         self.call_notification(&ctx);
+        self.first_run(&ctx);
     }
 }
 fn mode_label(mode: Mode) -> &'static str {

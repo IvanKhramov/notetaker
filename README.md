@@ -3,9 +3,36 @@
 An open-source AI notebook for online meetings, inspired by Granola and written
 in Rust. Windows comes first, with macOS and Linux capture support planned.
 
-**Pre-alpha:** the desktop app and CLI support Windows recording, local ASR,
+**v0.1.0:** the desktop app and CLI support Windows recording, local ASR,
 meeting notes, transcript editing, search, and LLM note enhancement.
 See [the project plan](docs/PLAN.md) for architecture and milestones.
+
+## Install
+
+Download `notetaker-0.1.0-windows-x64.zip` from this repository's **Releases**
+page and extract it into a folder. Keep all files together and run
+`notetaker-app.exe`. The binaries are unsigned: Windows SmartScreen may warn;
+choose **More info → Run anyway** if you trust the download. A SHA-256 checksum
+is available beside the ZIP (`Get-FileHash <zip> -Algorithm SHA256`).
+Windows 11 is recommended for capture of an individual application; older
+Windows 10 builds fall back to all system audio (see the diagnostics guide).
+
+## Quick start
+
+1. On first launch, accept the GigaAM v3 download (~171 MB including Silero VAD),
+   or choose Parakeet v3 in Settings for English and other supported languages.
+2. Start a recording, select the call's audio session, and write notes. Windows
+   also offers to record detected calls; accepting uses that process and your
+   default model/mode. Enable browser detection in Settings for Meet, Толк, or
+   Телемост in a browser (disabled by default).
+3. Stop the recording and wait for the final transcript. A detected call ending
+   offers to stop; silence stops recording after 15 minutes by default
+   (Settings: minutes, 0 disables it).
+4. Configure an LLM provider and generate a summary when ready.
+
+See [audio capture diagnostics](docs/probe.md) and [LLM setup](docs/llm.md).
+Models download separately. Audio stays on your computer; Hybrid mode can send
+notes and transcript text to your chosen remote LLM.
 
 ## Build
 

@@ -1,0 +1,37 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-directories: target/sherpa-onnx-prebuilt
+          prefix-key: v1-sherpa
+      - name: Build Windows applications
+        run: cargo build --locked --release -p notetaker-cli -p notetaker-asr-worker -p notetaker-app -j 2
+      - name: Package Windows applications
+        id: package
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: ./scripts/package-windows.ps1 -Version ($env:RELEASE_TAG.Substring(1))
+      - name: Create draft release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_ZIP: ${{ steps.package.outputs.zip }}
+          RELEASE_CHECKSUM: ${{ steps.package.outputs.checksum }}
+        run: |
+          gh release create $env:RELEASE_TAG $env:RELEASE_ZIP $env:RELEASE_CHECKSUM --verify-tag --draft --generate-notes --title "notetaker $env:RELEASE_TAG"
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub Release creation failed' }

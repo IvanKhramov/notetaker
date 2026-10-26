@@ -21,13 +21,19 @@ fn run() -> Result<()> {
     match args.as_slice() {
         [] => serve(&mut io::stdin().lock(), &mut io::stdout().lock()),
         [command, id] if command == "download" => models::download(id),
+        [command, id] if command == "check-model" => {
+            let root = models::models_dir()?;
+            models::installed(&root, models::manifest(id)?)?;
+            models::installed(&root, &models::SILERO)?;
+            Ok(())
+        }
         [flag] if flag == "--help" || flag == "-h" => {
             eprintln!(
-                "Usage: notetaker-asr [download <gigaam-v3|parakeet-v3|silero-vad>]\nWithout arguments: JSON-lines worker on stdin/stdout."
+                "Usage: notetaker-asr [download <gigaam-v3|parakeet-v3|silero-vad> | check-model <model_id>]\nWithout arguments: JSON-lines worker on stdin/stdout."
             );
             Ok(())
         }
-        _ => bail!("usage: notetaker-asr [download <model_id>]"),
+        _ => bail!("usage: notetaker-asr [download <model_id> | check-model <model_id>]"),
     }
 }
 

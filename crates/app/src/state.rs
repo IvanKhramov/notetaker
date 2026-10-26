@@ -176,6 +176,7 @@ pub struct AppState {
     pub templates: Vec<String>,
     pub enhancing: Option<PathBuf>,
     pub downloading: bool,
+    pub offer_model_download: bool,
     pub download_messages: VecDeque<String>,
     pub error: Option<String>,
     pub status: String,
@@ -220,6 +221,7 @@ impl AppState {
             templates: vec!["general".into()],
             enhancing: None,
             downloading: false,
+            offer_model_download: false,
             download_messages: VecDeque::new(),
             error: None,
             status: "Открываем библиотеку…".into(),
@@ -482,7 +484,9 @@ impl AppState {
                 settings,
                 llm,
                 warnings,
+                needs_model,
             } => {
+                self.offer_model_download = needs_model;
                 self.settings = settings.clone();
                 self.settings_draft = settings.clone();
                 self.llm_draft = llm;
@@ -648,7 +652,10 @@ impl AppState {
             Event::Downloaded(result) => {
                 self.downloading = false;
                 match result {
-                    Ok(()) => self.download_messages.push_back("Модель готова".into()),
+                    Ok(()) => {
+                        self.offer_model_download = false;
+                        self.download_messages.push_back("Модель готова".into());
+                    }
                     Err(error) => {
                         self.error = Some(error);
                         self.exit_requested = false;
