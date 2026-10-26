@@ -209,7 +209,8 @@ mod tests {
         }
     }
     fn fake(script: &str) -> Result<AsrClient, ClientError> {
-        AsrClient::spawn_command(fake_command(script), Duration::from_secs(5))
+        // Cold PowerShell start on CI runners can exceed several seconds.
+        AsrClient::spawn_command(fake_command(script), Duration::from_secs(30))
     }
     #[test]
     fn fake_worker_lifecycle() {
