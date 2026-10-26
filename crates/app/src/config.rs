@@ -1,0 +1,249 @@
+use std::{
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+};
+
+use anyhow::{Context, Result, ensure};
+use directories::{ProjectDirs, UserDirs};
+use notetaker_core::Mode;
+use serde::{Deserialize, Serialize};
+
+pub const MODELS: [&str; 2] = ["gigaam-v3", "parakeet-v3"];
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Settings {
+    pub library: PathBuf,
+    pub model: String,
+    pub mode: Mode,
+    /// None means forever, zero means after the successful final pass.
+    #[serde(default)]
+    pub retention_days: Option<u32>,
+    pub hotkey: String,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        let home = UserDirs::new();
+        let documents = home
+            .as_ref()
+            .map(|dirs| dirs.document_dir().unwrap_or(dirs.home_dir()).to_owned())
+            .unwrap_or_else(|| PathBuf::from("."));
+        Self {
+            library: documents.join("notetaker"),
+            model: MODELS[0].into(),
+            mode: Mode::Local,
+            retention_days: Some(7),
+            hotkey: "Ctrl+Alt+R".into(),
+        }
+    }
+}
+
+impl Settings {
+    pub fn path() -> Result<PathBuf> {
+        Ok(ProjectDirs::from("", "", "notetaker")
+            .context("Не найден каталог настроек")?
+            .config_dir()
+            .join("app.toml"))
+    }
+
+    pub fn load() -> Result<Self> {
+        let path = Self::path()?;
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let settings: Self =
+            toml::from_str(&fs::read_to_string(path)?).context("Некорректный app.toml")?;
+        settings.validate()?;
+        Ok(settings)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.library.is_absolute(),
+            "Путь библиотеки должен быть абсолютным"
+        );
+        ensure!(
+            MODELS.contains(&self.model.as_str()),
+            "Неизвестная модель ASR"
+        );
+        ensure!(
+            self.retention_days.is_none_or(|days| days <= 36_500),
+            "Срок хранения: 0–36500 дней или навсегда"
+        );
+        validate_hotkey(&self.hotkey)
+    }
+}
+
+// Keep the persisted schema identical to llm::Config without adding serialization
+// concerns to that crate. Config::parse is the authority for validation/privacy.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LlmSettings {
+    pub defaults: LlmDefaults,
+    pub providers: Vec<ProviderSettings>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LlmDefaults {
+    pub local: String,
+    pub hybrid: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProviderSettings {
+    pub id: String,
+    pub kind: String,
+    pub base_url: String,
+    pub model: String,
+    pub api_key_env: Option<String>,
+    pub context_tokens: usize,
+}
+
+impl Default for ProviderSettings {
+    fn default() -> Self {
+        Self {
+            id: "ollama".into(),
+            kind: "openai".into(),
+            base_url: "http://localhost:11434/v1".into(),
+            model: "qwen3:8b".into(),
+            api_key_env: None,
+            context_tokens: 32_768,
+        }
+    }
+}
+
+impl Default for LlmSettings {
+    fn default() -> Self {
+        Self {
+            defaults: LlmDefaults {
+                local: "ollama".into(),
+                hybrid: "ollama".into(),
+            },
+            providers: vec![ProviderSettings::default()],
+        }
+    }
+}
+
+impl LlmSettings {
+    pub fn load() -> Result<Self> {
+        let path = notetaker_llm::Config::path()?;
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        // Never echo config excerpts, including accidental secrets.
+        let text = fs::read_to_string(path)?;
+        notetaker_llm::Config::parse(&text)?;
+        toml::from_str(&text).map_err(|_| anyhow::anyhow!("Некорректный LLM config.toml"))
+    }
+
+    pub fn validate(&self) -> Result<String> {
+        for provider in &self.providers {
+            if let Some(name) = &provider.api_key_env {
+                ensure!(
+                    !name.is_empty()
+                        && name.chars().enumerate().all(|(i, c)| c == '_'
+                            || c.is_ascii_alphabetic()
+                            || (i > 0 && c.is_ascii_digit())),
+                    "api_key_env: укажите имя переменной окружения, например OPENAI_API_KEY"
+                );
+            }
+        }
+        let text = toml::to_string_pretty(self)?;
+        notetaker_llm::Config::parse(&text)?;
+        Ok(text)
+    }
+}
+
+pub fn atomic_write(path: &Path, text: &str) -> Result<()> {
+    let parent = path.parent().context("Нет родительского каталога")?;
+    fs::create_dir_all(parent)?;
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    file.write_all(text.as_bytes())?;
+    file.as_file().sync_all()?;
+    file.persist(path).map_err(|e| e.error)?;
+    Ok(())
+}
+
+pub fn validate_hotkey(value: &str) -> Result<()> {
+    let mut parts: Vec<_> = value.split('+').collect();
+    let key = parts.pop().unwrap_or_default();
+    ensure!(
+        !parts.is_empty(),
+        "Хоткей должен содержать модификатор, например Ctrl+Alt+R"
+    );
+    let mut seen = std::collections::HashSet::new();
+    for part in parts {
+        ensure!(
+            matches!(part, "Ctrl" | "Alt" | "Shift" | "Super") && seen.insert(part),
+            "Модификаторы: Ctrl, Alt, Shift, Super (без повторов)"
+        );
+    }
+    ensure!(
+        (key.len() == 1
+            && key
+                .bytes()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit()))
+            || key
+                .strip_prefix('F')
+                .and_then(|n| n.parse::<u8>().ok())
+                .is_some_and(|n| (1..=24).contains(&n)),
+        "Клавиша: A–Z, 0–9 или F1–F24"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn validates_settings_and_roundtrip() {
+        let mut settings = Settings {
+            library: PathBuf::from(if cfg!(windows) { "C:\\notes" } else { "/notes" }),
+            ..Settings::default()
+        };
+        assert!(settings.validate().is_ok());
+        let text = toml::to_string(&settings).unwrap();
+        assert_eq!(
+            toml::from_str::<Settings>(&text).unwrap().hotkey,
+            "Ctrl+Alt+R"
+        );
+        settings.retention_days = None;
+        let forever = toml::to_string(&settings).unwrap();
+        assert_eq!(
+            toml::from_str::<Settings>(&forever).unwrap().retention_days,
+            None
+        );
+        settings.retention_days = Some(0);
+        let immediate = toml::to_string(&settings).unwrap();
+        assert_eq!(
+            toml::from_str::<Settings>(&immediate)
+                .unwrap()
+                .retention_days,
+            Some(0)
+        );
+        settings.library = "relative".into();
+        assert!(settings.validate().is_err());
+        settings.library = std::env::current_dir().unwrap();
+        settings.model = "unknown".into();
+        assert!(settings.validate().is_err());
+        for key in ["R", "Ctrl+Ctrl+R", "Alt+", "Ctrl+F25", "Ctrl+é"] {
+            assert!(validate_hotkey(key).is_err(), "{key}");
+        }
+        for key in ["Ctrl+Alt+R", "Super+Shift+F12", "Alt+0"] {
+            assert!(validate_hotkey(key).is_ok(), "{key}");
+        }
+    }
+    #[test]
+    fn validates_llm_without_storing_keys() {
+        let mut config = LlmSettings::default();
+        assert!(config.validate().is_ok());
+        config.providers[0].base_url = "https://api.example.com/v1".into();
+        assert!(config.validate().is_err()); // local default cannot leave loopback
+        config.providers[0].base_url = "http://localhost:11434/v1".into();
+        config.providers[0].api_key_env = Some("sk-secret-value".into());
+        assert!(config.validate().is_err());
+        config.providers[0].api_key_env = Some("LLM_API_KEY".into());
+        assert!(config.validate().is_ok());
+    }
+}

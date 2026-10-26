@@ -3,8 +3,8 @@
 An open-source AI notebook for online meetings, inspired by Granola and written
 in Rust. Windows comes first, with macOS and Linux capture support planned.
 
-**Pre-alpha:** the workspace includes an empty desktop window and an isolated
-local ASR worker. Recording and AI note enhancement are not implemented yet.
+**Pre-alpha:** the desktop app and CLI support Windows recording, local ASR,
+meeting notes, transcript editing, search, and LLM note enhancement.
 See [the project plan](docs/PLAN.md) for architecture and milestones.
 
 ## Build
@@ -24,6 +24,66 @@ cargo run -p notetaker-app
 cargo run -p notetaker-cli -- --help
 cargo test --workspace -j 2
 ```
+
+## Desktop application
+
+Build `notetaker-app` and `notetaker-asr` together and keep the executables in the
+same directory (or set `NOTETAKER_ASR_BIN` to the worker's full path):
+
+```sh
+cargo build -p notetaker-app -p notetaker-asr-worker -j 2
+./target/debug/notetaker-app
+```
+
+Start a recording, choose a title, GigaAM v3 / Parakeet v3, Local / Hybrid,
+and an audio session or all system audio. Write Markdown notes during the call;
+notes save automatically. The transcript fills in live, then the final pass
+runs after Stop. Segment edits are available after the final pass and are saved
+atomically with `edited=true`. Use the Summary tab to select a built-in or
+`<library>/.templates/*.md` template and stream enhanced notes. Failed generation
+preserves the previous summary. Notes and summaries have edit/Markdown preview
+modes. Search uses the core FTS index, refreshed at startup, on Refresh/search,
+and after recording or enhancement.
+
+Settings include the library (Documents/notetaker by default), default model and
+mode, audio retention (0 / N days / forever), shortcut and LLM provider fields.
+Download buttons run `notetaker-asr download` off the UI thread and show download
+and installation stages for the model and Silero VAD. Missing workers/models
+produce an actionable error with a link to Settings. App settings use
+`ProjectDirs("", "", "notetaker").config_dir()/app.toml`; LLM settings use the
+separate `config.toml` described in [LLM setup](docs/llm.md). Enter API key
+environment variable names, never key values. Local meetings permit only
+loopback LLM providers; Hybrid allows remote providers. Model downloads are an
+explicit network operation in either mode. Audio retention applies to new
+recordings; expired audio is swept after a recording finishes.
+
+Windows has a tray menu, configurable global start/stop shortcut (Ctrl+Alt+R),
+and a small always-on-top recording window with timer and Stop. The shortcut
+starts immediately with the current recording options (defaults at startup);
+use New Recording to choose another audio session. Closing the main window
+hides it in the tray; double-click the icon to reopen, or use Exit to stop,
+finish transcription and flush pending saves. Other platforms can browse/edit
+libraries and enhance notes; live capture, tray and global shortcut are Windows
+only. No GTK/AppIndicator dependencies are added on Linux. See the native
+[tray-icon event-loop requirements](https://docs.rs/tray-icon/0.26.1/tray_icon/)
+and [global-hotkey requirements](https://docs.rs/global-hotkey/0.9.0/global_hotkey/):
+both integrations live on eframe's Win32 event-loop thread and wake egui through
+`Context::request_repaint` when native events arrive.
+
+The UI uses egui's embedded Ubuntu Light (Ubuntu Font Licence) and Hack
+(MIT / Bitstream Vera) fonts. Both include Cyrillic; a headless test checks the
+Russian alphabet including Ё/ё in proportional and monospace families. No extra
+font asset is bundled. Their licenses ship with
+[epaint_default_fonts](https://github.com/emilk/egui/tree/0.37.0/crates/epaint_default_fonts/fonts).
+Markdown uses `egui_commonmark` without image loaders, network fetching, or
+syntax-highlighting dependencies.
+
+Windows manual acceptance: record a Zoom/Teams/browser session, type and switch
+notes during capture, stop from the indicator/tray/shortcut, check final-pass
+progress and Me/Them segments, edit and reopen a transcript, stream a local and
+remote summary, verify shortcut conflict errors, hide/reopen/exit from the tray,
+and confirm the indicator stays above the call without taking keyboard focus.
+CI builds all three Windows binaries into `notetaker-windows-x64`.
 
 ## Local transcription
 

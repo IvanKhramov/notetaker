@@ -38,13 +38,16 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
-      - name: Build Windows probe
+      - name: Build Windows applications
         if: runner.os == 'Windows'
-        run: cargo build --release -p notetaker-cli -j 2
-      - name: Upload Windows CLI
+        run: cargo build --release -p notetaker-cli -p notetaker-asr-worker -p notetaker-app -j 2
+      - name: Upload Windows applications
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: notetaker-windows-x64
-          path: target/release/notetaker.exe
+          path: |
+            target/release/notetaker.exe
+            target/release/notetaker-asr.exe
+            target/release/notetaker-app.exe
           if-no-files-found: error
