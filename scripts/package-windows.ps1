@@ -20,7 +20,18 @@ try {
     $output = New-Item -ItemType Directory -Force $OutputDir
     # Fresh staging directory prevents stale executables/DLLs entering a later package.
     $stage = New-Item -ItemType Directory (Join-Path $output.FullName ([guid]::NewGuid().ToString()))
+    # CI runners include the redistributable; a successful launch there cannot
+    # prove that the package starts on a clean Windows installation.
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+    if (-not (Test-Path $vswhere)) { throw 'vswhere is required to verify static CRT linkage' }
+    $dumpbin = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC/Tools/MSVC/**/bin/Hostx64/x64/dumpbin.exe' | Select-Object -First 1
+    if ($LASTEXITCODE -ne 0 -or -not $dumpbin) { throw 'dumpbin is required to verify static CRT linkage' }
     foreach ($exe in 'notetaker-app.exe', 'notetaker.exe', 'notetaker-asr.exe') {
+        $dependencies = & $dumpbin /nologo /dependents (Join-Path $BinaryDir $exe) 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { throw "dumpbin failed for $exe" }
+        if ($dependencies -match '(?im)^\s*(?:vcruntime[^\s]*|msvcp[^\s]*|ucrtbase|api-ms-win-crt-[^\s]*)\.dll\s*$') {
+            throw "$exe imports a dynamic CRT: $($Matches[0].Trim())"
+        }
         Copy-Item (Join-Path $BinaryDir $exe) $stage.FullName
     }
     # Default CPU builds use static sherpa/onnxruntime. If a shared build places
