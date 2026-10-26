@@ -5,7 +5,7 @@
 //! A client processes one request at a time; channels are caller-owned labels.
 
 mod client;
-pub use client::{AsrClient, ClientError};
+pub use client::{AsrClient, CancellationHandle, ClientError};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};

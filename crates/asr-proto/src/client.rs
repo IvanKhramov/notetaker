@@ -4,9 +4,13 @@ use crate::{
 use std::{
     io::{self, BufReader},
     path::Path,
-    process::{Child, ChildStdin, Command, Stdio},
-    sync::mpsc::{self, Receiver},
-    thread,
+    process::{Child, Command, Stdio},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, Sender},
+    },
+    thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
@@ -24,12 +28,26 @@ pub enum ClientError {
     Worker(String),
 }
 
+/// Cancels an in-flight request; the owning client kills/reaps the worker.
+#[derive(Clone, Default)]
+pub struct CancellationHandle(Arc<AtomicBool>);
+impl CancellationHandle {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
 /// Owns and reaps a worker. Dropping the client also terminates a stuck worker.
-/// Responses are bounded by `timeout`; stderr is inherited, never parsed as JSON.
+/// One deadline covers serialization, stdin writes and all responses (including
+/// progress). stderr is inherited, never parsed as JSON.
 /// No ML dependency is linked into the caller.
 pub struct AsrClient {
     child: Child,
-    stdin: Option<ChildStdin>,
+    requests: Option<Sender<Request>>,
+    written: Receiver<io::Result<()>>,
+    writer: Option<JoinHandle<()>>,
+    deadline: Option<Instant>,
+    cancel: CancellationHandle,
     responses: Receiver<io::Result<Option<Response>>>,
     timeout: Duration,
 }
@@ -45,7 +63,18 @@ impl AsrClient {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()?;
-        let stdin = child.stdin.take();
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        let (requests_tx, requests_rx) = mpsc::channel();
+        let (written_tx, written) = mpsc::sync_channel(1);
+        let writer = thread::spawn(move || {
+            for request in requests_rx {
+                let result = write_message(&mut stdin, &request);
+                let done = result.is_err();
+                if written_tx.send(result).is_err() || done {
+                    break;
+                }
+            }
+        });
         let stdout = child.stdout.take().expect("piped stdout");
         let (tx, responses) = mpsc::sync_channel(8);
         thread::spawn(move || {
@@ -60,7 +89,11 @@ impl AsrClient {
         });
         let mut client = Self {
             child,
-            stdin,
+            requests: Some(requests_tx),
+            written,
+            writer: Some(writer),
+            deadline: None,
+            cancel: CancellationHandle::default(),
             responses,
             timeout,
         };
@@ -74,31 +107,61 @@ impl AsrClient {
         }
     }
 
+    pub fn cancellation_handle(&self) -> CancellationHandle {
+        self.cancel.clone()
+    }
+
     pub fn send(&mut self, request: &Request) -> Result<(), ClientError> {
+        let deadline = Instant::now() + self.timeout;
+        self.deadline = Some(deadline);
         if let Some(status) = self.child.try_wait()? {
             return Err(ClientError::Exited(status.to_string()));
         }
-        write_message(
-            self.stdin
-                .as_mut()
-                .ok_or_else(|| ClientError::Protocol("stdin closed".into()))?,
-            request,
-        )?;
-        Ok(())
+        self.requests
+            .as_ref()
+            .ok_or_else(|| ClientError::Protocol("stdin closed".into()))?
+            .send(request.clone())
+            .map_err(|_| ClientError::Exited("stdin closed".into()))?;
+        let result = wait_until(&self.written, deadline, &self.cancel.0);
+        match self.enforce_deadline(result)? {
+            Ok(()) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     pub fn receive(&mut self) -> Result<Response, ClientError> {
-        match self.responses.recv_timeout(self.timeout) {
-            Ok(Ok(Some(response))) => Ok(response),
-            Ok(Ok(None)) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+        let deadline = *self
+            .deadline
+            .get_or_insert_with(|| Instant::now() + self.timeout);
+        let result = wait_until(&self.responses, deadline, &self.cancel.0);
+        match self.enforce_deadline(result)? {
+            Ok(Some(response)) => Ok(response),
+            Ok(None) => {
                 let status = self
                     .child
                     .try_wait()?
                     .map_or_else(|| "stdout closed".into(), |s| s.to_string());
                 Err(ClientError::Exited(status))
             }
-            Ok(Err(e)) => Err(e.into()),
-            Err(mpsc::RecvTimeoutError::Timeout) => Err(ClientError::Timeout),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn enforce_deadline<T>(&mut self, result: Result<T, ClientError>) -> Result<T, ClientError> {
+        if matches!(result, Err(ClientError::Timeout)) {
+            self.terminate();
+        }
+        result
+    }
+
+    fn terminate(&mut self) {
+        self.requests.take();
+        // Closing stdin alone cannot interrupt write_all. Killing its reader
+        // breaks the pipe first, then the writer can be joined safely.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if let Some(writer) = self.writer.take() {
+            let _ = writer.join();
         }
     }
 
@@ -160,7 +223,7 @@ impl AsrClient {
 
     pub fn shutdown(mut self) -> Result<(), ClientError> {
         self.send(&Request::Shutdown)?;
-        self.stdin.take();
+        self.requests.take();
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             if let Some(status) = self.child.try_wait()? {
@@ -180,9 +243,28 @@ impl AsrClient {
 
 impl Drop for AsrClient {
     fn drop(&mut self) {
-        self.stdin.take();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.requests.take();
+        self.terminate();
+    }
+}
+
+fn wait_until<T>(
+    receiver: &Receiver<T>,
+    deadline: Instant,
+    cancel: &AtomicBool,
+) -> Result<T, ClientError> {
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() || cancel.load(Ordering::Acquire) {
+            return Err(ClientError::Timeout);
+        }
+        match receiver.recv_timeout(remaining.min(Duration::from_millis(20))) {
+            Ok(value) => return Ok(value),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(ClientError::Exited("pipe closed".into()));
+            }
+        }
     }
 }
 
@@ -273,5 +355,59 @@ mod tests {
         drop(c);
         #[cfg(target_os = "linux")]
         assert!(!Path::new(&format!("/proc/{pid}")).exists());
+    }
+    #[test]
+    fn unread_stdin_times_out_for_large_requests_and_reaps_worker() {
+        #[cfg(unix)]
+        let script = r#"echo '{"type":"ready","protocol_version":1}'; exec sleep 2"#;
+        #[cfg(windows)]
+        let script = r#"echo '{"type":"ready","protocol_version":1}'; Start-Sleep -Seconds 5"#;
+        let mut client = fake(script).unwrap();
+        client.timeout = Duration::from_millis(200);
+        let input = AudioInput::pcm(&vec![0.1; 1_000_000]);
+        let start = Instant::now();
+        let result = client.transcribe("blocked", input, "mic", 0);
+        assert!(matches!(result, Err(ClientError::Timeout)), "{result:?}");
+        assert!(start.elapsed() < Duration::from_secs(3));
+        assert!(client.child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn cancellation_interrupts_blocked_stdin_and_joins_writer() {
+        #[cfg(unix)]
+        let script = r#"echo '{"type":"ready","protocol_version":1}'; exec sleep 5"#;
+        #[cfg(windows)]
+        let script = r#"echo '{"type":"ready","protocol_version":1}'; Start-Sleep -Seconds 5"#;
+        let mut client = fake(script).unwrap();
+        let cancel = client.cancellation_handle();
+        let thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            cancel.cancel();
+        });
+        let start = Instant::now();
+        assert!(matches!(
+            client.transcribe("blocked", AudioInput::pcm(&vec![0.1; 1_000_000]), "mic", 0),
+            Err(ClientError::Timeout)
+        ));
+        thread.join().unwrap();
+        assert!(start.elapsed() < Duration::from_secs(3));
+        assert!(client.writer.is_none());
+        assert!(client.child.try_wait().unwrap().is_some());
+    }
+    #[test]
+    fn progress_cannot_extend_request_deadline() {
+        #[cfg(unix)]
+        let script = r#"echo '{"type":"ready","protocol_version":1}'; read -r request; while true; do echo '{"type":"progress","id":"p","fraction":0.5}'; sleep 0.02; done"#;
+        #[cfg(windows)]
+        let script = r#"echo '{"type":"ready","protocol_version":1}'; read -r request; while ($true) { echo '{"type":"progress","id":"p","fraction":0.5}'; Start-Sleep -Milliseconds 20 }"#;
+        let mut client = fake(script).unwrap();
+        client.timeout = Duration::from_millis(200);
+        let start = Instant::now();
+        assert!(matches!(
+            client.transcribe("p", AudioInput::pcm(&[]), "mic", 0),
+            Err(ClientError::Timeout)
+        ));
+        assert!(start.elapsed() < Duration::from_secs(3));
+        assert!(client.child.try_wait().unwrap().is_some());
     }
 }
