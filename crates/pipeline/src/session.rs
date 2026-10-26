@@ -57,6 +57,7 @@ pub enum PipelineEvent {
     /// Capture stopped for silence; final transcription and Finished follow.
     AutoStopped,
     CaptureEvent(CaptureEvent),
+    CaptureIssue(notetaker_core::CaptureIssue),
     Error(String),
     FinalPassProgress {
         completed: usize,
@@ -273,7 +274,17 @@ fn record(
         for (i, source) in sources.0.iter_mut().enumerate() {
             if let Err(error) = source.start(tx.clone()) {
                 stopped[i] = true;
-                let _ = events.send(PipelineEvent::Error(format!("capture start: {error:#}")));
+                capture_issue(
+                    meeting,
+                    if i == 0 {
+                        Channel::Mic
+                    } else {
+                        Channel::System
+                    },
+                    0,
+                    format!("capture start: {error:#}"),
+                    events,
+                )?;
             }
         }
         drop(tx);
@@ -283,7 +294,14 @@ fn record(
                 explicit_end = Some(sample_position(origin.elapsed()));
                 sources.stop(events);
                 for message in rx.try_iter() {
-                    capture(message, &mut tracks, &queue, &jobs_tx, &mut stopped)?;
+                    capture(
+                        message,
+                        meeting,
+                        &mut tracks,
+                        &queue,
+                        &jobs_tx,
+                        &mut stopped,
+                    )?;
                 }
                 break;
             }
@@ -295,7 +313,14 @@ fn record(
                     if let CaptureMessage::Frame(frame) = &message {
                         silence.observe(origin.elapsed(), frame);
                     }
-                    capture(message, &mut tracks, &queue, &jobs_tx, &mut stopped)?;
+                    capture(
+                        message,
+                        meeting,
+                        &mut tracks,
+                        &queue,
+                        &jobs_tx,
+                        &mut stopped,
+                    )?;
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -400,6 +425,7 @@ impl SilenceTimer {
 
 fn capture(
     message: CaptureMessage,
+    meeting: &Meeting,
     tracks: &mut [Track; 2],
     queue: &Queue,
     jobs: &Sender<Job>,
@@ -413,12 +439,43 @@ fn capture(
             })?;
         }
         CaptureMessage::Event(event) => {
+            if let CaptureEvent::Error { channel, message } = &event {
+                capture_issue(
+                    meeting,
+                    *channel,
+                    tracks[channel_index(*channel)].position() * 1000 / u64::from(SAMPLE_RATE),
+                    message.clone(),
+                    &queue.events,
+                )?;
+            }
             if let CaptureEvent::Stopped { channel } = &event {
                 stopped[channel_index(*channel)] = true;
             }
             let _ = queue.events.send(PipelineEvent::CaptureEvent(event));
         }
     }
+    Ok(())
+}
+
+fn capture_issue(
+    meeting: &Meeting,
+    channel: Channel,
+    from_ms: u64,
+    reason: String,
+    events: &Sender<PipelineEvent>,
+) -> Result<()> {
+    let issue = notetaker_core::CaptureIssue {
+        channel: match channel {
+            Channel::Mic => notetaker_core::Channel::Mic,
+            Channel::System => notetaker_core::Channel::System,
+        },
+        from_ms,
+        reason,
+    };
+    let mut meta = meeting.read_meta()?;
+    meta.capture_issues.push(issue.clone());
+    meeting.write_meta(&meta)?;
+    let _ = events.send(PipelineEvent::CaptureIssue(issue));
     Ok(())
 }
 

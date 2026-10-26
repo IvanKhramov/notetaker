@@ -5,8 +5,8 @@ mod storage;
 
 pub use index::Hit;
 pub use model::{
-    Channel, MeetingMeta, Mode, SCHEMA_VERSION, Segment, Source, SpeakerId, Transcript,
-    migrate_transcript,
+    CaptureIssue, Channel, MeetingMeta, Mode, SCHEMA_VERSION, Segment, Source, SpeakerId,
+    Transcript, migrate_transcript,
 };
 pub use storage::{Library, Meeting};
 

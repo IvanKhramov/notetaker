@@ -100,3 +100,72 @@ pub(crate) fn send(
         }
     }
 }
+
+/// Retry each interruption on the default device, but stop if that attempt
+/// cannot reach a healthy drain. A later device change gets its own retry.
+#[cfg(any(windows, test))]
+pub(crate) fn recover_default(
+    mut run: impl FnMut(bool, &mut bool) -> Result<()>,
+    mut interrupted: impl FnMut(&anyhow::Error),
+) -> Result<()> {
+    let mut use_default = false;
+    loop {
+        let mut healthy = false;
+        match run(use_default, &mut healthy) {
+            Err(error) if !use_default || healthy => {
+                interrupted(&error);
+                use_default = true;
+            }
+            result => return result,
+        }
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+
+    #[test]
+    fn each_device_change_reopens_but_failed_default_is_not_retried_forever() {
+        let mut attempts = Vec::new();
+        let mut issues = 0;
+        let result = recover_default(
+            |default, healthy| {
+                attempts.push(default);
+                *healthy = attempts.len() < 3;
+                Err(anyhow!(if *healthy {
+                    "device changed"
+                } else {
+                    "no default device"
+                }))
+            },
+            |_| issues += 1,
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("no default device")
+        );
+        assert_eq!(attempts, [false, true, true]);
+        assert_eq!(issues, 2);
+    }
+
+    #[test]
+    fn initial_open_failure_can_recover_on_default() {
+        let mut attempts = 0;
+        recover_default(
+            |default, _| {
+                attempts += 1;
+                if default {
+                    Ok(())
+                } else {
+                    Err(anyhow!("selected microphone removed"))
+                }
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(attempts, 2);
+    }
+}

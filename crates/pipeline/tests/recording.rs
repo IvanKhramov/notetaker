@@ -630,3 +630,53 @@ fn silence_auto_stop_can_be_disabled() {
     ));
     session.wait().unwrap();
 }
+
+#[test]
+fn failed_channel_is_persisted_as_incomplete_capture() {
+    struct Failed;
+    impl AudioSource for Failed {
+        fn start(&mut self, _: mpsc::SyncSender<notetaker_capture::CaptureMessage>) -> Result<()> {
+            bail!("microphone disconnected");
+        }
+        fn stop(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    wav(&dir.path().join("system.wav"), 3200);
+    let session = RecordingSession::start_with_asr(
+        Library::open(dir.path().join("library")).unwrap(),
+        MeetingMeta::new("Failure", Utc::now()),
+        [
+            Box::new(Failed),
+            Box::new(FileSource::new(
+                dir.path().join("system.wav"),
+                Channel::System,
+                PlaybackPace::Accelerated,
+            )),
+        ],
+        Fake {
+            stats: Arc::new(Mutex::new(Stats::default())),
+            crashes: vec![],
+            gate: None,
+        },
+        config(),
+    )
+    .unwrap();
+    let meeting = session.meeting().clone();
+    let mut issues = Vec::new();
+    while let Ok(event) = session.events().recv_timeout(Duration::from_secs(5)) {
+        match event {
+            PipelineEvent::CaptureIssue(issue) => issues.push(issue),
+            PipelineEvent::Finished { .. } => break,
+            _ => {}
+        }
+    }
+    session.wait().unwrap();
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].channel, notetaker_core::Channel::Mic);
+    let meta = std::fs::read_to_string(meeting.path().join("meta.yaml")).unwrap();
+    assert!(meta.contains("capture_issues:"), "{meta}");
+    assert!(meta.contains("microphone disconnected"), "{meta}");
+    assert!(meta.contains("from_ms: 0"), "{meta}");
+}

@@ -44,6 +44,7 @@ pub struct Recording {
     pub lag: f64,
     pub live_disabled: bool,
     pub fallback: bool,
+    pub capture_incomplete: bool,
     pub progress: Option<(usize, usize)>,
     pub messages: VecDeque<String>,
 }
@@ -65,6 +66,15 @@ impl Recording {
         match event {
             PipelineEvent::Lag { seconds } => self.lag = *seconds,
             PipelineEvent::LiveDisabled => self.live_disabled = true,
+            PipelineEvent::CaptureIssue(issue) => {
+                self.capture_incomplete = true;
+                self.message(format!(
+                    "Неполный захват {} с {}: {}",
+                    speaker(issue.channel),
+                    timestamp(issue.from_ms),
+                    issue.reason
+                ));
+            }
             PipelineEvent::FinalPassProgress { completed, total } => {
                 if self.stopped.is_none() {
                     self.stopped = Some(self.elapsed());
@@ -577,6 +587,15 @@ impl AppState {
             }
             Event::Pipeline(event) => {
                 self.recording.apply(&event);
+                if let PipelineEvent::CaptureIssue(issue) = &event
+                    && let Some(doc) = self
+                        .recording
+                        .path
+                        .as_ref()
+                        .and_then(|p| self.documents.get_mut(p))
+                {
+                    doc.data.meta.capture_issues.push(issue.clone());
+                }
                 if let PipelineEvent::LiveSegments(segments) = event
                     && let Some(doc) = self
                         .recording
@@ -773,6 +792,12 @@ mod tests {
             reason: notetaker_capture::FallbackReason::ProcessSilent,
         }));
         assert!(recording.fallback);
+        recording.apply(&PipelineEvent::CaptureIssue(notetaker_core::CaptureIssue {
+            channel: Channel::Mic,
+            from_ms: 1000,
+            reason: "device removed".into(),
+        }));
+        assert!(recording.capture_incomplete);
         recording.apply(&PipelineEvent::Error("worker failed".into()));
         assert!(recording.busy());
         recording.apply(&PipelineEvent::FinalPassProgress {

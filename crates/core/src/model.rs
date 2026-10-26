@@ -17,12 +17,15 @@ pub struct MeetingMeta {
     pub template: Option<String>,
     /// `None` keeps audio indefinitely; a timestamp at/before now expires it.
     pub audio_expires_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capture_issues: Vec<CaptureIssue>,
 }
 
 impl MeetingMeta {
     /// Create a local meeting with a UUID v7 and seven-day audio retention.
     pub fn new(title: impl Into<String>, started_at: DateTime<Utc>) -> Self {
         Self {
+            capture_issues: Vec::new(),
             id: Uuid::now_v7(),
             title: title.into(),
             started_at,
@@ -99,4 +102,12 @@ pub fn migrate_transcript(value: serde_json::Value) -> Result<Transcript> {
         return Err(Error::UnsupportedVersion(version));
     }
     Ok(serde_json::from_value(value)?)
+}
+
+/// A channel could not be captured continuously from this offset.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureIssue {
+    pub channel: Channel,
+    pub from_ms: u64,
+    pub reason: String,
 }

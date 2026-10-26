@@ -188,6 +188,17 @@ impl NotetakerApp {
             return;
         };
         ui.heading(&document.data.meta.title);
+        for issue in &document.data.meta.capture_issues {
+            ui.colored_label(
+                Color32::YELLOW,
+                format!(
+                    "Неполный захват {} с {}: {}",
+                    speaker(issue.channel),
+                    timestamp(issue.from_ms),
+                    issue.reason
+                ),
+            );
+        }
         ui.horizontal(|ui| {
             ui.small(
                 document
@@ -483,6 +494,9 @@ impl NotetakerApp {
                         .clicked();
                     dismiss = ui.button("Не сейчас").clicked();
                 });
+                if self.state.recording.capture_incomplete {
+                    ui.colored_label(Color32::YELLOW, "⚠ Неполный захват звука");
+                }
                 if ui.input(|input| input.viewport().close_requested()) {
                     dismiss = true;
                     ui.ctx()
@@ -505,7 +519,7 @@ impl NotetakerApp {
             egui::ViewportId::from_hash_of("recording-indicator"),
             egui::ViewportBuilder::default()
                 .with_title("notetaker · запись")
-                .with_inner_size([260.0, 88.0])
+                .with_inner_size([280.0, 112.0])
                 .with_resizable(false)
                 .with_window_level(egui::WindowLevel::AlwaysOnTop)
                 .with_close_button(false)
@@ -528,6 +542,9 @@ impl NotetakerApp {
                     Phase::Finalizing => "Чистовой проход…",
                     _ => "Идёт запись",
                 });
+                if self.state.recording.capture_incomplete {
+                    ui.colored_label(Color32::YELLOW, "⚠ Неполный захват звука");
+                }
                 if ui.input(|input| input.viewport().close_requested()) {
                     ui.ctx()
                         .send_viewport_cmd(egui::ViewportCommand::CancelClose);

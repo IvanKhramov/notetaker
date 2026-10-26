@@ -104,6 +104,7 @@ pub fn run(args: Args) -> Result<()> {
             }
             PipelineEvent::Error(error) => eprintln!("Error: {error}"),
             PipelineEvent::CaptureEvent(event) => eprintln!("Capture: {event:?}"),
+            PipelineEvent::CaptureIssue(issue) => eprintln!("Incomplete capture: {issue:?}"),
             PipelineEvent::FinalPassProgress { completed, total } => {
                 eprintln!("Final pass: {completed}/{total}")
             }

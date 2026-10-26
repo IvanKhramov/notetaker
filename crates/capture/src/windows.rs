@@ -19,7 +19,7 @@ use windows::Win32::Media::Audio::{
 };
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 
-use crate::source::send;
+use crate::source::{recover_default, send};
 use crate::{
     AudioFrame, AudioSource, CaptureEvent, CaptureMessage, Channel, DeviceInfo, FallbackPolicy,
     FallbackReason, Inventory, LevelMeter, LiveOptions, Normalizer, ProcessInfo, SILENCE_DBFS,
@@ -133,10 +133,41 @@ impl AudioSource for LiveSource {
             let _apartment = Apartment::enter()?;
             let clock = Clock::new(options.origin)?;
             let enumerator = DeviceEnumerator::new()?;
-            match channel {
-                Channel::Mic => capture_mic(&enumerator, &options, &clock, stop, sender),
-                Channel::System => capture_system(&enumerator, &options, &clock, stop, sender),
-            }
+            let defaults = LiveOptions {
+                microphone_id: None,
+                process_id: None,
+                ..options.clone()
+            };
+            recover_default(
+                |use_default, healthy| {
+                    let options = if use_default { &defaults } else { &options };
+                    let result = match channel {
+                        Channel::Mic => {
+                            capture_mic(&enumerator, options, &clock, stop, sender, healthy)
+                        }
+                        Channel::System => {
+                            capture_system(&enumerator, options, &clock, stop, sender, healthy)
+                        }
+                    };
+                    if stop.load(Ordering::Relaxed) {
+                        Ok(())
+                    } else {
+                        result
+                    }
+                },
+                |error| {
+                    send(
+                        sender,
+                        stop,
+                        CaptureMessage::Event(CaptureEvent::Error {
+                            channel,
+                            message: format!(
+                                "capture interrupted; reopening default device: {error:#}"
+                            ),
+                        }),
+                    );
+                },
+            )
         })
     }
     fn stop(&mut self) -> Result<()> {
@@ -360,6 +391,7 @@ fn capture_mic(
     clock: &Clock,
     stop: &AtomicBool,
     sender: &SyncSender<CaptureMessage>,
+    healthy: &mut bool,
 ) -> Result<()> {
     let device = match &options.microphone_id {
         Some(id) => enumerator.get_device(id)?,
@@ -373,7 +405,9 @@ fn capture_mic(
     let mut stream = Stream::endpoint(&device).context("open microphone")?;
     let mut checked = Instant::now();
     while !stop.load(Ordering::Relaxed) {
-        for frame in stream.drain(Channel::Mic, clock, sender, stop)? {
+        let frames = stream.drain(Channel::Mic, clock, sender, stop)?;
+        *healthy = true;
+        for frame in frames {
             if !send(sender, stop, CaptureMessage::Frame(frame)) {
                 return Ok(());
             }
@@ -395,6 +429,7 @@ fn capture_system(
     clock: &Clock,
     stop: &AtomicBool,
     sender: &SyncSender<CaptureMessage>,
+    healthy: &mut bool,
 ) -> Result<()> {
     // Monitor the real endpoint concurrently, never infer its activity from the
     // process stream or a historical session peak (the Teams/WebView2 failure).
@@ -423,6 +458,7 @@ fn capture_system(
     let started = Instant::now();
     while !stop.load(Ordering::Relaxed) {
         let endpoint_frames = endpoint.drain(Channel::System, clock, sender, stop)?;
+        *healthy = true;
         let mut process_frames = Vec::new();
         if let Some(stream) = &mut process {
             match stream.drain(Channel::System, clock, sender, stop) {
