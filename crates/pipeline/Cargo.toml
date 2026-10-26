@@ -6,3 +6,16 @@ license.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["now"] }
+hound = "3.5"
+notetaker-asr-proto = { path = "../asr-proto" }
+notetaker-capture = { path = "../capture" }
+notetaker-core = { path = "../core" }
+uuid = { version = "1", features = ["v7"] }
+
+[dev-dependencies]
+directories = "6"
+tempfile = "3"

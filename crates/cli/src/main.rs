@@ -2,6 +2,7 @@
 
 mod cmd_enhance;
 mod cmd_probe;
+mod cmd_record;
 mod cmd_transcribe;
 
 use clap::{Parser, Subcommand};
@@ -19,6 +20,8 @@ enum Command {
     Probe(cmd_probe::Args),
     /// Expand user notes using a transcript, template and configured LLM.
     Enhance(cmd_enhance::Args),
+    /// Record a meeting and transcribe both audio tracks locally.
+    Record(cmd_record::Args),
     /// Transcribe a mono WAV using the isolated local ASR worker.
     Transcribe(cmd_transcribe::Args),
 }
@@ -27,6 +30,7 @@ fn main() -> anyhow::Result<()> {
     match Args::parse().command {
         Command::Probe(args) => cmd_probe::run(args),
         Command::Enhance(args) => cmd_enhance::run(args),
+        Command::Record(args) => cmd_record::run(args),
         Command::Transcribe(args) => cmd_transcribe::run(args),
     }
 }

@@ -321,7 +321,7 @@ fn consume(
     Ok(())
 }
 
-fn select_app(devices: &Inventory, app: &str) -> Result<u32> {
+pub(crate) fn select_app(devices: &Inventory, app: &str) -> Result<u32> {
     let matches: Vec<_> = devices
         .processes
         .iter()
