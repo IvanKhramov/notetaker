@@ -362,11 +362,11 @@ fn error_text(error: anyhow::Error) -> String {
 }
 fn list(root: &Path, query: &str) -> Result<Vec<MeetingRow>> {
     let library = Library::open(root)?;
-    library.reindex_incremental()?;
     let mut rows = Vec::new();
     let hits = if query.trim().is_empty() {
         None
     } else {
+        library.reindex_incremental()?;
         Some(library.search(query, 500)?)
     };
     for meeting in library.list_meetings()? {
@@ -605,6 +605,20 @@ mod tests {
             .find(|p| p.to_string_lossy().contains("notes.conflict-"))
             .unwrap();
         assert_eq!(fs::read_to_string(conflict).unwrap(), "local");
+    }
+    #[test]
+    fn meeting_list_does_not_require_transcripts_or_a_working_index() {
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open(root.path()).unwrap();
+        let meeting = library
+            .create_meeting(MeetingMeta::new("Visible", Utc::now()))
+            .unwrap();
+        fs::write(meeting.path().join("transcript.json"), "invalid JSON").unwrap();
+        // A directory here makes opening/removing the index impossible.
+        fs::create_dir_all(library.index_path()).unwrap();
+        let rows = list(root.path(), "").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].meta.title, "Visible");
     }
     #[test]
     fn storage_save_search_and_reopen() {

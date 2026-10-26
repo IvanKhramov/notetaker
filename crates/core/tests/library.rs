@@ -313,15 +313,24 @@ fn sweep_removes_only_expired_audio_and_is_idempotent() {
 }
 
 #[test]
-fn failed_rebuild_keeps_previous_index_transactionally() {
+fn rebuild_skips_corrupt_transcripts_and_removes_stale_search_hits() {
     let (_directory, library) = fixture();
     let meeting = library.create_meeting(meta("Original")).unwrap();
+    let healthy = library.create_meeting(meta("Healthy neighbor")).unwrap();
     library.reindex_full().unwrap();
     meeting.write_notes("newword").unwrap();
     fs::write(meeting.path().join("transcript.json"), "invalid json").unwrap();
-    assert!(library.reindex_full().is_err());
-    assert_eq!(library.search("original", 10).unwrap().len(), 1);
+    library.reindex_incremental().unwrap();
+    assert!(library.search("original", 10).unwrap().is_empty());
+    library.reindex_full().unwrap();
+    assert_eq!(
+        library.search("healthy", 10).unwrap()[0].path,
+        healthy.path()
+    );
     assert!(library.search("newword", 10).unwrap().is_empty());
+    meeting.write_transcript(&Transcript::default()).unwrap();
+    library.reindex_incremental().unwrap();
+    assert_eq!(library.search("newword", 10).unwrap().len(), 1);
 }
 
 #[test]
@@ -450,4 +459,22 @@ fn sweep_includes_failed_final_work_but_never_active_recordings() {
     assert!(active.path().join("audio/.work/mic.wav").exists());
     assert!(active.mic_audio_path().exists());
     assert!(library.sweep_audio(now).unwrap().is_empty());
+}
+
+#[test]
+fn corrupt_or_incompatible_index_is_discarded_and_rebuilt() {
+    let (_dir, library) = fixture();
+    library.create_meeting(meta("Recoverable")).unwrap();
+    library.reindex_full().unwrap();
+    fs::write(library.index_path(), b"not a SQLite database").unwrap();
+    library.reindex_incremental().unwrap();
+    assert_eq!(library.search("recoverable", 10).unwrap().len(), 1);
+    fs::remove_file(library.index_path()).unwrap();
+    let connection = rusqlite::Connection::open(library.index_path()).unwrap();
+    connection
+        .execute_batch("CREATE TABLE meetings (wrong_column TEXT);")
+        .unwrap();
+    drop(connection);
+    library.reindex_incremental().unwrap();
+    assert_eq!(library.search("recoverable", 10).unwrap().len(), 1);
 }

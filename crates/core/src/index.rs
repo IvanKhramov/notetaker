@@ -1,4 +1,9 @@
-use std::{collections::HashMap, fs, path::PathBuf, time::Duration};
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use rusqlite::{Connection, params};
 use uuid::Uuid;
@@ -75,16 +80,15 @@ impl Library {
     fn open_index(&self) -> Result<Connection> {
         let path = self.index_path();
         fs::create_dir_all(path.parent().expect("index has a parent"))?;
-        let connection = Connection::open(path)?;
-        connection.busy_timeout(Duration::from_secs(5))?;
-        connection.execute_batch(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS meetings USING fts5(
-                meeting_id UNINDEXED, path UNINDEXED, stamp UNINDEXED,
-                title, notes, enhanced, transcript,
-                tokenize = 'unicode61 remove_diacritics 2'
-            );",
-        )?;
-        Ok(connection)
+        match connect_index(&path) {
+            Ok(connection) => Ok(connection),
+            Err(error) if disposable_index_error(&error) => {
+                tracing::warn!(path = %path.display(), %error, "recreating invalid search index");
+                fs::remove_file(&path)?;
+                connect_index(&path)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn reindex(&self, full: bool) -> Result<()> {
@@ -100,27 +104,38 @@ impl Library {
                 .collect::<std::result::Result<_, _>>()?
         };
         for meeting in self.list_meetings()? {
-            let path = meeting.path.to_str().ok_or_else(|| {
-                Error::InvalidIndex(format!(
-                    "meeting path is not UTF-8: {}",
-                    meeting.path.display()
-                ))
-            })?;
-            // Capture before reading: edits during indexing will be seen next time.
-            let stamp = source_stamp(&meeting)?;
-            if existing.remove(path).as_deref() == Some(stamp.as_str()) {
+            let Some(path) = meeting.path.to_str() else {
+                tracing::warn!(path = %meeting.path.display(), "skipping non-UTF8 meeting path");
                 continue;
-            }
-            let meta = meeting.read_meta()?;
-            let notes = meeting.read_notes()?;
-            let enhanced = meeting.read_enhanced()?;
-            let transcript = meeting
-                .read_transcript()?
-                .segments
-                .into_iter()
-                .map(|segment| segment.text)
-                .collect::<Vec<_>>()
-                .join("\n");
+            };
+            let previous = existing.remove(path);
+            let contents = (|| -> Result<_> {
+                // Capture before reading: edits during indexing are seen next time.
+                let stamp = source_stamp(&meeting)?;
+                if previous.as_deref() == Some(stamp.as_str()) {
+                    return Ok(None);
+                }
+                let meta = meeting.read_meta()?;
+                let notes = meeting.read_notes()?;
+                let enhanced = meeting.read_enhanced()?;
+                let transcript = meeting
+                    .read_transcript()?
+                    .segments
+                    .into_iter()
+                    .map(|segment| segment.text)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                Ok(Some((stamp, meta, notes, enhanced, transcript)))
+            })();
+            let (stamp, meta, notes, enhanced, transcript) = match contents {
+                Ok(Some(contents)) => contents,
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::warn!(%path, %error, "skipping invalid meeting during indexing");
+                    transaction.execute("DELETE FROM meetings WHERE path = ?1", [path])?;
+                    continue;
+                }
+            };
             transaction.execute("DELETE FROM meetings WHERE path = ?1", [path])?;
             transaction.execute(
                 "INSERT INTO meetings (meeting_id, path, stamp, title, notes, enhanced, transcript)
@@ -155,4 +170,46 @@ fn source_stamp(meeting: &Meeting) -> Result<String> {
         stamps.push(stamp);
     }
     Ok(serde_json::to_string(&stamps)?)
+}
+
+fn connect_index(path: &Path) -> Result<Connection> {
+    let connection = Connection::open(path)?;
+    connection.busy_timeout(Duration::from_secs(5))?;
+    connection.execute_batch(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS meetings USING fts5(
+            meeting_id UNINDEXED, path UNINDEXED, stamp UNINDEXED,
+            title, notes, enhanced, transcript,
+            tokenize = 'unicode61 remove_diacritics 2'
+        );",
+    )?;
+    connection.prepare(
+        "SELECT meeting_id, path, stamp, title, notes, enhanced, transcript FROM meetings LIMIT 0",
+    )?;
+    let schema: String = connection.query_row(
+        "SELECT sql FROM sqlite_master WHERE name = 'meetings'",
+        [],
+        |row| row.get(0),
+    )?;
+    if !schema.to_ascii_lowercase().contains("using fts5(") {
+        return Err(Error::InvalidIndex("meetings is not an FTS5 table".into()));
+    }
+    let integrity: String = connection.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
+    if integrity != "ok" {
+        return Err(Error::InvalidIndex(integrity));
+    }
+    Ok(connection)
+}
+
+fn disposable_index_error(error: &Error) -> bool {
+    match error {
+        Error::InvalidIndex(_) | Error::Sqlite(rusqlite::Error::SqlInputError { .. }) => true,
+        Error::Sqlite(rusqlite::Error::SqliteFailure(code, _)) => matches!(
+            code.extended_code & 0xff,
+            rusqlite::ffi::SQLITE_CORRUPT
+                | rusqlite::ffi::SQLITE_NOTADB
+                | rusqlite::ffi::SQLITE_SCHEMA
+                | rusqlite::ffi::SQLITE_ERROR
+        ),
+        _ => false, // Busy, permissions and I/O failures must not discard an index.
+    }
 }
