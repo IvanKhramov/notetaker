@@ -79,6 +79,13 @@ impl Recording {
             PipelineEvent::CaptureEvent(
                 CaptureEvent::Discontinuity { .. } | CaptureEvent::TimestampError { .. },
             ) => self.message("Разрыв звука / ошибка временной метки".into()),
+            PipelineEvent::AutoStopped => {
+                if self.stopped.is_none() {
+                    self.stopped = Some(self.elapsed());
+                }
+                self.phase = Phase::Finalizing;
+                self.message("Запись остановлена: долгая тишина".into());
+            }
             // Finished means the pipeline is done; RecordDone follows wait() and
             // the final reload. Keep editing locked until that reload arrives.
             PipelineEvent::Finished { .. }
