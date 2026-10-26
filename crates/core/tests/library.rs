@@ -274,9 +274,11 @@ fn sweep_removes_only_expired_audio_and_is_idempotent() {
     let (_directory, library) = fixture();
     let now = meta("clock").started_at;
     let mut expired = meta("Expired");
+    expired.ended_at = Some(now);
     expired.audio_expires_at = Some(now);
     let expired = library.create_meeting(expired).unwrap();
     let mut future = meta("Future");
+    future.ended_at = Some(now);
     future.audio_expires_at = Some(now + chrono::Duration::days(1));
     let future = library.create_meeting(future).unwrap();
     let mut forever = meta("Forever");
@@ -424,4 +426,28 @@ fn transcript_updates_serialize_across_separately_opened_meeting_handles() {
         .unwrap_err();
     assert!(matches!(error, Error::Conflict { .. }));
     assert_eq!(meeting.read_transcript().unwrap(), external);
+}
+
+#[test]
+fn sweep_includes_failed_final_work_but_never_active_recordings() {
+    let (_dir, library) = fixture();
+    let now = meta("clock").started_at;
+    let mut expired = meta("Failed final");
+    expired.ended_at = Some(now);
+    expired.audio_expires_at = Some(now);
+    let expired = library.create_meeting(expired).unwrap();
+    let mut active = meta("Active");
+    active.audio_expires_at = Some(now);
+    let active = library.create_meeting(active).unwrap();
+    for meeting in [&expired, &active] {
+        fs::create_dir(meeting.path().join("audio/.work")).unwrap();
+        fs::write(meeting.path().join("audio/.work/mic.wav"), b"pcm").unwrap();
+        fs::write(meeting.mic_audio_path(), b"opus").unwrap();
+    }
+    library.sweep_audio(now).unwrap();
+    assert!(!expired.path().join("audio/.work").exists());
+    assert!(!expired.mic_audio_path().exists());
+    assert!(active.path().join("audio/.work/mic.wav").exists());
+    assert!(active.mic_audio_path().exists());
+    assert!(library.sweep_audio(now).unwrap().is_empty());
 }

@@ -118,12 +118,15 @@ impl Library {
         Ok(meetings)
     }
 
-    /// Remove immediate audio files (including symlinks), without following directories.
+    /// Remove expired audio and failed final-pass scratch, without following symlinks.
+    /// Meetings still being captured must never be swept.
     pub fn sweep_audio(&self, now: DateTime<Utc>) -> Result<Vec<PathBuf>> {
         let mut removed = Vec::new();
         for meeting in self.list_meetings()? {
             let meta = meeting.read_meta()?;
-            if !meta.audio_expires_at.is_some_and(|expires| expires <= now) {
+            if meta.ended_at.is_none()
+                || !meta.audio_expires_at.is_some_and(|expires| expires <= now)
+            {
                 continue;
             }
             let audio = meeting.path.join("audio");
@@ -138,6 +141,10 @@ impl Library {
             for entry in fs::read_dir(audio)? {
                 let entry = entry?;
                 if entry.file_type()?.is_dir() {
+                    if entry.file_name() == ".work" {
+                        fs::remove_dir_all(entry.path())?;
+                        removed.push(entry.path());
+                    }
                     continue;
                 }
                 let path = entry.path();
