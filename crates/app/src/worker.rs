@@ -13,7 +13,7 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use chrono::Utc;
 use notetaker_capture::{AudioSource, Inventory, LiveOptions, inventory, live_sources};
-use notetaker_core::{Library, Meeting, MeetingMeta, Transcript};
+use notetaker_core::{Library, Meeting, MeetingMeta, Revision, Transcript};
 use notetaker_llm::{Config, HttpProvider, Template, enhance_meeting};
 use notetaker_pipeline::{
     Asr, AsrConfig, PipelineEvent, RecordingConfig, RecordingSession, StopHandle,
@@ -26,20 +26,35 @@ pub struct MeetingRow {
     pub meta: MeetingMeta,
     pub snippet: String,
 }
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Revisions {
+    pub notes: Revision,
+    pub enhanced: Revision,
+    pub transcript: Revision,
+}
 pub struct DocumentData {
     pub meeting: Meeting,
     pub meta: MeetingMeta,
     pub notes: String,
     pub enhanced: String,
     pub transcript: Transcript,
+    pub revisions: Revisions,
 }
 impl DocumentData {
     pub fn read(meeting: Meeting) -> Result<Self> {
+        let notes = meeting.load_notes()?;
+        let enhanced = meeting.load_enhanced()?;
+        let transcript = meeting.load_transcript()?;
         Ok(Self {
             meta: meeting.read_meta()?,
-            notes: meeting.read_notes()?,
-            enhanced: meeting.read_enhanced()?,
-            transcript: meeting.read_transcript()?,
+            notes: notes.value,
+            enhanced: enhanced.value,
+            transcript: transcript.value,
+            revisions: Revisions {
+                notes: notes.revision,
+                enhanced: enhanced.revision,
+                transcript: transcript.revision,
+            },
             meeting,
         })
     }
@@ -60,26 +75,71 @@ pub struct Save {
     pub notes: Option<String>,
     pub enhanced: Option<String>,
     pub transcript: Option<Transcript>,
+    pub revisions: Revisions,
+}
+#[derive(Default)]
+pub struct SaveResult {
+    pub revisions: Revisions,
+    pub failed: Fields,
+    pub conflicts: Fields,
+    pub errors: Vec<String>,
+    pub reloaded: Option<Box<DocumentData>>,
 }
 impl Save {
-    fn write(&self) -> Result<()> {
-        if let Some(text) = &self.notes {
-            self.meeting.write_notes(text)?;
+    fn write(&self) -> SaveResult {
+        let mut saved = SaveResult {
+            revisions: self.revisions,
+            ..SaveResult::default()
+        };
+        // Attempt every dirty field, preserving each conflicting local version.
+        let results = [
+            self.notes
+                .as_ref()
+                .map(|text| self.meeting.save_notes(text, self.revisions.notes)),
+            self.enhanced
+                .as_ref()
+                .map(|text| self.meeting.save_enhanced(text, self.revisions.enhanced)),
+            self.transcript.as_ref().map(|text| {
+                self.meeting
+                    .save_transcript(text, self.revisions.transcript)
+            }),
+        ];
+        for (result, (revision, failed, conflict)) in results.into_iter().zip([
+            (
+                &mut saved.revisions.notes,
+                &mut saved.failed.notes,
+                &mut saved.conflicts.notes,
+            ),
+            (
+                &mut saved.revisions.enhanced,
+                &mut saved.failed.enhanced,
+                &mut saved.conflicts.enhanced,
+            ),
+            (
+                &mut saved.revisions.transcript,
+                &mut saved.failed.transcript,
+                &mut saved.conflicts.transcript,
+            ),
+        ]) {
+            match result {
+                Some(Ok(value)) => *revision = value,
+                Some(Err(error)) => {
+                    *failed = true;
+                    *conflict = matches!(error, notetaker_core::Error::Conflict { .. });
+                    saved.errors.push(error.to_string());
+                }
+                None => {}
+            }
         }
-        if let Some(text) = &self.enhanced {
-            self.meeting.write_enhanced(text)?;
+        if saved.conflicts.any() {
+            match DocumentData::read(self.meeting.clone()) {
+                Ok(data) => saved.reloaded = Some(Box::new(data)),
+                Err(error) => saved
+                    .errors
+                    .push(format!("Reload after conflict: {error:#}")),
+            }
         }
-        if let Some(transcript) = &self.transcript {
-            self.meeting.write_transcript(transcript)?;
-        }
-        Ok(())
-    }
-    fn fields(&self) -> Fields {
-        Fields {
-            notes: self.notes.is_some(),
-            enhanced: self.enhanced.is_some(),
-            transcript: self.transcript.is_some(),
-        }
+        saved
     }
 }
 #[derive(Clone)]
@@ -128,8 +188,7 @@ pub enum Event {
     },
     Saved {
         path: PathBuf,
-        fields: Fields,
-        result: Result<(), String>,
+        result: SaveResult,
     },
     Inventory(Result<Inventory, String>),
     Started {
@@ -142,13 +201,17 @@ pub enum Event {
         document: Option<Box<DocumentData>>,
         error: Option<String>,
     },
+    ReloadEnhanced {
+        path: PathBuf,
+        value: notetaker_core::Versioned<String>,
+    },
     EnhancedChunk {
         path: PathBuf,
         text: String,
     },
     Enhanced {
         path: PathBuf,
-        result: Result<String, String>,
+        result: Result<notetaker_core::Versioned<String>, String>,
     },
     DownloadProgress(String),
     Downloaded(Result<(), String>),
@@ -211,8 +274,7 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                 Command::Save(save) => {
                     let _ = events.send(Event::Saved {
                         path: save.meeting.path().to_owned(),
-                        fields: save.fields(),
-                        result: save.write().map_err(error_text),
+                        result: save.write(),
                     });
                 }
                 Command::Inventory => {
@@ -226,7 +288,7 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                     let events = events.clone();
                     thread::spawn(move || {
                         let path = meeting.path().to_owned();
-                        let result = (|| {
+                        let result: Result<_> = (|| {
                             let meta = meeting.read_meta()?;
                             let root = path.parent().context("Нет библиотеки")?;
                             let template_data = Template::load(root, &template)?;
@@ -251,9 +313,23 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                             meeting.write_meta(&meta)?;
                             Library::open(root)?.reindex_incremental()?;
                             Ok(result)
-                        })()
-                        .map_err(error_text);
-                        let _ = events.send(Event::Enhanced { path, result });
+                        })();
+                        if result.as_ref().err().is_some_and(|error| {
+                            matches!(
+                                error.downcast_ref::<notetaker_core::Error>(),
+                                Some(notetaker_core::Error::Conflict { .. })
+                            )
+                        }) && let Ok(value) = meeting.load_enhanced()
+                        {
+                            let _ = events.send(Event::ReloadEnhanced {
+                                path: path.clone(),
+                                value,
+                            });
+                        }
+                        let _ = events.send(Event::Enhanced {
+                            path,
+                            result: result.map_err(error_text),
+                        });
                     });
                 }
                 Command::Download(model) => {
@@ -503,20 +579,51 @@ fn download(model: &str, events: &Sender<Event>) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn stale_ui_save_keeps_external_files_and_reloads_conflicts() {
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open(root.path()).unwrap();
+        let meeting = library
+            .create_meeting(MeetingMeta::new("Concurrent edit", Utc::now()))
+            .unwrap();
+        let loaded = DocumentData::read(meeting.clone()).unwrap();
+        meeting.write_notes("external").unwrap();
+        let saved = Save {
+            meeting: meeting.clone(),
+            revisions: loaded.revisions,
+            notes: Some("local".into()),
+            enhanced: Some("summary".into()),
+            transcript: None,
+        }
+        .write();
+        assert!(saved.conflicts.notes);
+        assert!(!saved.failed.enhanced);
+        assert_eq!(saved.reloaded.unwrap().notes, "external");
+        assert_eq!(meeting.read_notes().unwrap(), "external");
+        assert_eq!(meeting.read_enhanced().unwrap(), "summary");
+        let conflict = fs::read_dir(meeting.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.to_string_lossy().contains("notes.conflict-"))
+            .unwrap();
+        assert_eq!(fs::read_to_string(conflict).unwrap(), "local");
+    }
+    #[test]
     fn storage_save_search_and_reopen() {
         let root = tempfile::tempdir().unwrap();
         let library = Library::open(root.path()).unwrap();
         let meeting = library
             .create_meeting(MeetingMeta::new("Созвон", Utc::now()))
             .unwrap();
-        Save {
+        let revisions = DocumentData::read(meeting.clone()).unwrap().revisions;
+        let saved = Save {
+            revisions,
             meeting: meeting.clone(),
             notes: Some("Обсудить Kubernetes".into()),
             enhanced: None,
             transcript: None,
         }
-        .write()
-        .unwrap();
+        .write();
+        assert!(saved.errors.is_empty());
         assert_eq!(list(root.path(), "Kuber").unwrap().len(), 1);
         let loaded = DocumentData::read(meeting).unwrap();
         assert_eq!(loaded.notes, "Обсудить Kubernetes");

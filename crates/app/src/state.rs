@@ -148,6 +148,7 @@ impl Document {
         }
         let save = Save {
             meeting: self.data.meeting.clone(),
+            revisions: self.data.revisions,
             notes: self.dirty.notes.then(|| self.data.notes.clone()),
             enhanced: self.dirty.enhanced.then(|| self.data.enhanced.clone()),
             transcript: self.dirty.transcript.then(|| self.data.transcript.clone()),
@@ -535,20 +536,43 @@ impl AppState {
                     Err(error) => self.error = Some(error),
                 }
             }
-            Event::Saved {
-                path,
-                fields,
-                result,
-            } => {
+            Event::Saved { path, result } => {
                 if let Some(doc) = self.documents.get_mut(&path) {
                     doc.saving = false;
-                    if let Err(error) = result {
-                        doc.dirty.notes |= fields.notes;
-                        doc.dirty.enhanced |= fields.enhanced;
-                        doc.dirty.transcript |= fields.transcript;
+                    doc.data.revisions = result.revisions;
+                    let reloaded = result.reloaded.as_deref();
+                    // Keep edits made after enqueueing the save. If they also
+                    // conflict, their next save preserves them before reloading.
+                    if result.conflicts.notes
+                        && !doc.dirty.notes
+                        && let Some(data) = reloaded
+                    {
+                        doc.data.notes = data.notes.clone();
+                        doc.data.revisions.notes = data.revisions.notes;
+                    } else {
+                        doc.dirty.notes |= result.failed.notes;
+                    }
+                    if result.conflicts.enhanced
+                        && !doc.dirty.enhanced
+                        && let Some(data) = reloaded
+                    {
+                        doc.data.enhanced = data.enhanced.clone();
+                        doc.data.revisions.enhanced = data.revisions.enhanced;
+                    } else {
+                        doc.dirty.enhanced |= result.failed.enhanced;
+                    }
+                    if result.conflicts.transcript
+                        && !doc.dirty.transcript
+                        && let Some(data) = reloaded
+                    {
+                        doc.data.transcript = data.transcript.clone();
+                        doc.data.revisions.transcript = data.revisions.transcript;
+                    } else {
+                        doc.dirty.transcript |= result.failed.transcript;
+                    }
+                    if !result.errors.is_empty() {
                         doc.changed_at = Instant::now();
-                        self.error = Some(error);
-                        // A failed save must not cause an automatic exit.
+                        self.error = Some(result.errors.join("\n"));
                         self.exit_requested = false;
                     }
                 }
@@ -627,6 +651,7 @@ impl AppState {
                 {
                     doc.data.meta = data.meta;
                     doc.data.transcript = data.transcript;
+                    doc.data.revisions.transcript = data.revisions.transcript;
                 }
                 self.recording.phase = Phase::Idle;
                 self.recording.stop = None;
@@ -635,6 +660,12 @@ impl AppState {
                     self.exit_requested = false;
                 }
                 self.refresh();
+            }
+            Event::ReloadEnhanced { path, value } => {
+                if let Some(doc) = self.documents.get_mut(&path) {
+                    doc.data.enhanced = value.value;
+                    doc.data.revisions.enhanced = value.revision;
+                }
             }
             Event::EnhancedChunk { path, text } => {
                 if let Some(text_buffer) = self
@@ -651,7 +682,8 @@ impl AppState {
                     doc.generation = None;
                     match result {
                         Ok(text) => {
-                            doc.data.enhanced = text;
+                            doc.data.enhanced = text.value;
+                            doc.data.revisions.enhanced = text.revision;
                             doc.data.meta.template = Some(doc.template.clone());
                         }
                         Err(error) => {
@@ -889,11 +921,14 @@ mod tests {
         assert!(matches!(commands.try_recv().unwrap(), Command::Save(_)));
         state.apply(Event::Saved {
             path: path.clone(),
-            fields: Fields {
-                notes: true,
-                ..Fields::default()
+            result: worker::SaveResult {
+                failed: Fields {
+                    notes: true,
+                    ..Fields::default()
+                },
+                errors: vec!["disk full".into()],
+                ..worker::SaveResult::default()
             },
-            result: Err("disk full".into()),
         });
         assert!(!state.exit_requested);
         assert!(state.documents[&path].dirty.notes);
@@ -901,8 +936,7 @@ mod tests {
         state.exit();
         state.apply(Event::Saved {
             path,
-            fields: Fields::default(),
-            result: Ok(()),
+            result: worker::SaveResult::default(),
         });
         assert!(state.can_exit());
     }
@@ -946,6 +980,22 @@ mod tests {
         });
         assert_eq!(state.documents[&path].data.enhanced, "previous summary");
         assert!(state.documents[&path].generation.is_none());
+    }
+    #[test]
+    fn conflicting_enhancement_reloads_external_summary_before_reporting_error() {
+        let (mut state, _commands, _root, path) = fixture();
+        let meeting = state.documents[&path].data.meeting.clone();
+        meeting.write_enhanced("external summary").unwrap();
+        state.apply(Event::ReloadEnhanced {
+            path: path.clone(),
+            value: meeting.load_enhanced().unwrap(),
+        });
+        state.apply(Event::Enhanced {
+            path: path.clone(),
+            result: Err("Conflict".into()),
+        });
+        assert_eq!(state.documents[&path].data.enhanced, "external summary");
+        assert!(state.error.as_ref().unwrap().contains("Conflict"));
     }
     #[test]
     fn unsaved_notes_block_llm_and_stale_search_is_ignored() {

@@ -231,10 +231,10 @@ fn successful_result_is_written_and_failure_preserves_existing_enhanced() {
     let mut provider = Fake::new(4096);
     let template = Template::builtin("general").unwrap();
     let result = enhance_meeting(&meeting, &template, &provider, &mut |_| {}).unwrap();
-    assert_eq!(meeting.read_enhanced().unwrap(), result);
+    assert_eq!(meeting.read_enhanced().unwrap(), result.value);
     provider.fail = true;
     assert!(enhance_meeting(&meeting, &template, &provider, &mut |_| {}).is_err());
-    assert_eq!(meeting.read_enhanced().unwrap(), result);
+    assert_eq!(meeting.read_enhanced().unwrap(), result.value);
 }
 
 #[test]

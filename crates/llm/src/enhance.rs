@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, ensure};
-use notetaker_core::{Meeting, MeetingMeta, Transcript};
+use notetaker_core::{Meeting, MeetingMeta, Transcript, Versioned};
 
 use crate::{CompletionRequest, Provider, Template};
 
@@ -21,8 +21,9 @@ pub fn enhance_meeting(
     template: &Template,
     provider: &dyn Provider,
     on_text: &mut dyn FnMut(&str),
-) -> Result<String> {
+) -> Result<Versioned<String>> {
     let meta = meeting.read_meta()?;
+    let enhanced_revision = meeting.load_enhanced()?.revision;
     // Also guard custom Provider implementations and mode changes after selection.
     provider.config().validate(meta.mode)?;
     let result = enhance(
@@ -33,8 +34,11 @@ pub fn enhance_meeting(
         provider,
         on_text,
     )?;
-    meeting.write_enhanced(&result)?;
-    Ok(result)
+    let revision = meeting.save_enhanced(&result, enhanced_revision)?;
+    Ok(Versioned {
+        value: result,
+        revision,
+    })
 }
 
 /// Generate Markdown without writing files. Final deltas reach on_text; map/reduce

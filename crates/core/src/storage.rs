@@ -1,13 +1,48 @@
 use std::{
+    collections::HashMap,
     fs,
     io::Write,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock, Weak},
 };
 
 use chrono::{DateTime, Utc};
+use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
 use crate::{MeetingMeta, Result, Transcript, migrate_transcript};
+
+/// Content revision, including whether the file existed when loaded.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Revision(Option<[u8; 32]>);
+impl Revision {
+    fn of(bytes: Option<&[u8]>) -> Self {
+        Self(bytes.map(|bytes| Sha256::digest(bytes).into()))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Versioned<T> {
+    pub value: T,
+    pub revision: Revision,
+}
+
+// Handles obtained through different Library instances must use the same lock.
+// Weak entries avoid keeping a mutex alive after its last operation completes.
+fn meeting_lock(path: &Path) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(lock) = locks.get(path).and_then(Weak::upgrade) {
+        return lock;
+    }
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(path.to_owned(), Arc::downgrade(&lock));
+    lock
+}
 
 /// A library root. All returned meeting paths are absolute.
 #[derive(Debug, Clone)]
@@ -140,12 +175,16 @@ impl Meeting {
         read_optional(&self.path.join("notes.md"))
     }
     pub fn write_notes(&self, notes: &str) -> Result<()> {
+        let lock = meeting_lock(&self.path);
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         atomic_write(&self.path.join("notes.md"), notes.as_bytes())
     }
     pub fn read_enhanced(&self) -> Result<String> {
         read_optional(&self.path.join("enhanced.md"))
     }
     pub fn write_enhanced(&self, enhanced: &str) -> Result<()> {
+        let lock = meeting_lock(&self.path);
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         atomic_write(&self.path.join("enhanced.md"), enhanced.as_bytes())
     }
 
@@ -158,6 +197,8 @@ impl Meeting {
     }
 
     pub fn write_transcript(&self, transcript: &Transcript) -> Result<()> {
+        let lock = meeting_lock(&self.path);
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         if transcript.version != crate::SCHEMA_VERSION {
             return Err(crate::Error::UnsupportedVersion(transcript.version));
         }
@@ -165,6 +206,62 @@ impl Meeting {
             &self.path.join("transcript.json"),
             &serde_json::to_vec_pretty(transcript)?,
         )
+    }
+
+    pub fn load_notes(&self) -> Result<Versioned<String>> {
+        load_text(&self.path.join("notes.md"))
+    }
+    pub fn load_enhanced(&self) -> Result<Versioned<String>> {
+        load_text(&self.path.join("enhanced.md"))
+    }
+    pub fn load_transcript(&self) -> Result<Versioned<Transcript>> {
+        let loaded = load_text(&self.path.join("transcript.json"))?;
+        Ok(Versioned {
+            value: if loaded.revision.0.is_none() {
+                Transcript::default()
+            } else {
+                migrate_transcript(serde_json::from_str(&loaded.value)?)?
+            },
+            revision: loaded.revision,
+        })
+    }
+    pub fn save_notes(&self, text: &str, expected: Revision) -> Result<Revision> {
+        self.save_checked("notes.md", text.as_bytes(), expected)
+    }
+    pub fn save_enhanced(&self, text: &str, expected: Revision) -> Result<Revision> {
+        self.save_checked("enhanced.md", text.as_bytes(), expected)
+    }
+    pub fn save_transcript(&self, transcript: &Transcript, expected: Revision) -> Result<Revision> {
+        if transcript.version != crate::SCHEMA_VERSION {
+            return Err(crate::Error::UnsupportedVersion(transcript.version));
+        }
+        self.save_checked(
+            "transcript.json",
+            &serde_json::to_vec_pretty(transcript)?,
+            expected,
+        )
+    }
+    fn save_checked(&self, name: &str, bytes: &[u8], expected: Revision) -> Result<Revision> {
+        let lock = meeting_lock(&self.path);
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        checked_write(&self.path.join(name), bytes, expected)
+    }
+    /// Serialize read-modify-write across every handle in this process. External
+    /// edits made during the closure are detected by the content revision too.
+    pub fn update_transcript(&self, update: impl FnOnce(&mut Transcript)) -> Result<()> {
+        let lock = meeting_lock(&self.path);
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut loaded = self.load_transcript()?;
+        update(&mut loaded.value);
+        if loaded.value.version != crate::SCHEMA_VERSION {
+            return Err(crate::Error::UnsupportedVersion(loaded.value.version));
+        }
+        checked_write(
+            &self.path.join("transcript.json"),
+            &serde_json::to_vec_pretty(&loaded.value)?,
+            loaded.revision,
+        )?;
+        Ok(())
     }
 
     pub fn mic_audio_path(&self) -> PathBuf {
@@ -208,5 +305,48 @@ fn slug(title: &str) -> String {
         "meeting".into()
     } else {
         slug.into()
+    }
+}
+
+fn load_text(path: &Path) -> Result<Versioned<String>> {
+    let bytes = read_bytes(path)?;
+    let revision = Revision::of(bytes.as_deref());
+    let value = String::from_utf8(bytes.unwrap_or_default())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    Ok(Versioned { value, revision })
+}
+
+fn checked_write(path: &Path, bytes: &[u8], expected: Revision) -> Result<Revision> {
+    let current = Revision::of(read_bytes(path)?.as_deref());
+    if current != expected {
+        // UUID disambiguates concurrent saves within the same millisecond.
+        let stem = path
+            .file_stem()
+            .expect("meeting file has a stem")
+            .to_string_lossy();
+        let ext = path
+            .extension()
+            .expect("meeting file has an extension")
+            .to_string_lossy();
+        let local = path.with_file_name(format!(
+            "{stem}.conflict-{}-{}.{ext}",
+            DateTime::<Utc>::from(std::time::SystemTime::now()).format("%Y%m%dT%H%M%S%.3fZ"),
+            uuid::Uuid::now_v7()
+        ));
+        atomic_write(&local, bytes)?;
+        return Err(crate::Error::Conflict {
+            path: path.to_owned(),
+            local,
+        });
+    }
+    atomic_write(path, bytes)?;
+    Ok(Revision::of(Some(bytes)))
+}
+
+fn read_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
     }
 }

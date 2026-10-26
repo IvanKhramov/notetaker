@@ -8,7 +8,7 @@ pub use model::{
     CaptureIssue, Channel, MeetingMeta, Mode, SCHEMA_VERSION, Segment, Source, SpeakerId,
     Transcript, migrate_transcript,
 };
-pub use storage::{Library, Meeting};
+pub use storage::{Library, Meeting, Revision, Versioned};
 
 /// Errors from meeting storage, schema validation, or the rebuildable index.
 #[derive(Debug, thiserror::Error)]
@@ -23,6 +23,11 @@ pub enum Error {
     UnsupportedVersion(u32),
     #[error("SQLite index operation failed: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    #[error("Conflict: {path} changed on disk; local version saved to {local}")]
+    Conflict {
+        path: std::path::PathBuf,
+        local: std::path::PathBuf,
+    },
     #[error("invalid index data: {0}")]
     InvalidIndex(String),
 }

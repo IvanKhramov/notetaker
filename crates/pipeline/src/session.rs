@@ -548,10 +548,10 @@ fn run_asr(asr: impl Asr, meeting: &Meeting, jobs: Receiver<Job>, queue: &Queue)
                     ) {
                         Ok(segments) if queue.enabled.load(Ordering::Acquire) => {
                             let segments = convert(segments, chunk.channel, Source::Live);
-                            let mut transcript = meeting.read_transcript()?;
-                            transcript.segments.extend(segments.clone());
-                            sort(&mut transcript.segments);
-                            meeting.write_transcript(&transcript)?;
+                            meeting.update_transcript(|transcript| {
+                                transcript.segments.extend(segments.clone());
+                                sort(&mut transcript.segments);
+                            })?;
                             let _ = queue.events.send(PipelineEvent::LiveSegments(segments));
                         }
                         Ok(_) => {}
@@ -586,9 +586,10 @@ fn run_asr(asr: impl Asr, meeting: &Meeting, jobs: Receiver<Job>, queue: &Queue)
                 }
                 // Reload immediately before replacement to respect UI edits made
                 // during capture or while the full-file requests were running.
-                let mut transcript = meeting.read_transcript()?;
-                transcript.segments = replace_final(transcript.segments, final_segments);
-                meeting.write_transcript(&transcript)?;
+                meeting.update_transcript(|transcript| {
+                    transcript.segments =
+                        replace_final(std::mem::take(&mut transcript.segments), final_segments);
+                })?;
             }
         }
     }

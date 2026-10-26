@@ -321,3 +321,107 @@ fn failed_rebuild_keeps_previous_index_transactionally() {
     assert_eq!(library.search("original", 10).unwrap().len(), 1);
     assert!(library.search("newword", 10).unwrap().is_empty());
 }
+
+#[test]
+fn stale_saves_preserve_external_edits_and_keep_local_conflict_copies() {
+    let (_dir, library) = fixture();
+    let meeting = library.create_meeting(meta("Conflicts")).unwrap();
+    let notes = meeting.load_notes().unwrap();
+    let enhanced = meeting.load_enhanced().unwrap();
+    let transcript_revision = meeting.load_transcript().unwrap().revision;
+    meeting.write_notes("external notes").unwrap();
+    meeting.write_enhanced("external summary").unwrap();
+    let external_transcript = transcript("external transcript");
+    meeting.write_transcript(&external_transcript).unwrap();
+    let local_transcript = transcript("local transcript");
+    for (result, expected) in [
+        (
+            meeting.save_notes("local notes", notes.revision),
+            b"local notes".to_vec(),
+        ),
+        (
+            meeting.save_enhanced("local summary", enhanced.revision),
+            b"local summary".to_vec(),
+        ),
+        (
+            meeting.save_transcript(&local_transcript, transcript_revision),
+            serde_json::to_vec_pretty(&local_transcript).unwrap(),
+        ),
+    ] {
+        let Error::Conflict { path, local } = result.unwrap_err() else {
+            panic!("expected Conflict")
+        };
+        assert_eq!(fs::read(&local).unwrap(), expected);
+        assert_eq!(path.extension(), local.extension());
+        assert!(
+            local
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains(".conflict-")
+        );
+    }
+    assert_eq!(meeting.read_notes().unwrap(), "external notes");
+    assert_eq!(meeting.read_enhanced().unwrap(), "external summary");
+    assert_eq!(meeting.read_transcript().unwrap(), external_transcript);
+    // Hashes detect edits even if length and mtime have been preserved.
+    let loaded = meeting.load_notes().unwrap();
+    let path = meeting.path().join("notes.md");
+    let modified = fs::metadata(&path).unwrap().modified().unwrap();
+    fs::write(&path, "external NOTES").unwrap();
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    assert!(matches!(
+        meeting.save_notes("mine", loaded.revision),
+        Err(Error::Conflict { .. })
+    ));
+    let loaded = meeting.load_notes().unwrap();
+    let revision = meeting.save_notes("fresh", loaded.revision).unwrap();
+    assert_eq!(meeting.load_notes().unwrap().revision, revision);
+}
+
+#[test]
+fn transcript_updates_serialize_across_separately_opened_meeting_handles() {
+    let (_dir, library) = fixture();
+    let meeting = library.create_meeting(meta("Concurrent")).unwrap();
+    let mut threads = Vec::new();
+    for _ in 0..4 {
+        let handle = Library::open(library.root())
+            .unwrap()
+            .list_meetings()
+            .unwrap()
+            .remove(0);
+        threads.push(std::thread::spawn(move || {
+            for _ in 0..20 {
+                handle
+                    .update_transcript(|value| {
+                        std::thread::yield_now();
+                        value.segments.push(transcript("append").segments.remove(0));
+                    })
+                    .unwrap();
+            }
+        }));
+    }
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    assert_eq!(meeting.read_transcript().unwrap().segments.len(), 80);
+    let external = transcript("external");
+    let error = meeting
+        .update_transcript(|local| {
+            local.segments.clear();
+            fs::write(
+                meeting.path().join("transcript.json"),
+                serde_json::to_vec(&external).unwrap(),
+            )
+            .unwrap();
+        })
+        .unwrap_err();
+    assert!(matches!(error, Error::Conflict { .. }));
+    assert_eq!(meeting.read_transcript().unwrap(), external);
+}

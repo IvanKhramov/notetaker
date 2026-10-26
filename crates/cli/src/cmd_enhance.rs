@@ -42,6 +42,6 @@ pub fn run(args: Args) -> Result<()> {
         meta.mode,
     )?;
     let result = enhance_meeting(&meeting, &template, &provider, &mut |_| {})?;
-    println!("{result}");
+    println!("{}", result.value);
     Ok(())
 }
