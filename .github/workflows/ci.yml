@@ -25,6 +25,7 @@ jobs:
           # sherpa-onnx-sys downloads native libs here; without it a cached
           # build-script fingerprint skips the download and linking fails.
           cache-directories: target/sherpa-onnx-prebuilt
+          prefix-key: v1-sherpa
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
