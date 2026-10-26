@@ -1,0 +1,5 @@
+/target/
+*.opus
+*.wav
+models/
+.notetaker/

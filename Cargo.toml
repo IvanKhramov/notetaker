@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/core",
+    "crates/capture",
+    "crates/asr-proto",
+    "crates/asr-worker",
+    "crates/llm",
+    "crates/pipeline",
+    "crates/cli",
+    "crates/app",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
