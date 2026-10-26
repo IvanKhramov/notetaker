@@ -271,6 +271,12 @@ fn wait_until<T>(
 #[cfg(all(test, any(unix, windows)))]
 mod tests {
     use super::*;
+    // Fake workers are shell/PowerShell processes; on small CI runners several
+    // cold PowerShell starts at once blow any startup timeout, so run one at a time.
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
     fn fake_command(script: &str) -> Command {
         #[cfg(unix)]
         {
@@ -296,6 +302,7 @@ mod tests {
     }
     #[test]
     fn fake_worker_lifecycle() {
+        let _serial = serial();
         let mut c = fake(r#"
             echo '{"type":"ready","protocol_version":1}'
             read -r request
@@ -317,6 +324,7 @@ mod tests {
     }
     #[test]
     fn death_and_invalid_protocol() {
+        let _serial = serial();
         assert!(fake("exit 7").is_err());
         assert!(fake("echo nonsense").is_err());
         assert!(fake(r#"echo '{"type":"ready","protocol_version":999}'"#).is_err());
@@ -327,6 +335,7 @@ mod tests {
     }
     #[test]
     fn worker_errors_and_mismatched_ids() {
+        let _serial = serial();
         let mut c = fake(r#"echo '{"type":"ready","protocol_version":1}'; read -r request; echo '{"type":"error","message":"missing model"}'; read -r request"#).unwrap();
         assert!(
             matches!(c.load_model("absent", Provider::Cpu), Err(ClientError::Worker(message)) if message == "missing model")
@@ -341,6 +350,7 @@ mod tests {
 
     #[test]
     fn timeout_and_drop_reap_worker() {
+        let _serial = serial();
         let command = fake_command("read -r request");
         assert!(matches!(
             AsrClient::spawn_command(command, Duration::from_millis(30)),
@@ -358,6 +368,7 @@ mod tests {
     }
     #[test]
     fn unread_stdin_times_out_for_large_requests_and_reaps_worker() {
+        let _serial = serial();
         #[cfg(unix)]
         let script = r#"echo '{"type":"ready","protocol_version":1}'; exec sleep 2"#;
         #[cfg(windows)]
@@ -374,6 +385,7 @@ mod tests {
 
     #[test]
     fn cancellation_interrupts_blocked_stdin_and_joins_writer() {
+        let _serial = serial();
         #[cfg(unix)]
         let script = r#"echo '{"type":"ready","protocol_version":1}'; exec sleep 5"#;
         #[cfg(windows)]
@@ -396,6 +408,7 @@ mod tests {
     }
     #[test]
     fn progress_cannot_extend_request_deadline() {
+        let _serial = serial();
         #[cfg(unix)]
         let script = r#"echo '{"type":"ready","protocol_version":1}'; read -r request; while true; do echo '{"type":"progress","id":"p","fraction":0.5}'; sleep 0.02; done"#;
         #[cfg(windows)]
