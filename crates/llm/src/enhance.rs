@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, ensure};
-use notetaker_core::{Meeting, MeetingMeta, Transcript, Versioned};
+use notetaker_core::{Library, Meeting, MeetingMeta, Revision, Transcript};
 
 use crate::{CompletionRequest, Provider, Template};
 
@@ -14,14 +14,23 @@ pub fn estimate_tokens(text: &str) -> usize {
     text.chars().count().div_ceil(3)
 }
 
+/// A committed summary stays successful even if disposable/ancillary state fails.
+#[derive(Debug)]
+pub struct EnhanceResult {
+    pub text: String,
+    pub revision: Revision,
+    pub warnings: Vec<String>,
+}
+
 /// Generate and atomically replace enhanced.md only after a successful completion.
 /// The caller selects the template and constructs a provider for the meeting mode.
 pub fn enhance_meeting(
     meeting: &Meeting,
+    template_id: &str,
     template: &Template,
     provider: &dyn Provider,
     on_text: &mut dyn FnMut(&str),
-) -> Result<Versioned<String>> {
+) -> Result<EnhanceResult> {
     let meta = meeting.read_meta()?;
     let enhanced_revision = meeting.load_enhanced()?.revision;
     // Also guard custom Provider implementations and mode changes after selection.
@@ -35,9 +44,30 @@ pub fn enhance_meeting(
         on_text,
     )?;
     let revision = meeting.save_enhanced(&result, enhanced_revision)?;
-    Ok(Versioned {
-        value: result,
+    let mut warnings = Vec::new();
+    let metadata = (|| -> Result<()> {
+        let mut meta = meeting.read_meta()?;
+        meta.template = Some(template_id.into());
+        meeting.write_meta(&meta)?;
+        Ok(())
+    })();
+    if let Err(error) = metadata {
+        warnings.push(format!("Summary saved; metadata update failed: {error:#}"));
+    }
+    let index = (|| -> Result<()> {
+        Library::open(meeting.path().parent().context("meeting has no library")?)?
+            .reindex_incremental()?;
+        Ok(())
+    })();
+    if let Err(error) = index {
+        warnings.push(format!(
+            "Summary saved; search index update failed: {error:#}"
+        ));
+    }
+    Ok(EnhanceResult {
+        text: result,
         revision,
+        warnings,
     })
 }
 

@@ -230,11 +230,11 @@ fn successful_result_is_written_and_failure_preserves_existing_enhanced() {
     meeting.write_transcript(&transcript("Let's ship")).unwrap();
     let mut provider = Fake::new(4096);
     let template = Template::builtin("general").unwrap();
-    let result = enhance_meeting(&meeting, &template, &provider, &mut |_| {}).unwrap();
-    assert_eq!(meeting.read_enhanced().unwrap(), result.value);
+    let result = enhance_meeting(&meeting, "general", &template, &provider, &mut |_| {}).unwrap();
+    assert_eq!(meeting.read_enhanced().unwrap(), result.text);
     provider.fail = true;
-    assert!(enhance_meeting(&meeting, &template, &provider, &mut |_| {}).is_err());
-    assert_eq!(meeting.read_enhanced().unwrap(), result.value);
+    assert!(enhance_meeting(&meeting, "general", &template, &provider, &mut |_| {}).is_err());
+    assert_eq!(meeting.read_enhanced().unwrap(), result.text);
 }
 
 #[test]
@@ -313,4 +313,25 @@ context_tokens = 200000
         local.base_url = base.into();
         assert!(local.validate(Mode::Local).is_ok());
     }
+}
+
+#[test]
+fn saved_enhancement_survives_metadata_and_index_failures() {
+    let dir = tempfile::tempdir().unwrap();
+    let library = Library::open(dir.path()).unwrap();
+    let meeting = library.create_meeting(meta()).unwrap();
+    let provider = Fake::new(4096);
+    let template = Template::builtin("general").unwrap();
+    // Make the index inaccessible, even when running tests as root.
+    fs::create_dir_all(library.index_path()).unwrap();
+    let result = enhance_meeting(&meeting, "general", &template, &provider, &mut |_| {
+        // Simulate a sync tool replacing metadata while the provider is running.
+        fs::write(meeting.path().join("meta.yaml"), "invalid: [").unwrap();
+    })
+    .unwrap();
+    assert_eq!(meeting.read_enhanced().unwrap(), result.text);
+    assert_eq!(meeting.load_enhanced().unwrap().revision, result.revision);
+    assert_eq!(result.warnings.len(), 2);
+    assert!(result.warnings.iter().any(|s| s.contains("metadata")));
+    assert!(result.warnings.iter().any(|s| s.contains("index")));
 }

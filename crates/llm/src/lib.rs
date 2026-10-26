@@ -9,6 +9,6 @@ mod provider;
 mod template;
 
 pub use config::{Config, Defaults, ProviderConfig, ProviderKind};
-pub use enhance::{enhance, enhance_meeting, estimate_tokens};
+pub use enhance::{EnhanceResult, enhance, enhance_meeting, estimate_tokens};
 pub use provider::{CompletionRequest, HttpProvider, Provider};
 pub use template::Template;

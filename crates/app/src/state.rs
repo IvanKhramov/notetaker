@@ -190,6 +190,7 @@ pub struct AppState {
     pub offer_model_download: bool,
     pub download_messages: VecDeque<String>,
     pub error: Option<String>,
+    pub warnings: Vec<String>,
     pub status: String,
     pub exit_requested: bool,
     tx: Sender<Command>,
@@ -235,6 +236,7 @@ impl AppState {
             offer_model_download: false,
             download_messages: VecDeque::new(),
             error: None,
+            warnings: Vec::new(),
             status: "Открываем библиотеку…".into(),
             exit_requested: false,
             tx,
@@ -682,7 +684,8 @@ impl AppState {
                     doc.generation = None;
                     match result {
                         Ok(text) => {
-                            doc.data.enhanced = text.value;
+                            doc.data.enhanced = text.text;
+                            self.warnings = text.warnings;
                             doc.data.revisions.enhanced = text.revision;
                             doc.data.meta.template = Some(doc.template.clone());
                         }
@@ -980,6 +983,29 @@ mod tests {
         });
         assert_eq!(state.documents[&path].data.enhanced, "previous summary");
         assert!(state.documents[&path].generation.is_none());
+    }
+    #[test]
+    fn committed_enhancement_replaces_old_text_even_with_warnings() {
+        let (mut state, _commands, _root, path) = fixture();
+        let doc = state.documents.get_mut(&path).unwrap();
+        doc.data.enhanced = "old".into();
+        let revision = doc
+            .data
+            .meeting
+            .save_enhanced("committed", doc.data.revisions.enhanced)
+            .unwrap();
+        state.apply(Event::Enhanced {
+            path: path.clone(),
+            result: Ok(notetaker_llm::EnhanceResult {
+                text: "committed".into(),
+                revision,
+                warnings: vec!["Index unavailable".into()],
+            }),
+        });
+        assert_eq!(state.documents[&path].data.enhanced, "committed");
+        assert_eq!(state.documents[&path].data.revisions.enhanced, revision);
+        assert_eq!(state.warnings, ["Index unavailable"]);
+        assert!(state.error.is_none());
     }
     #[test]
     fn conflicting_enhancement_reloads_external_summary_before_reporting_error() {

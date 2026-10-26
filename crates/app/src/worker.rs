@@ -211,7 +211,7 @@ pub enum Event {
     },
     Enhanced {
         path: PathBuf,
-        result: Result<notetaker_core::Versioned<String>, String>,
+        result: Result<notetaker_llm::EnhanceResult, String>,
     },
     DownloadProgress(String),
     Downloaded(Result<(), String>),
@@ -299,6 +299,7 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                             )?;
                             let result = enhance_meeting(
                                 &meeting,
+                                &template,
                                 &template_data,
                                 &provider,
                                 &mut |text| {
@@ -308,10 +309,6 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                                     });
                                 },
                             )?;
-                            let mut meta = meeting.read_meta()?;
-                            meta.template = Some(template);
-                            meeting.write_meta(&meta)?;
-                            Library::open(root)?.reindex_incremental()?;
                             Ok(result)
                         })();
                         if result.as_ref().err().is_some_and(|error| {

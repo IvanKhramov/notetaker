@@ -29,19 +29,21 @@ pub fn run(args: Args) -> Result<()> {
         .find(|meeting| meeting.path() == path)
         .context("meeting directory has no valid meta.yaml")?;
     let meta = meeting.read_meta()?;
-    let template = Template::load(
-        library.root(),
-        args.template
-            .as_deref()
-            .or(meta.template.as_deref())
-            .unwrap_or("general"),
-    )?;
+    let template_id = args
+        .template
+        .as_deref()
+        .or(meta.template.as_deref())
+        .unwrap_or("general");
+    let template = Template::load(library.root(), template_id)?;
     let config = Config::load()?;
     let provider = HttpProvider::new(
         config.select(meta.mode, args.provider.as_deref())?.clone(),
         meta.mode,
     )?;
-    let result = enhance_meeting(&meeting, &template, &provider, &mut |_| {})?;
-    println!("{}", result.value);
+    let result = enhance_meeting(&meeting, template_id, &template, &provider, &mut |_| {})?;
+    println!("{}", result.text);
+    for warning in result.warnings {
+        eprintln!("Warning: {warning}");
+    }
     Ok(())
 }

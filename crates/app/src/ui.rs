@@ -110,6 +110,14 @@ impl NotetakerApp {
                 }
             });
         }
+        if !self.state.warnings.is_empty() {
+            for warning in &self.state.warnings {
+                ui.colored_label(Color32::YELLOW, warning);
+            }
+            if ui.small_button("Закрыть предупреждения").clicked() {
+                self.state.warnings.clear();
+            }
+        }
         let recording = &self.state.recording;
         if recording.busy() {
             ui.horizontal_wrapped(|ui| {
