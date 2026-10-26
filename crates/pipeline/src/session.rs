@@ -114,6 +114,9 @@ impl RecordingSession {
         meta.audio_expires_at = None; // Retention starts only once recording stops.
         let meeting = library.create_meeting(meta)?;
         let (events_tx, events) = mpsc::channel();
+        if let Err(error) = library.sweep_audio(Utc::now()) {
+            let _ = events_tx.send(PipelineEvent::Error(format!("audio retention: {error:#}")));
+        }
         let stop = StopHandle(Arc::new(AtomicBool::new(false)));
         let worker_stop = stop.clone();
         let worker_meeting = meeting.clone();

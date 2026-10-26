@@ -699,3 +699,17 @@ fn failed_channel_is_persisted_as_incomplete_capture() {
     assert!(meta.contains("microphone disconnected"), "{meta}");
     assert!(meta.contains("from_ms: 0"), "{meta}");
 }
+
+#[test]
+fn recording_start_sweeps_expired_audio_for_every_frontend() {
+    let dir = tempfile::tempdir().unwrap();
+    let library = Library::open(dir.path().join("library")).unwrap();
+    let mut meta = MeetingMeta::new("Expired", Utc::now());
+    meta.ended_at = Some(Utc::now());
+    meta.audio_expires_at = Some(Utc::now() - chrono::TimeDelta::days(1));
+    let expired = library.create_meeting(meta).unwrap();
+    std::fs::write(expired.mic_audio_path(), b"expired").unwrap();
+    let (session, _) = start(dir.path(), config(), vec![], None);
+    session.wait().unwrap();
+    assert!(!expired.mic_audio_path().exists());
+}

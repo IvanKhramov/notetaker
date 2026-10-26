@@ -524,7 +524,6 @@ fn record(request: RecordRequest, events: &Sender<Event>) {
         }
         session.wait()?;
         library.reindex_incremental()?;
-        library.sweep_audio(Utc::now())?;
         Ok(())
     })();
     let document = meeting_for_reload
