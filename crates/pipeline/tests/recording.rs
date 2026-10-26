@@ -485,3 +485,148 @@ fn loopback_fallback_is_forwarded_to_the_ui_event_stream() {
     )));
     session.wait().unwrap();
 }
+
+/// Live-like fake: it keeps the sender open until stop, optionally emitting
+/// quiet frames. This also tests WASAPI's no-packet representation of silence.
+struct QuietSource {
+    channel: Channel,
+    send_frames: bool,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+impl QuietSource {
+    fn new(channel: Channel, send_frames: bool) -> Self {
+        Self {
+            channel,
+            send_frames,
+            stop: Arc::default(),
+            worker: None,
+        }
+    }
+}
+impl AudioSource for QuietSource {
+    fn start(&mut self, sender: mpsc::SyncSender<notetaker_capture::CaptureMessage>) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        let stop = Arc::clone(&self.stop);
+        let channel = self.channel;
+        let send_frames = self.send_frames;
+        self.worker = Some(std::thread::spawn(move || {
+            let origin = std::time::Instant::now();
+            while !stop.load(Ordering::Acquire) {
+                if send_frames {
+                    let _ = sender.try_send(notetaker_capture::CaptureMessage::Frame(
+                        notetaker_capture::AudioFrame {
+                            channel,
+                            captured_at: origin.elapsed(),
+                            samples: vec![0.0; 320],
+                        },
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }));
+        Ok(())
+    }
+    fn stop(&mut self) -> Result<()> {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            worker.join().unwrap();
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn silent_live_sources_auto_stop_once_and_finalize_audio_and_asr() {
+    for send_frames in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = config();
+        config.auto_stop_after_silence = Some(Duration::from_millis(100));
+        let session = RecordingSession::start_with_asr(
+            Library::open(dir.path().join("library")).unwrap(),
+            MeetingMeta::new("Silence", Utc::now()),
+            [
+                Box::new(QuietSource::new(Channel::Mic, send_frames)),
+                Box::new(QuietSource::new(Channel::System, send_frames)),
+            ],
+            Fake {
+                stats: Arc::default(),
+                crashes: vec![],
+                gate: None,
+            },
+            config,
+        )
+        .unwrap();
+        let events = drain(&session);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, PipelineEvent::AutoStopped))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            events.last(),
+            Some(PipelineEvent::Finished { .. })
+        ));
+        assert!(!events.iter().any(|e| matches!(e, PipelineEvent::Error(_))));
+        let auto = events
+            .iter()
+            .position(|e| matches!(e, PipelineEvent::AutoStopped))
+            .unwrap();
+        let final_pass = events
+            .iter()
+            .position(|e| matches!(e, PipelineEvent::FinalPassProgress { .. }))
+            .unwrap();
+        assert!(auto < final_pass);
+        let meeting = session.wait().unwrap();
+        assert!(meeting.read_meta().unwrap().ended_at.is_some());
+        assert!(meeting.mic_audio_path().is_file() && meeting.system_audio_path().is_file());
+        assert!(!meeting.path().join("audio/.work").exists());
+    }
+}
+
+#[test]
+fn silence_auto_stop_can_be_disabled() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config();
+    config.auto_stop_after_silence = None;
+    let session = RecordingSession::start_with_asr(
+        Library::open(dir.path().join("library")).unwrap(),
+        MeetingMeta::new("Silence disabled", Utc::now()),
+        [
+            Box::new(QuietSource::new(Channel::Mic, true)),
+            Box::new(QuietSource::new(Channel::System, true)),
+        ],
+        Fake {
+            stats: Arc::default(),
+            crashes: vec![],
+            gate: None,
+        },
+        config,
+    )
+    .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_millis(150);
+    while let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) {
+        match session.events().recv_timeout(remaining) {
+            Ok(event) => assert!(!matches!(
+                event,
+                PipelineEvent::AutoStopped | PipelineEvent::Finished { .. }
+            )),
+            Err(mpsc::RecvTimeoutError::Timeout) => break,
+            Err(error) => panic!("session ended unexpectedly: {error}"),
+        }
+    }
+    session.stop();
+    let events = drain(&session);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, PipelineEvent::AutoStopped))
+    );
+    assert!(matches!(
+        events.last(),
+        Some(PipelineEvent::Finished { .. })
+    ));
+    session.wait().unwrap();
+}

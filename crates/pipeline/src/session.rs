@@ -14,7 +14,7 @@ use anyhow::{Context, Result, anyhow};
 use chrono::{TimeDelta, Utc};
 use notetaker_asr_proto::AudioInput;
 use notetaker_capture::{
-    AudioSource, CaptureEvent, CaptureMessage, Channel, SAMPLE_RATE, sample_position,
+    AudioFrame, AudioSource, CaptureEvent, CaptureMessage, Channel, SAMPLE_RATE, sample_position,
 };
 use notetaker_core::{Library, Meeting, MeetingMeta, Segment, Source, SpeakerId};
 use uuid::Uuid;
@@ -31,6 +31,9 @@ pub struct RecordingConfig {
     pub max_live_lag: Duration,
     /// None keeps audio forever; zero removes Opus only after a successful final.
     pub retention: Option<Duration>,
+    /// Stop after this wall-clock interval without RMS above chunks.silence_level
+    /// on either track. Missing packets count as silence. None disables it.
+    pub auto_stop_after_silence: Option<Duration>,
 }
 
 impl Default for RecordingConfig {
@@ -39,6 +42,7 @@ impl Default for RecordingConfig {
             chunks: ChunkConfig::default(),
             max_live_lag: Duration::from_secs(60),
             retention: Some(Duration::from_secs(7 * 86400)),
+            auto_stop_after_silence: Some(Duration::from_secs(15 * 60)),
         }
     }
 }
@@ -46,12 +50,21 @@ impl Default for RecordingConfig {
 #[derive(Debug, Clone)]
 pub enum PipelineEvent {
     LiveSegments(Vec<Segment>),
-    Lag { seconds: f64 },
+    Lag {
+        seconds: f64,
+    },
     LiveDisabled,
+    /// Capture stopped for silence; final transcription and Finished follow.
+    AutoStopped,
     CaptureEvent(CaptureEvent),
     Error(String),
-    FinalPassProgress { completed: usize, total: usize },
-    Finished { meeting: Meeting },
+    FinalPassProgress {
+        completed: usize,
+        total: usize,
+    },
+    Finished {
+        meeting: Meeting,
+    },
 }
 
 #[derive(Clone)]
@@ -255,6 +268,8 @@ fn record(
         let (tx, rx) = mpsc::sync_channel(256);
         let origin = Instant::now();
         let mut stopped = [false; 2];
+        let mut silence =
+            SilenceTimer::new(config.auto_stop_after_silence, config.chunks.silence_level);
         for (i, source) in sources.0.iter_mut().enumerate() {
             if let Err(error) = source.start(tx.clone()) {
                 stopped[i] = true;
@@ -276,9 +291,22 @@ fn record(
                 break;
             }
             match rx.recv_timeout(Duration::from_millis(20)) {
-                Ok(message) => capture(message, &mut tracks, &queue, &jobs_tx, &mut stopped)?,
-                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Ok(message) => {
+                    if let CaptureMessage::Frame(frame) = &message {
+                        silence.observe(origin.elapsed(), frame);
+                    }
+                    capture(message, &mut tracks, &queue, &jobs_tx, &mut stopped)?;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+            if silence.expired(origin.elapsed())
+                && stop
+                    .0
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+            {
+                let _ = events.send(PipelineEvent::AutoStopped);
             }
         }
         sources.stop(events);
@@ -334,6 +362,40 @@ fn record(
         meeting: meeting.clone(),
     });
     Ok(())
+}
+
+/// A single timer since sound on either channel is equivalent to requiring both
+/// channels to be quiet. Wall time also covers WASAPI's no-packet silence.
+struct SilenceTimer {
+    timeout: Option<Duration>,
+    level: f32,
+    last_sound: Duration,
+}
+impl SilenceTimer {
+    fn new(timeout: Option<Duration>, level: f32) -> Self {
+        Self {
+            timeout,
+            level,
+            last_sound: Duration::ZERO,
+        }
+    }
+
+    fn observe(&mut self, now: Duration, frame: &AudioFrame) {
+        if frame.samples.is_empty() {
+            return;
+        }
+        let rms =
+            (frame.samples.iter().map(|s| s * s).sum::<f32>() / frame.samples.len() as f32).sqrt();
+        // Invalid input must not be mistaken for evidence of silence.
+        if !rms.is_finite() || rms > self.level {
+            self.last_sound = now;
+        }
+    }
+
+    fn expired(&self, now: Duration) -> bool {
+        self.timeout
+            .is_some_and(|timeout| now.saturating_sub(self.last_sound) >= timeout)
+    }
 }
 
 fn capture(
@@ -533,6 +595,34 @@ pub(crate) fn replace_final(existing: Vec<Segment>, final_segments: Vec<Segment>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn silence_timer_resets_for_either_channel_and_can_be_disabled() {
+        let at = Duration::from_secs;
+        let mut timer = SilenceTimer::new(Some(at(10)), 0.01);
+        assert!(!timer.expired(at(9)));
+        for (channel, now) in [(Channel::Mic, 9), (Channel::System, 18)] {
+            timer.observe(
+                at(now),
+                &AudioFrame {
+                    channel,
+                    samples: vec![0.1; 320],
+                    captured_at: at(now),
+                },
+            );
+            assert!(!timer.expired(at(now + 9)));
+        }
+        timer.observe(
+            at(27),
+            &AudioFrame {
+                channel: Channel::Mic,
+                samples: vec![0.001; 320],
+                captured_at: at(27),
+            },
+        );
+        assert!(timer.expired(at(28)));
+        assert!(!SilenceTimer::new(None, 0.01).expired(at(10000)));
+    }
 
     #[test]
     fn final_replaces_unedited_live_but_keeps_edits_and_discards_intersections() {

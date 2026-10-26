@@ -1,0 +1,17 @@
+[package]
+name = "notetaker-detect"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = "1"
+
+[target.'cfg(windows)'.dependencies]
+notetaker-capture = { path = "../capture" }
+sysinfo = { version = "0.38", default-features = false, features = ["system"] }
+winreg = "0.55"
+windows = { version = "0.62.2", features = ["Win32_Storage_Packaging_Appx", "Win32_System_Threading"] }

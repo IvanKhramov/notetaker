@@ -28,6 +28,9 @@ pub struct Args {
     /// Days from stop; zero deletes audio after the final pass.
     #[arg(long, default_value_t = 7)]
     retention_days: u64,
+    /// Stop after both tracks stay quiet this many seconds; zero disables it.
+    #[arg(long, default_value_t = 900)]
+    auto_stop_silence_seconds: u64,
 }
 
 pub fn run(args: Args) -> Result<()> {
@@ -69,6 +72,8 @@ pub fn run(args: Args) -> Result<()> {
         AsrConfig::new(args.model)?,
         RecordingConfig {
             retention: Some(Duration::from_secs(retention)),
+            auto_stop_after_silence: (args.auto_stop_silence_seconds != 0)
+                .then(|| Duration::from_secs(args.auto_stop_silence_seconds)),
             ..RecordingConfig::default()
         },
     )?;
@@ -94,6 +99,9 @@ pub fn run(args: Args) -> Result<()> {
             PipelineEvent::LiveDisabled => eprintln!(
                 "Live transcription disabled; recording continues, full transcription follows at stop."
             ),
+            PipelineEvent::AutoStopped => {
+                eprintln!("Recording stopped after prolonged silence; final transcription follows.")
+            }
             PipelineEvent::Error(error) => eprintln!("Error: {error}"),
             PipelineEvent::CaptureEvent(event) => eprintln!("Capture: {event:?}"),
             PipelineEvent::FinalPassProgress { completed, total } => {

@@ -134,3 +134,86 @@ API references: [wasapi 0.26.0](https://docs.rs/wasapi/0.26.0/wasapi/),
 [process-loopback requirements](https://learn.microsoft.com/en-us/windows/win32/api/audioclientactivationparams/ns-audioclientactivationparams-audioclient_process_loopback_params),
 [Opus encoder](https://github.com/restsend/opus-rs),
 [Ogg Opus mapping](https://www.rfc-editor.org/rfc/rfc7845).
+
+## Watch for calls (M7)
+
+`notetaker watch` polls once per second and prints `CallStarted`/`CallEnded`
+with the application name and PID. It only offers **«Записать?»**; it does not
+start recording. Stop the watcher with Ctrl+C.
+
+```powershell
+.\notetaker.exe watch
+.\notetaker.exe watch --browsers
+.\notetaker.exe watch --start-seconds 5 --end-seconds 20 --dismiss-minutes 10
+.\notetaker.exe watch --app custom-call.exe
+```
+
+Check these scenarios on Windows with the same interactive user as the call:
+
+- **Zoom:** join with the microphone enabled. After at least 5 seconds of
+  continuous microphone use, expect one `CallStarted` for Zoom. Leave and expect
+  `CallEnded` after at least 20 seconds without microphone use.
+- **Teams:** repeat with classic `Teams.exe` and new `ms-teams.exe` where available.
+  New Teams is matched by its package family as well as the executable path;
+  confirm that WebView2 audio does not cause duplicate hints.
+- **Browser call:** run `watch --browsers`, join Meet or web Teams in Chrome,
+  Edge, Firefox or Yandex, allow microphone access, and check the same 5/20-second
+  transitions. Browser audio subprocesses should produce one application hint.
+  Muting inside the call may keep the microphone open; leaving is the decisive
+  release test.
+- **Idle browser:** with `--browsers`, leave a browser open without any tab using
+  the microphone for over 5 seconds. Expect no `CallStarted`. Playing music or
+  video without microphone access must not trigger a hint either.
+- **Browser flag:** without `--browsers`, even a browser holding the microphone
+  must not trigger a hint. Opting in also detects dictation/voice messages;
+  microphone use alone cannot prove that a browser tab is a meeting.
+- **Debounce:** access the microphone for less than 5 seconds, release it, then
+  access it again. The first short burst must not count toward the next start.
+  Release for less than 20 seconds during a detected call and resume: no end
+  event and no duplicate start should appear.
+
+Defaults: start debounce **5 s**, end debounce **20 s**, dismissal cooldown
+**10 min**, browser detection **off**. The library's `dismiss(pid)` suppresses
+repeated proposals until the cooldown expires, including another call in that
+same process; `watch` only prints events and has no accept/dismiss UI.
+Additional executable rules can be supplied by application settings through
+`DetectConfig.apps` (or `watch --app`); later rules override earlier ones.
+
+The read-only Windows snapshot reads
+`HKCU\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone`:
+`NonPackaged` children encode executable paths with `#` in place of `\`, while
+other children identify package families. Packaged descendants are also scanned.
+`LastUsedTimeStart > LastUsedTimeStop` means currently using the microphone
+(usually stop is zero). Both values must be present and well formed. This is
+an observed Windows implementation detail, as used in
+[litra-autotoggle's registry reader](https://github.com/timrogers/litra-autotoggle/blob/main/src/main.rs)
+and [BreakTime's microphone detector](https://github.com/jaimaharaj1/BreakTime).
+It is not a documented Windows call-status API. Exact paths/package identities
+are joined to running processes; active capture sessions disambiguate owners
+when possible. Ambiguous owners without session evidence are skipped. Active
+**output** sessions from capture inventory are supporting evidence in `source`,
+never a trigger by themselves. Registry/inventory failures print warnings and
+must not produce an artificial end event. Validate registry behavior on the
+Windows versions being shipped; stale records or a call app retaining the
+microphone after leaving can delay or prevent `CallEnded`.
+
+Recording separately defaults to an automatic stop after **15 minutes** without
+sound above `RecordingConfig.chunks.silence_level` on either track (default
+linear RMS **0.01**, **-40 dBFS**). Missing audio packets count as silence; any
+sound on either track resets the wall-clock timer. For a shorter manual test:
+
+```powershell
+.\notetaker.exe record --library .\library --title 'Silence test' --auto-stop-silence-seconds 10
+```
+
+Keep both inputs quiet. Expect the auto-stop message, then final transcription
+and normal completion with both audio tracks saved. Repeat with speech or sound
+on either track to confirm the timer resets. Use
+`--auto-stop-silence-seconds 0` to disable it. The API option is
+`RecordingConfig.auto_stop_after_silence: Option<Duration>` (`None` disables),
+and `PipelineEvent::AutoStopped` precedes the final pass and `Finished`.
+`CallEnded` does not stop the pipeline; the application decides that policy.
+
+Linux fake-snapshot/fake-source tests and the MSVC detector check do not validate
+real ConsentStore updates, package/PID permissions, audio-session ownership,
+Zoom/Teams/browser behavior, or audible thresholds on actual Windows hardware.
