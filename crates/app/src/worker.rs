@@ -170,6 +170,8 @@ pub enum Command {
         llm: LlmSettings,
     },
 }
+// Rare worker-to-UI messages; boxing variants buys nothing measurable.
+#[allow(clippy::large_enum_variant)]
 pub enum Event {
     Boot {
         settings: Settings,
