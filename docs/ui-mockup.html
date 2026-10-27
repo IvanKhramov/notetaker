@@ -1,0 +1,97 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+.wrap{display:flex;flex-direction:column;gap:22px;font-family:Inter,Segoe UI,system-ui,sans-serif}
+.cap{font:600 13px/1.3 var(--font-sans);color:var(--muted-foreground);margin:0 0 8px}
+.win{background:#fbfaf8;color:#1f1d1a;border-radius:12px;padding:0;overflow:hidden;box-shadow:0 1px 0 #0000000d,0 8px 30px #0000001f;border:1px solid #e7e3dc}
+.tb{height:30px;display:flex;align-items:center;padding:0 12px;font-size:11px;color:#8a857c;border-bottom:1px solid #eeeae3;justify-content:space-between}
+.body{display:flex;min-height:380px}
+.side{width:170px;background:#f3f1ec;padding:14px 10px;border-right:1px solid #ebe7df;font-size:12px}
+.new{display:flex;align-items:center;gap:6px;background:#1f1d1a;color:#fff;border-radius:8px;padding:7px 10px;font-weight:600;font-size:12px;margin-bottom:12px}
+.search{background:#fff;border:1px solid #e3dfd7;border-radius:7px;padding:6px 8px;color:#a39e95;margin-bottom:14px}
+.day{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:#9b968c;margin:10px 4px 4px}
+.it{padding:6px 8px;border-radius:7px;margin-bottom:2px}
+.it b{display:block;font-weight:600;font-size:12px;color:#2a2723;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.it span{font-size:10.5px;color:#9b968c}
+.it.on{background:#fff;box-shadow:0 1px 2px #00000014}
+.rec-dot{width:7px;height:7px;border-radius:50%;background:#e5484d;display:inline-block}
+.main{flex:1;padding:18px 22px;display:flex;flex-direction:column;min-width:0}
+.title{font:650 20px/1.2 Georgia,serif;margin:0 0 6px}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}
+.chip{font-size:10.5px;background:#efece6;color:#6d685f;border-radius:20px;padding:3px 8px}
+.chip.g{background:#e6f4ea;color:#2f7a45}
+.cols{display:flex;gap:16px;flex:1}
+.notes{flex:1.3;font-size:13px;line-height:1.6}
+.notes ul{margin:4px 0 0;padding-left:18px}
+.ph{color:#b3ada3}
+.tr{flex:1;border-left:1px solid #eeeae3;padding-left:14px;font-size:11.5px;line-height:1.45;display:flex;flex-direction:column;gap:8px}
+.tr h4{margin:0;font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:#9b968c;display:flex;justify-content:space-between}
+.msg{max-width:92%}
+.msg i{font-style:normal;font-size:10px;color:#9b968c;display:block;margin-bottom:2px}
+.msg p{margin:0;padding:6px 9px;border-radius:10px;background:#f0ede7}
+.msg.me{align-self:flex-end}.msg.me p{background:#e8eefc;color:#1d3a7a}.msg.me i{text-align:right}
+.live p{color:#8a857c;font-style:italic}
+.bar{display:flex;align-items:center;gap:10px;margin-top:14px;padding:8px 10px;border:1px solid #ebe7df;border-radius:10px;background:#fff;font-size:12px}
+.wave{display:flex;gap:2px;align-items:center;height:16px}.wave i{width:3px;background:#e5484d;border-radius:2px}
+.btn{border-radius:7px;padding:5px 10px;font-size:11.5px;font-weight:600;background:#efece6;color:#2a2723}
+.btn.dk{background:#1f1d1a;color:#fff}.btn.red{background:#fde8e8;color:#c42b30}
+.sp{flex:1}
+.seg{display:inline-flex;background:#efece6;border-radius:8px;padding:2px;margin-bottom:12px}
+.seg span{font-size:11.5px;padding:4px 10px;border-radius:6px;color:#6d685f}
+.seg .on{background:#fff;color:#1f1d1a;font-weight:600;box-shadow:0 1px 2px #00000014}
+.sum h5{font-size:12.5px;margin:10px 0 4px}
+.sum{font-size:12.5px;line-height:1.55}
+.sum ul{margin:0;padding-left:18px}
+.mine{color:#1f1d1a}.ai{color:#7d786f}
+.prog{display:flex;align-items:center;gap:10px;font-size:11.5px;color:#6d685f;background:#f3f1ec;border-radius:9px;padding:8px 10px;margin-bottom:12px}
+.pb{flex:1;height:5px;background:#e3dfd7;border-radius:3px;overflow:hidden}.pb i{display:block;height:100%;width:70%;background:#1f1d1a}
+.desk{background:linear-gradient(135deg,#2b3340,#1b2029);border-radius:12px;padding:20px;position:relative;height:200px}
+.pill{position:absolute;top:18px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:9px;background:#1f1d1aee;color:#fff;border-radius:22px;padding:6px 8px 6px 12px;font-size:12px;box-shadow:0 6px 20px #0006}
+.pill .btn{background:#ffffff1f;color:#fff;padding:4px 9px}
+.toast{position:absolute;right:18px;bottom:18px;width:250px;background:#fbfaf8;border-radius:12px;padding:12px 14px;font-size:12px;color:#1f1d1a;box-shadow:0 10px 30px #0007}
+.toast b{display:block;margin-bottom:3px}
+.toast .row{display:flex;gap:6px;margin-top:10px}
+.lbl{position:absolute;color:#ffffff80;font-size:10.5px}
+</style></head><body><div class="wrap">
+
+<div><p class="cap">1. Во время звонка: заметки слева, живой транскрипт справа, запись в нижней полосе</p>
+<div class="win"><div class="tb"><span>notetaker</span><span>_ ▢ ✕</span></div><div class="body">
+<div class="side"><div class="new">＋ Новая заметка</div><div class="search">Поиск…  Ctrl+K</div>
+<div class="day">Сегодня</div>
+<div class="it on"><b><span class="rec-dot"></span> Концепция AI-Driven</b><span>17:01 · идёт запись</span></div>
+<div class="it"><b>1:1 с Сашей</b><span>11:30 · 32 мин</span></div>
+<div class="day">Вчера</div>
+<div class="it"><b>Премит juliett</b><span>10:00 · 18 мин</span></div>
+<div class="it"><b>Созвон по миграции</b><span>15:00 · 54 мин</span></div></div>
+<div class="main"><h1 class="title">Концепция AI-Driven</h1>
+<div class="chips"><span class="chip">27 окт, 17:01</span><span class="chip">Контур Толк</span><span class="chip">Hybrid</span><span class="chip">Шаблон: общий</span></div>
+<div class="cols"><div class="notes">
+<div><b>Что хотим</b></div><ul><li>агенты пишут код, люди ревьюят</li><li>пилот на одной команде</li><li>метрики до/после<span class="ph">▍</span></li></ul></div>
+<div class="tr"><h4><span>Транскрипт</span><span>⤢</span></h4>
+<div class="msg"><i>Собеседники · 01:02</i><p>Давайте начнём с того, какую проблему мы решаем.</p></div>
+<div class="msg me"><i>Я · 01:10</i><p>Ревью съедает половину времени лида.</p></div>
+<div class="msg"><i>Собеседники · 01:24</i><p>Тогда пилот лучше начать с одной команды.</p></div>
+<div class="msg live"><i>Собеседники · сейчас</i><p>и посмотреть, сколько…</p></div></div></div>
+<div class="bar"><span class="rec-dot"></span><b>12:34</b><span class="wave"><i style="height:6px"></i><i style="height:12px"></i><i style="height:9px"></i><i style="height:15px"></i><i style="height:7px"></i></span><span style="color:#9b968c">Микрофон и звук звонка пишутся</span><span class="sp"></span><span class="btn">Пауза</span><span class="btn red">Стоп</span></div>
+</div></div></div></div>
+
+<div><p class="cap">2. После «Стоп»: прогресс, затем конспект. Твой текст чёрным, дописанное AI серым</p>
+<div class="win"><div class="tb"><span>notetaker</span><span>_ ▢ ✕</span></div><div class="body">
+<div class="side"><div class="new">＋ Новая заметка</div><div class="search">Поиск…  Ctrl+K</div>
+<div class="day">Сегодня</div>
+<div class="it on"><b>Концепция AI-Driven</b><span>17:01 · 47 мин</span></div>
+<div class="it"><b>1:1 с Сашей</b><span>11:30 · 32 мин</span></div></div>
+<div class="main"><h1 class="title">Концепция AI-Driven</h1>
+<div class="chips"><span class="chip">27 окт, 17:01-17:48</span><span class="chip">Контур Толк</span><span class="chip g">Транскрипт готов</span></div>
+<div class="prog">Пишу конспект…<span class="pb"><i></i></span></div>
+<div><span class="seg"><span class="on">Конспект</span><span>Мои заметки</span><span>Транскрипт</span></span></div>
+<div class="sum"><h5>Что хотим</h5><ul><li class="mine">агенты пишут код, люди ревьюят<span class="ai">: лид тратит ~50% времени на ревью</span></li><li class="mine">пилот на одной команде</li></ul>
+<h5>Договорились</h5><ul><li class="ai">Пилот 4 недели, метрики: lead time, время на ревью</li></ul>
+<h5>Задачи</h5><ul><li class="ai">☐ Иван: собрать метрики до пилота, до пт</li></ul></div>
+<span class="sp"></span>
+<div class="bar"><span class="btn">Шаблон: общий ▾</span><span class="btn">Пересоздать</span><span class="sp"></span><span class="btn">Копировать</span><span class="btn dk">Поделиться ▾</span></div>
+</div></div></div></div>
+
+<div><p class="cap">3. Окно свёрнуто: одна плашка поверх всего. Подсказка при звонке в углу</p>
+<div class="desk"><span class="lbl" style="left:20px;bottom:16px">рабочий стол / окно звонка</span>
+<div class="pill"><span class="rec-dot"></span><b>12:34</b><span style="opacity:.6">Концепция AI-Driven</span><span class="btn">Открыть</span><span class="btn" style="background:#e5484d">Стоп</span></div>
+<div class="toast"><b>Звонок в Chrome</b>Записать встречу?<div class="row"><span class="btn dk">Записать</span><span class="btn">Не сейчас</span></div></div></div></div>
+</div></body></html>
