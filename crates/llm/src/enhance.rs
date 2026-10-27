@@ -57,11 +57,11 @@ fn enhance_meeting_with_policy(
     let enhanced = meeting.load_enhanced()?;
     ensure!(
         overwrite_edited
-            || enhanced.value.is_empty()
             || meta
                 .summary
                 .as_ref()
-                .is_some_and(|stamp| !stamp.edited(&enhanced.value)),
+                .map_or(enhanced.value.is_empty(), |stamp| !stamp
+                    .edited(&enhanced.value)),
         "Конспект изменён вручную. Нажмите Пересоздать."
     );
     let enhanced_revision = enhanced.revision;

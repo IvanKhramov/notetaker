@@ -356,7 +356,9 @@ impl NotetakerApp {
                             ui.add_enabled_ui(can_enhance, |ui| {
                                 enhance |= theme::button(
                                     ui,
-                                    if document.data.enhanced.is_empty() {
+                                    if document.data.enhanced.is_empty()
+                                        && document.data.meta.summary.is_none()
+                                    {
                                         "Создать конспект"
                                     } else {
                                         "Пересоздать"
@@ -424,7 +426,8 @@ impl NotetakerApp {
                             );
                         } else if document.data.enhanced.is_empty() && self.enhanced_preview {
                             ui.weak(
-                                "Выберите шаблон и нажмите «Создать конспект», чтобы собрать конспект.",
+                                if document.data.meta.summary.is_some() { "Конспект очищен вручную. Нажмите «Пересоздать», чтобы создать его заново." }
+                                else { "Выберите шаблон и нажмите «Создать конспект», чтобы собрать конспект." },
                             );
                         } else if self.enhanced_preview {
                             markdown_preview(

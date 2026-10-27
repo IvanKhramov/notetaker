@@ -1395,8 +1395,9 @@ mod tests {
         assert!(auto_summary_ready(true, &data, &llm));
         data.enhanced.push_str("edited");
         assert!(!auto_summary_ready(true, &data, &llm));
-        llm.defaults.hybrid = "missing".into();
         data.enhanced.clear();
+        assert!(!auto_summary_ready(true, &data, &llm));
+        llm.defaults.hybrid = "missing".into();
         assert!(!auto_summary_ready(true, &data, &llm));
     }
     #[test]

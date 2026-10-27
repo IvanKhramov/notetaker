@@ -387,6 +387,19 @@ fn automatic_generation_preserves_user_summary_and_stamps_actual_input() {
     );
     assert_eq!(provider.calls.lock().unwrap().len(), count);
     assert_eq!(meeting.read_enhanced().unwrap(), "user changes");
+    meeting.write_enhanced("").unwrap();
+    assert!(
+        notetaker_llm::enhance_meeting_if_unedited(
+            &meeting,
+            "general",
+            &template,
+            &provider,
+            &mut |_| {}
+        )
+        .is_err()
+    );
+    assert_eq!(provider.calls.lock().unwrap().len(), count);
+    assert!(meeting.read_enhanced().unwrap().is_empty());
     assert!(enhance_meeting(&meeting, "general", &template, &provider, &mut |_| {}).is_ok());
 }
 

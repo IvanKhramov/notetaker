@@ -433,12 +433,12 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
 }
 
 pub fn summary_can_overwrite(data: &DocumentData) -> bool {
-    data.enhanced.is_empty()
-        || data
-            .meta
-            .summary
-            .as_ref()
-            .is_some_and(|stamp| !stamp.edited(&data.enhanced))
+    data.meta
+        .summary
+        .as_ref()
+        .map_or(data.enhanced.is_empty(), |stamp| {
+            !stamp.edited(&data.enhanced)
+        })
 }
 
 fn error_text(error: anyhow::Error) -> String {
