@@ -69,8 +69,9 @@ fn record_from_files_with_real_models() {
                 .windows(2)
                 .all(|s| s[0].start_ms <= s[1].start_ms)
         );
-        assert!(transcript.segments.iter().any(|s| s.speaker.0 == "me"));
-        assert!(transcript.segments.iter().any(|s| s.speaker.0 == "them"));
+        // Both tracks carry the same file, so every mic segment is an echo of
+        // the system track and must be suppressed.
+        assert!(transcript.segments.iter().all(|s| s.speaker.0 == "them"));
         assert!(meeting.read_meta().unwrap().ended_at.is_some());
         assert!(!meeting.path().join("audio/.work").exists());
         for segment in transcript.segments.iter().take(3) {
