@@ -70,8 +70,9 @@ fn record_from_files_with_real_models() {
                 .all(|s| s[0].start_ms <= s[1].start_ms)
         );
         // Both tracks carry the same file, so every mic segment is an echo of
-        // the system track and must be suppressed.
-        assert!(transcript.segments.iter().all(|s| s.speaker.0 == "them"));
+        // the system track and must be suppressed. System speakers may be
+        // diarized into s1, s2, ... when the speaker models are installed.
+        assert!(transcript.segments.iter().all(|s| s.speaker.0 != "me"));
         assert!(meeting.read_meta().unwrap().ended_at.is_some());
         assert!(!meeting.path().join("audio/.work").exists());
         for segment in transcript.segments.iter().take(3) {
