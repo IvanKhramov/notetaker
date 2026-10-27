@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use notetaker_core::{Channel, Segment};
 
 fn tokens(text: &str) -> Vec<String> {
@@ -13,14 +11,38 @@ fn duplicate(mic: &[String], system: &[String]) -> bool {
     if mic.len() < 3 || system.is_empty() {
         return false;
     }
-    let a: HashSet<_> = mic.iter().collect();
-    let b: HashSet<_> = system.iter().collect();
-    let jaccard = a.intersection(&b).count() as f32 / a.union(&b).count() as f32;
-    if jaccard < 0.6 {
+    let protected = |words: &[String]| -> Vec<String> {
+        words
+            .iter()
+            .filter(|word| {
+                matches!(word.as_str(), "не" | "нет" | "ни" | "no" | "not" | "never")
+                    || word.chars().any(char::is_numeric)
+            })
+            .cloned()
+            .collect()
+    };
+    if protected(mic) != protected(system) {
+        return false;
+    }
+    // Token edit distance preserves order, repetitions and meaningful omissions.
+    let mut row: Vec<_> = (0..=system.len()).collect();
+    for (i, a) in mic.iter().enumerate() {
+        let mut previous = row[0];
+        row[0] = i + 1;
+        for (j, b) in system.iter().enumerate() {
+            let old = row[j + 1];
+            row[j + 1] = (previous + usize::from(a != b))
+                .min(row[j] + 1)
+                .min(old + 1);
+            previous = old;
+        }
+    }
+    let similarity = 1.0 - row[system.len()] as f32 / mic.len().max(system.len()) as f32;
+    if similarity < 0.85 {
         return false;
     }
     // Require the entire mic phrase in order. Extra mic words may be the user
-    // talking over the remote voice; Jaccard alone would erase that evidence.
+    // talking over the remote voice; similarity alone would erase that evidence.
     let mut matched = 0;
     for token in system {
         if matched < mic.len() && *token == mic[matched] {
@@ -75,6 +97,38 @@ mod tests {
     }
 
     #[test]
+    fn negations_numbers_and_meaningful_omissions_survive() {
+        for (mic, system) in [
+            ("мы будем переносить релиз", "мы не будем переносить релиз"),
+            ("мы не будем переносить релиз", "мы будем переносить релиз"),
+            ("we will move the release", "we will not move the release"),
+            ("we never move the release", "we move the release"),
+            ("no we move the release", "we move the release"),
+            ("нет мы переносим релиз", "мы переносим релиз"),
+            ("ни мы ни они", "мы и они"),
+            (
+                "перенесём 12 встреч на завтра",
+                "перенесём 13 встреч на завтра",
+            ),
+            (
+                "мы согласны с этим планом",
+                "мы согласны только с частью этого плана",
+            ),
+        ] {
+            let mut segments = vec![
+                segment(Channel::System, 0, 4000, system),
+                segment(Channel::Mic, 0, 4000, mic),
+            ];
+            suppress_echo(&mut segments);
+            assert_eq!(segments.len(), 2, "{mic} / {system}");
+        }
+        assert!(duplicate(
+            &tokens("мы не будем переносить релиз 12"),
+            &tokens("Мы не будем переносить релиз 12!")
+        ));
+    }
+
+    #[test]
     fn russian_echo_lag_punctuation_and_split_phrases() {
         let mut segments = vec![
             segment(Channel::System, 0, 1000, "Обновим Deckhouse,"),
@@ -126,6 +180,7 @@ mod tests {
             segment(Channel::Mic, 3900, 4800, "После встречи сегодня вечером"),
         ];
         suppress_echo(&mut partial);
-        assert_eq!(partial.len(), 1);
+        // A short fragment below the similarity threshold is ambiguous evidence.
+        assert_eq!(partial.len(), 2);
     }
 }
