@@ -336,18 +336,25 @@ impl Provider for CliProvider {
     }
 }
 
+#[cfg(any(windows, test))]
+fn login_command(binary: &Path, kind: ProviderKind) -> Command {
+    let mut command = Command::new(binary);
+    if kind == ProviderKind::CodexCli {
+        command.arg("login");
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x00000010); // CREATE_NEW_CONSOLE
+    }
+    command
+}
+
 pub fn open_login(kind: ProviderKind) -> Result<()> {
     let binary = find_cli(kind).context("CLI не установлен")?;
     #[cfg(windows)]
     {
-        Command::new("cmd.exe")
-            .args(["/c", "start", "", "cmd", "/k"])
-            .arg(binary)
-            .args(if kind == ProviderKind::CodexCli {
-                vec!["login"]
-            } else {
-                vec![]
-            })
+        login_command(&binary, kind)
             .spawn()
             .context("Не удалось открыть окно входа")?;
     }
@@ -569,4 +576,22 @@ fn cli_provider_uses_the_shared_map_reduce_for_long_transcripts() {
     .unwrap();
     assert_eq!(text, "brief summary");
     assert!(fs::read(dir.path().join("calls")).unwrap().len() > 1);
+}
+
+#[cfg(test)]
+mod login_tests {
+    use super::*;
+
+    #[test]
+    fn login_launches_the_binary_directly_with_separate_arguments() {
+        let path = Path::new(r"C:\Users\A & B\cli\codex.exe");
+        for (kind, args) in [
+            (ProviderKind::CodexCli, vec!["login"]),
+            (ProviderKind::ClaudeCli, vec![]),
+        ] {
+            let command = login_command(path, kind);
+            assert_eq!(command.get_program(), path.as_os_str());
+            assert_eq!(command.get_args().collect::<Vec<_>>(), args);
+        }
+    }
 }
