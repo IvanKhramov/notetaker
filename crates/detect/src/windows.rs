@@ -267,14 +267,12 @@ fn file_description(path: &str) -> Option<String> {
             Some(std::slice::from_raw_parts(value.cast(), units))
         };
         let translations = query(w!("\\VarFileInfo\\Translation"), true)?;
-        for translation in translations.chunks_exact(2).take(16) {
-            let key: Vec<_> = format!(
-                r"\StringFileInfo\{:04x}{:04x}\FileDescription",
-                translation[0], translation[1]
-            )
-            .encode_utf16()
-            .chain(Some(0))
-            .collect();
+        for [language, codepage] in translations.as_chunks::<2>().0.iter().take(16) {
+            let key: Vec<_> =
+                format!(r"\StringFileInfo\{language:04x}{codepage:04x}\FileDescription")
+                    .encode_utf16()
+                    .chain(Some(0))
+                    .collect();
             if let Some(value) = query(PCWSTR(key.as_ptr()), false) {
                 let end = value.iter().position(|&c| c == 0).unwrap_or(value.len());
                 let description = String::from_utf16_lossy(&value[..end]).trim().to_owned();
