@@ -115,3 +115,20 @@ fn packaged_webview_audio_is_attributed_to_the_teams_parent() {
     assert_eq!(snapshot.processes[0].exe, "ms-teams.exe");
     assert!(snapshot.processes[0].microphone && snapshot.processes[0].output_active);
 }
+
+#[test]
+fn window_tree_includes_other_executables_but_not_reused_parent_pids() {
+    let root = process(1);
+    let mut child = process(2);
+    child.exe = "msedgewebview2.exe".into();
+    child.parent_pid = Some(1);
+    let mut grandchild = process(3);
+    grandchild.parent_pid = Some(2);
+    let mut stale = process(4);
+    stale.parent_pid = Some(1);
+    stale.started_at = 0;
+    assert_eq!(
+        notetaker_detect::process_tree_pids(1, &[root, child, grandchild, stale, process(5)]),
+        BTreeSet::from([1, 2, 3])
+    );
+}

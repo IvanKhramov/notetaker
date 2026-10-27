@@ -381,17 +381,34 @@ impl AppState {
             .values()
             .any(|doc| doc.saving || doc.dirty.any() || doc.attachments_pending > 0)
     }
+    pub fn prefill_call_title(&mut self) {
+        if self.title.trim().is_empty()
+            && let Some(title) = self
+                .detector
+                .current_call(self.process_id)
+                .and_then(|call| call.meeting_title.as_ref())
+        {
+            self.title = title.clone();
+        }
+    }
     pub fn start_recording(&mut self) {
         self.start_recording_with_app(None);
     }
     pub fn accept_call(&mut self) {
         match self.call_prompt.clone() {
-            Some(CallPrompt::Start { app, pid }) => {
+            Some(CallPrompt::Start {
+                app,
+                pid,
+                meeting_title,
+            }) => {
                 self.process_id = Some(pid);
                 self.record_model = self.settings.model.clone();
                 self.record_mode = self.settings.mode;
-                self.title.clear();
-                self.start_recording_with_app(Some(app));
+                self.start_recording_with_app(Some(notetaker_detect::DetectedCall {
+                    app,
+                    pid,
+                    meeting_title,
+                }));
             }
             Some(CallPrompt::Stop { .. }) => {
                 self.recording.request_stop();
@@ -408,7 +425,7 @@ impl AppState {
             self.detector.dismiss(pid);
         }
     }
-    fn start_recording_with_app(&mut self, app_override: Option<String>) {
+    fn start_recording_with_app(&mut self, call_override: Option<notetaker_detect::DetectedCall>) {
         if !self.ready
             || self.recording.busy()
             || self.downloading
@@ -417,7 +434,8 @@ impl AppState {
         {
             return;
         }
-        let app = app_override.or_else(|| {
+        let call = call_override.or_else(|| self.detector.current_call(self.process_id).cloned());
+        let app = call.as_ref().map(|call| call.app.clone()).or_else(|| {
             self.inventory
                 .sessions
                 .iter()
@@ -428,9 +446,11 @@ impl AppState {
         settings.model = self.record_model.clone();
         settings.mode = self.record_mode;
         let title = if self.title.trim().is_empty() {
-            chrono::Local::now()
-                .format("Встреча %d.%m.%Y %H:%M")
-                .to_string()
+            call.and_then(|call| call.meeting_title).unwrap_or_else(|| {
+                chrono::Local::now()
+                    .format("Встреча %d.%m.%Y %H:%M")
+                    .to_string()
+            })
         } else {
             self.title.trim().to_owned()
         };
@@ -631,6 +651,8 @@ impl AppState {
         self.detector.configure(
             self.ready && self.settings.detect_calls,
             self.settings.detect_browsers,
+            self.settings.detect_any_microphone,
+            &self.settings.call_apps,
         );
         if !self.settings.detect_calls || self.exit_requested {
             self.call_prompt = None;
@@ -652,6 +674,16 @@ impl AppState {
             ) {
                 self.call_prompt = Some(prompt);
             }
+        }
+        if let Some(CallPrompt::Start {
+            app,
+            pid,
+            meeting_title,
+        }) = &mut self.call_prompt
+            && let Some(call) = self.detector.current_call(Some(*pid))
+        {
+            *app = call.app.clone();
+            *meeting_title = call.meeting_title.clone();
         }
         if matches!(self.call_prompt, Some(CallPrompt::Stop { .. }))
             && (!matches!(self.recording.phase, Phase::Starting | Phase::Recording)
@@ -994,6 +1026,8 @@ impl AppState {
                         let changed_library = self.settings.library != settings.library;
                         if self.settings.detect_calls != settings.detect_calls
                             || self.settings.detect_browsers != settings.detect_browsers
+                            || self.settings.detect_any_microphone != settings.detect_any_microphone
+                            || self.settings.call_apps != settings.call_apps
                         {
                             self.call_prompt = None;
                         }
@@ -1288,6 +1322,7 @@ mod tests {
         state.call_prompt = Some(CallPrompt::Start {
             app: "Teams".into(),
             pid: 42,
+            meeting_title: Some("Planning".into()),
         });
         state.accept_call();
         let Command::Record(request) = commands.try_recv().unwrap() else {
@@ -1297,7 +1332,7 @@ mod tests {
         assert_eq!(request.app.as_deref(), Some("Teams"));
         assert_eq!(request.settings.model, "gigaam-v3");
         assert_eq!(request.settings.mode, state.settings.mode);
-        assert_ne!(request.title, "old title");
+        assert_eq!(request.title, "old title");
         assert_eq!(state.recording.process_id, Some(42));
         assert!(state.call_prompt.is_none());
         state.call_prompt = Some(CallPrompt::Stop { pid: 42 });
@@ -1305,6 +1340,69 @@ mod tests {
         assert!(!state.recording.stop_requested);
         assert!(state.call_prompt.is_none());
     }
+    #[test]
+    fn manual_start_uses_detected_title_even_without_a_prompt() {
+        for typed in ["", "My title"] {
+            let (mut state, commands, _root, _path) = fixture();
+            state.ready = true;
+            state.title = typed.into();
+            state.detector = Monitor::with_calls(vec![notetaker_detect::DetectedCall {
+                app: "Контур.Толк (Chrome)".into(),
+                pid: 42,
+                meeting_title: Some("AI planning".into()),
+            }]);
+            state.start_recording();
+            let Command::Record(request) = commands.try_recv().unwrap() else {
+                panic!("expected recording");
+            };
+            assert_eq!(
+                request.title,
+                if typed.is_empty() {
+                    "AI planning"
+                } else {
+                    typed
+                }
+            );
+            assert_eq!(request.app.as_deref(), Some("Контур.Толк (Chrome)"));
+        }
+    }
+
+    #[test]
+    fn accepting_call_prefills_title_without_inventory() {
+        let (mut state, commands, _root, _path) = fixture();
+        state.ready = true;
+        state.call_prompt = Some(CallPrompt::Start {
+            app: "Телемост".into(),
+            pid: 42,
+            meeting_title: Some("Planning".into()),
+        });
+        state.accept_call();
+        let Command::Record(request) = commands.try_recv().unwrap() else {
+            panic!("expected recording");
+        };
+        assert_eq!(request.title, "Planning");
+        assert_eq!(request.process_id, Some(42));
+    }
+
+    #[test]
+    fn dialog_prefill_preserves_typed_titles_and_respects_selected_pid() {
+        let (mut state, _commands, _root, _path) = fixture();
+        state.detector = Monitor::with_calls(vec![notetaker_detect::DetectedCall {
+            app: "Телемост".into(),
+            pid: 42,
+            meeting_title: Some("Planning".into()),
+        }]);
+        state.process_id = Some(7);
+        state.prefill_call_title();
+        assert!(state.title.is_empty());
+        state.process_id = None;
+        state.prefill_call_title();
+        assert_eq!(state.title, "Planning");
+        state.title = "Typed".into();
+        state.prefill_call_title();
+        assert_eq!(state.title, "Typed");
+    }
+
     #[test]
     fn save_failure_prevents_exit_and_keeps_latest_notes() {
         let (mut state, commands, _root, path) = fixture();

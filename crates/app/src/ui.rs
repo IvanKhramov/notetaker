@@ -69,6 +69,7 @@ impl NotetakerApp {
             |ui| {
                 if theme::button(ui, "+ Новая заметка", ButtonStyle::Primary).clicked()
                 {
+                    self.state.prefill_call_title();
                     self.show_record = true;
                     self.state.inventory_pending = true;
                     self.state.send(Command::Inventory);
@@ -617,8 +618,12 @@ impl NotetakerApp {
                 ui.separator();
                 ui.add_enabled_ui(cfg!(windows), |ui| {
                     ui.checkbox(&mut settings.detect_calls, "Предлагать запись при обнаружении звонка");
+                    ui.checkbox(&mut settings.detect_any_microphone, "Предлагать для любых приложений с микрофоном");
                     ui.checkbox(&mut settings.detect_browsers, "Учитывать браузеры")
                         .on_hover_text("Включите для Meet, Толка и Телемоста в браузере. Диктовка и голосовые сообщения тоже могут выглядеть как звонок.");
+                    ui.label("Свои приложения для звонков");
+                    ui.add(egui::TextEdit::multiline(&mut settings.call_apps).desired_rows(3).hint_text("Telemost.exe\nKonturTalk.exe"));
+                    ui.small("Имена exe из Диспетчера задач, по одному на строку. Дополняют список известных приложений.");
                 });
                 ui.horizontal(|ui| {
                     ui.label("Автостоп по тишине:");
@@ -758,9 +763,13 @@ impl NotetakerApp {
                     .show(ui, |ui| {
                         ui.set_width(318.0);
                         let (title, question, button) = match &prompt {
-                            CallPrompt::Start { app, .. } => {
-                                (format!("Звонок в {app}"), "Записать встречу?", "Записать")
-                            }
+                            CallPrompt::Start {
+                                app, meeting_title, ..
+                            } => (
+                                format!("Звонок в {app}"),
+                                meeting_title.as_deref().unwrap_or("Записать встречу?"),
+                                "Записать",
+                            ),
                             CallPrompt::Stop { .. } => (
                                 "Звонок закончился".into(),
                                 "Остановить запись?",

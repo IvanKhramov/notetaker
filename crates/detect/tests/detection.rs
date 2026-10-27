@@ -18,6 +18,9 @@ fn observation(exe: &str, microphone: bool) -> Observation {
         exe: exe.into(),
         microphone,
         output_active: true,
+        system: false,
+        description: None,
+        call: None,
     }
 }
 fn detector(exe: &str, mic: &[bool], config: DetectConfig) -> CallDetector<Fake> {
@@ -39,7 +42,7 @@ fn at(seconds: u64) -> Duration {
     Duration::from_secs(seconds)
 }
 fn started(events: &[DetectEvent]) -> bool {
-    matches!(events, [DetectEvent::CallStarted { app, pid: 7, source: DetectSource::MicrophoneAndOutput }] if app == "Teams")
+    matches!(events, [DetectEvent::CallStarted { app, pid: 7, source: DetectSource::MicrophoneAndOutput, .. }] if app == "Teams")
 }
 
 #[test]
@@ -123,7 +126,13 @@ fn browsers_are_enabled_by_default_and_playback_alone_is_never_a_call() {
                 ..DetectConfig::default()
             },
         ),
-        ("unknown.exe", DetectConfig::default()),
+        (
+            "unknown.exe",
+            DetectConfig {
+                detect_any_microphone: false,
+                ..DetectConfig::default()
+            },
+        ),
     ] {
         let mut d = detector(exe, &[true, true], config);
         assert!(d.poll(at(0)).is_empty());
@@ -302,4 +311,166 @@ fn browser_toggle_preserves_active_call_and_dismissal() {
         d.poll(at(626)).as_slice(),
         [DetectEvent::CallEnded { .. }]
     ));
+}
+
+#[test]
+fn generic_microphone_detection_uses_description_then_exe_stem() {
+    for (exe, description, expected) in [
+        ("custom.exe", Some("Custom Calls"), "Custom Calls"),
+        ("Unlisted.EXE", None, "Unlisted"),
+        ("Zoom.exe", Some("Wrong name"), "Zoom"),
+    ] {
+        let mut process = observation(exe, true);
+        process.description = description.map(str::to_owned);
+        let mut d = CallDetector::new(
+            Fake(VecDeque::from_iter((0..2).map(|_| {
+                Ok(Snapshot {
+                    processes: vec![process.clone()],
+                    warnings: vec![],
+                })
+            }))),
+            DetectConfig::default(),
+        );
+        assert!(d.poll(at(0)).is_empty());
+        assert!(
+            matches!(d.poll(at(5)).as_slice(), [DetectEvent::CallStarted {app, ..}] if app == expected)
+        );
+    }
+}
+
+#[test]
+fn system_recorders_and_our_own_capture_are_denied_even_as_custom_rules() {
+    for (exe, system) in [
+        ("notetaker.exe", false),
+        ("NOTETAKER-APP.EXE", false),
+        ("SoundRecorder.exe", false),
+        ("VoiceRecorder.exe", false),
+        ("svchost.exe", false),
+        ("OtherWindowsComponent.exe", true),
+    ] {
+        let mut process = observation(exe, true);
+        process.system = system;
+        let mut config = DetectConfig::default();
+        config.apps.push(notetaker_detect::AppRule {
+            exe: exe.into(),
+            name: exe.into(),
+            browser: false,
+        });
+        let mut d = CallDetector::new(
+            Fake(VecDeque::from_iter((0..2).map(|_| {
+                Ok(Snapshot {
+                    processes: vec![process.clone()],
+                    warnings: vec![],
+                })
+            }))),
+            config,
+        );
+        assert!(d.poll(at(0)).is_empty());
+        assert!(d.poll(at(60)).is_empty());
+    }
+}
+
+#[test]
+fn custom_rules_work_with_generic_mode_off_and_preserve_browser_opt_out() {
+    let mut d = detector(
+        "Unlisted.exe",
+        &[true; 5],
+        DetectConfig {
+            detect_any_microphone: false,
+            ..DetectConfig::default()
+        },
+    );
+    d.poll(at(0));
+    assert!(d.poll(at(5)).is_empty());
+    d.configure_apps(false, &[" unlisted.EXE ".into()]);
+    assert!(d.poll(at(6)).is_empty());
+    assert!(matches!(
+        d.poll(at(11)).as_slice(),
+        [DetectEvent::CallStarted { .. }]
+    ));
+    d.configure_apps(false, &[]);
+    assert!(d.poll(at(12)).is_empty());
+    assert!(d.current_calls().is_empty());
+
+    let mut d = detector(
+        "chrome.exe",
+        &[true; 2],
+        DetectConfig {
+            detect_browsers: false,
+            ..DetectConfig::default()
+        },
+    );
+    d.configure_apps(true, &["CHROME.EXE".into()]);
+    d.poll(at(0));
+    assert!(d.poll(at(60)).is_empty());
+}
+
+#[test]
+fn generic_toggle_preserves_dismissal_and_microphone_release() {
+    let mut d = detector(
+        "custom.exe",
+        &[true, true, true, true, true, false, false],
+        DetectConfig::default(),
+    );
+    d.poll(at(0));
+    assert!(matches!(
+        d.poll(at(5)).as_slice(),
+        [DetectEvent::CallStarted { .. }]
+    ));
+    d.dismiss(7);
+    d.configure_apps(false, &[]);
+    assert!(d.poll(at(600)).is_empty());
+    assert!(d.current_calls().is_empty());
+    d.configure_apps(true, &[]);
+    assert!(d.poll(at(604)).is_empty());
+    assert!(matches!(
+        d.poll(at(605)).as_slice(),
+        [DetectEvent::CallStarted { .. }]
+    ));
+    d.poll(at(606));
+    assert!(d.current_calls().is_empty());
+    assert!(matches!(
+        d.poll(at(626)).as_slice(),
+        [DetectEvent::CallEnded { .. }]
+    ));
+}
+
+#[test]
+fn browser_identity_and_title_are_refreshed_after_start_and_dismissal() {
+    let frames = [
+        (true, Some("Old | Контур.Толк - Google Chrome")),
+        (true, Some("Planning | Контур.Толк - Google Chrome")),
+        (true, Some("Updated | Контур.Толк - Google Chrome")),
+        (true, None),
+        (false, None),
+    ];
+    let mut d = CallDetector::new(
+        Fake(VecDeque::from_iter(frames.into_iter().map(
+            |(mic, title)| {
+                let mut p = observation("chrome.exe", mic);
+                p.call = title.and_then(notetaker_detect::parse_call_title);
+                Ok(Snapshot {
+                    processes: vec![p],
+                    warnings: vec![],
+                })
+            },
+        ))),
+        DetectConfig::default(),
+    );
+    d.poll(at(0));
+    assert!(d.current_calls().is_empty());
+    assert!(
+        matches!(d.poll(at(5)).as_slice(), [DetectEvent::CallStarted { app, meeting_title, .. }]
+        if app == "Контур.Толк (Chrome)" && meeting_title.as_deref() == Some("Planning"))
+    );
+    d.dismiss(7);
+    d.poll(at(6));
+    assert_eq!(
+        d.current_calls()[0].meeting_title.as_deref(),
+        Some("Updated")
+    );
+    d.poll(at(7));
+    assert_eq!(d.current_calls()[0].meeting_title, None);
+    d.poll(at(8));
+    assert!(d.current_calls().is_empty());
 }

@@ -112,8 +112,32 @@ pub fn registry_snapshot(
                 exe: p.exe.clone(),
                 microphone: microphone.contains(&p.pid),
                 output_active: output.contains(&p.pid),
+                system: false,
+                description: None,
+                call: None,
             })
             .collect(),
         warnings: vec![],
+    }
+}
+
+/// Include descendants with different executable names (for example WebView2).
+/// Creation times prevent a reused parent PID from swallowing an unrelated process.
+pub fn process_tree_pids(pid: u32, processes: &[Process]) -> BTreeSet<u32> {
+    let mut tree = BTreeSet::from([pid]);
+    loop {
+        let before = tree.len();
+        for process in processes {
+            if processes.iter().any(|parent| {
+                Some(parent.pid) == process.parent_pid
+                    && tree.contains(&parent.pid)
+                    && parent.started_at <= process.started_at
+            }) {
+                tree.insert(process.pid);
+            }
+        }
+        if tree.len() == before {
+            return tree;
+        }
     }
 }

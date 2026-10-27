@@ -1,15 +1,21 @@
-use std::{collections::BTreeSet, io};
+use std::{collections::BTreeSet, ffi::c_void, io};
 
 use anyhow::{Context, Result};
 use notetaker_capture::Channel;
 use sysinfo::{ProcessRefreshKind, RefreshKind, System, UpdateKind};
 use windows::{
     Win32::{
-        Foundation::{CloseHandle, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS},
-        Storage::Packaging::Appx::GetPackageFamilyName,
+        Foundation::{CloseHandle, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, HWND, LPARAM},
+        Storage::{
+            FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW},
+            Packaging::Appx::GetPackageFamilyName,
+        },
         System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+        UI::WindowsAndMessaging::{
+            EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
+        },
     },
-    core::PWSTR,
+    core::{BOOL, PCWSTR, PWSTR, w},
 };
 use winreg::{
     RegKey,
@@ -74,6 +80,35 @@ impl SnapshotProvider for WindowsSnapshot {
             &active_pids(Channel::System),
         );
         snapshot.warnings = inventory.warnings;
+        let windows_dir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        let windows_prefix = format!("{}\\", windows_dir.trim_end_matches('\\').to_lowercase());
+        for observed in &mut snapshot.processes {
+            let Some(process) = processes.iter().find(|p| p.pid == observed.pid) else {
+                continue;
+            };
+            observed.system = process.pid == std::process::id()
+                || process.pid <= 4
+                || process
+                    .path
+                    .as_ref()
+                    .is_some_and(|path| path.to_lowercase().starts_with(&windows_prefix));
+            if !observed.microphone || observed.system || crate::denied_exe(&observed.exe) {
+                continue;
+            }
+            if !crate::KNOWN_APPS
+                .iter()
+                .any(|(exe, _, _)| exe.eq_ignore_ascii_case(&observed.exe))
+            {
+                observed.description = process.path.as_deref().and_then(file_description);
+            }
+            let pids = crate::process_tree_pids(process.pid, &processes);
+            match window_titles(&pids) {
+                Ok(titles) => {
+                    observed.call = crate::identify_call(titles.iter().map(String::as_str))
+                }
+                Err(error) => snapshot.warnings.push(format!("window titles: {error}")),
+            }
+        }
         Ok(snapshot)
     }
 }
@@ -158,4 +193,96 @@ fn package_family(pid: u32) -> Option<String> {
     // SAFETY: this function owns the successfully opened handle; close exactly once.
     let _ = unsafe { CloseHandle(handle) };
     result
+}
+
+#[allow(unsafe_code)]
+fn window_titles(pids: &BTreeSet<u32>) -> windows::core::Result<Vec<String>> {
+    struct Titles<'a> {
+        pids: &'a BTreeSet<u32>,
+        titles: Vec<String>,
+    }
+    unsafe extern "system" fn visit(hwnd: HWND, data: LPARAM) -> BOOL {
+        // SAFETY: EnumWindows calls synchronously with our live, exclusively borrowed
+        // Titles context. Windows supplies a valid window handle; failures yield 0.
+        unsafe {
+            let context = &mut *(data.0 as *mut Titles<'_>);
+            let mut pid = 0;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if context.pids.contains(&pid) && IsWindowVisible(hwnd).as_bool() {
+                let mut text = [0u16; 2048];
+                let len = GetWindowTextW(hwnd, &mut text);
+                if len > 0 {
+                    context
+                        .titles
+                        .push(String::from_utf16_lossy(&text[..len as usize]));
+                }
+            }
+        }
+        BOOL(1)
+    }
+    let mut context = Titles {
+        pids,
+        titles: vec![],
+    };
+    // SAFETY: visit does not retain this pointer; context outlives enumeration.
+    unsafe {
+        EnumWindows(
+            Some(visit),
+            LPARAM(&mut context as *mut Titles<'_> as isize),
+        )?
+    };
+    Ok(context.titles)
+}
+
+#[allow(unsafe_code)]
+fn file_description(path: &str) -> Option<String> {
+    let path: Vec<_> = path.encode_utf16().chain(Some(0)).collect();
+    // SAFETY: path is NUL-terminated; the bounded, aligned version buffer stays live
+    // throughout all VerQueryValue calls. query checks returned pointer/length bounds
+    // and alignment before constructing a slice. No returned pointer escapes.
+    unsafe {
+        let len = GetFileVersionInfoSizeW(PCWSTR(path.as_ptr()), None);
+        if !(1..=1024 * 1024).contains(&len) {
+            return None;
+        }
+        let mut data = vec![0u64; (len as usize).div_ceil(8)];
+        GetFileVersionInfoW(PCWSTR(path.as_ptr()), None, len, data.as_mut_ptr().cast()).ok()?;
+        let query = |key: PCWSTR, bytes: bool| -> Option<&[u16]> {
+            let mut value: *mut c_void = std::ptr::null_mut();
+            let mut size = 0;
+            if !VerQueryValueW(data.as_ptr().cast(), key, &mut value, &mut size).as_bool() {
+                return None;
+            }
+            let units = if bytes {
+                size as usize / 2
+            } else {
+                size as usize
+            };
+            let start = data.as_ptr() as usize;
+            let address = value as usize;
+            let end = address.checked_add(units.checked_mul(2)?)?;
+            if address < start || end > start + len as usize || !address.is_multiple_of(2) {
+                return None;
+            }
+            Some(std::slice::from_raw_parts(value.cast(), units))
+        };
+        let translations = query(w!("\\VarFileInfo\\Translation"), true)?;
+        for translation in translations.chunks_exact(2).take(16) {
+            let key: Vec<_> = format!(
+                r"\StringFileInfo\{:04x}{:04x}\FileDescription",
+                translation[0], translation[1]
+            )
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+            if let Some(value) = query(PCWSTR(key.as_ptr()), false) {
+                let end = value.iter().position(|&c| c == 0).unwrap_or(value.len());
+                let description = String::from_utf16_lossy(&value[..end]).trim().to_owned();
+                if !description.is_empty() {
+                    return Some(description);
+                }
+            }
+        }
+        None
+    }
 }

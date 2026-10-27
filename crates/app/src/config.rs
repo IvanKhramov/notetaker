@@ -24,6 +24,9 @@ pub struct Settings {
     pub hotkey: String,
     pub detect_calls: bool,
     pub detect_browsers: bool,
+    pub detect_any_microphone: bool,
+    /// Executable names, one per line.
+    pub call_apps: String,
     /// Zero disables the silence timeout.
     pub auto_stop_minutes: u32,
     pub auto_summary: bool,
@@ -49,6 +52,8 @@ impl Default for Settings {
             hotkey: "Ctrl+Alt+R".into(),
             detect_calls: true,
             detect_browsers: true,
+            detect_any_microphone: true,
+            call_apps: String::new(),
             auto_stop_minutes: 15,
             auto_summary: true,
             vocabulary: String::new(),
@@ -95,6 +100,19 @@ impl Settings {
             self.speakers.is_none_or(|n| (1..=32).contains(&n)),
             "Участников: авто или 1–32"
         );
+        for exe in self
+            .call_apps
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            ensure!(
+                exe.to_ascii_lowercase().ends_with(".exe")
+                    && !exe.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|'])
+                    && exe.len() > 4,
+                "Приложения для звонков: укажите имена exe без путей, по одному на строку"
+            );
+        }
         validate_hotkey(&self.hotkey)
     }
 }
@@ -257,6 +275,8 @@ mod tests {
         assert_eq!(settings.speakers, None);
         assert!(settings.detect_calls);
         assert!(settings.detect_browsers);
+        assert!(settings.detect_any_microphone);
+        assert!(settings.call_apps.is_empty());
         assert_eq!(settings.auto_stop_minutes, 15);
         let settings: Settings =
             toml::from_str("auto_stop_minutes = 0\ndetect_calls = false\ndetect_browsers = true")
@@ -265,6 +285,24 @@ mod tests {
         assert!(!settings.detect_calls);
         assert!(settings.detect_browsers);
     }
+    #[test]
+    fn custom_call_apps_roundtrip_and_reject_paths_or_patterns() {
+        let mut settings = Settings {
+            library: std::env::current_dir().unwrap(),
+            call_apps: "Telemost.exe\n  KonturTalk.exe  \n".into(),
+            detect_any_microphone: false,
+            ..Settings::default()
+        };
+        settings.validate().unwrap();
+        let restored: Settings = toml::from_str(&toml::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(restored.call_apps, settings.call_apps);
+        assert!(!restored.detect_any_microphone);
+        for invalid in ["C:\\Call.exe", "../call.exe", "*.exe", "call", ".exe"] {
+            settings.call_apps = invalid.into();
+            assert!(settings.validate().is_err(), "{invalid}");
+        }
+    }
+
     #[test]
     fn validates_settings_and_roundtrip() {
         let mut settings = Settings {
