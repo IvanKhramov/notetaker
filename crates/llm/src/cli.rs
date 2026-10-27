@@ -107,6 +107,38 @@ fn background(binary: &Path) -> Command {
     command
 }
 
+// These flags are required: older CLIs must fail closed instead of silently
+// falling back to the user's tools, MCP servers, hooks or project settings.
+fn claude_isolation(command: &mut Command) {
+    command.args([
+        "--tools",
+        "",
+        "--strict-mcp-config",
+        "--setting-sources",
+        "",
+        "--disable-slash-commands",
+        "--no-session-persistence",
+    ]);
+}
+
+fn codex_isolation(command: &mut Command) {
+    command.args(["--ignore-user-config", "--ignore-rules", "--ephemeral"]);
+    for setting in [
+        "features.shell_tool=false",
+        "web_search=\"disabled\"",
+        "mcp_servers={}",
+        "features.apps=false",
+        "features.remote_plugin=false",
+        "features.multi_agent=false",
+        "features.hooks=false",
+        "features.memories=false",
+        "tools.view_image=false",
+        "project_doc_max_bytes=0",
+    ] {
+        command.args(["-c", setting]);
+    }
+}
+
 // File-backed stdin/stdout avoid pipe deadlocks for long transcripts and CLI logs.
 fn run(
     mut command: Command,
@@ -229,7 +261,8 @@ impl CliProvider {
                 &self.cancel,
             )?;
         } else {
-            command.args(["-p", "ok", "--output-format", "json", "--tools", ""]);
+            command.args(["-p", "ok", "--output-format", "json"]);
+            claude_isolation(&mut command);
             if !self.config.model.is_empty() {
                 command.arg("--model").arg(&self.config.model);
             }
@@ -271,12 +304,14 @@ impl Provider for CliProvider {
         let mut command = background(&self.binary);
         let final_path = dir.path().join("final.md");
         if self.config.kind == ProviderKind::ClaudeCli {
-            command.args(["-p", "--output-format", "json", "--tools", ""]);
+            command.args(["-p", "--output-format", "json"]);
+            claude_isolation(&mut command);
         } else {
             command
                 .args(["exec", "--skip-git-repo-check", "-s", "read-only", "-o"])
                 .arg(&final_path)
                 .arg("-");
+            codex_isolation(&mut command);
         }
         if !self.config.model.is_empty() {
             command.arg("--model").arg(&self.config.model);
@@ -382,7 +417,12 @@ mod tests {
 [ "$2" = '--output-format' ] || exit 1
 [ "$3" = 'json' ] || exit 1
 [ "$4" = '--tools' ] && [ "$5" = '' ] || exit 1
-[ "$6" = '--model' ] && [ "$7" = 'sonnet' ] || exit 1
+[ "$6" = '--strict-mcp-config' ] || exit 1
+[ "$7" = '--setting-sources' ] && [ "$8" = '' ] || exit 1
+[ "$9" = '--disable-slash-commands' ] || exit 1
+shift 9
+[ "$1" = '--no-session-persistence' ] || exit 1
+[ "$2" = '--model' ] && [ "$3" = 'sonnet' ] || exit 1
 input=$(cat)
 case "$input" in *'system marker'*'transcript marker'*) ;; *) exit 1 ;; esac
 printf '%s' '{"result":"summary","is_error":false}'
@@ -414,9 +454,18 @@ printf '%s' '{"result":"summary","is_error":false}'
 [ "$1" = 'exec' ] && [ "$2" = '--skip-git-repo-check' ] || exit 1
 [ "$3" = '-s' ] && [ "$4" = 'read-only' ] || exit 1
 [ "$5" = '-o' ] || exit 1
+output="$6"
+shift 7
+[ "$1" = '--ignore-user-config' ] || exit 1
+[ "$2" = '--ignore-rules' ] && [ "$3" = '--ephemeral' ] || exit 1
+shift 3
+for setting in 'features.shell_tool=false' 'web_search="disabled"' 'mcp_servers={}' 'features.apps=false' 'features.remote_plugin=false' 'features.multi_agent=false' 'features.hooks=false' 'features.memories=false' 'tools.view_image=false' 'project_doc_max_bytes=0'; do
+    [ "$1" = '-c' ] && [ "$2" = "$setting" ] || exit 1
+    shift 2
+done
 [ -z "$(ls -A)" ] || exit 1
 cat >/dev/null
-printf '%s' 'last message' > "$6"
+printf '%s' 'last message' > "$output"
 printf '%s' 'tool log must never be treated as final text'
 "#,
         );

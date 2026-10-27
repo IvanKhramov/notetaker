@@ -45,9 +45,29 @@ CLI ищутся в PATH; на Windows также в `%USERPROFILE%\.local\bin` 
 На Linux кнопка входа использует `x-terminal-emulator`; при его отсутствии выполни
 вход вручную в терминале. Временные файлы промпта и ответа удаляются после вызова.
 CLI имеют лимит 10 минут на каждый map/reduce-запрос и кнопку **Отменить**.
-Claude вызывается с отключёнными инструментами (`--tools ""`), Codex получает
-read-only sandbox и инструкцию не использовать инструменты. Настройки и доступные
-инструменты CLI остаются под управлением установленного пользователем CLI.
+Claude запускается с `--tools "" --strict-mcp-config --setting-sources ""
+--disable-slash-commands --no-session-persistence`: встроенные инструменты,
+пользовательские MCP, настройки, skills и команды отключены. Флаги проверены
+по `claude --help`; старый CLI без этих флагов завершится с ошибкой.
+
+Codex использует `--ignore-user-config --ignore-rules --ephemeral` и `-c`
+переопределения: `features.shell_tool=false`, `web_search="disabled"`,
+`mcp_servers={}`, `features.apps=false`, `features.remote_plugin=false`,
+`features.multi_agent=false`, `features.hooks=false`, `features.memories=false`,
+`tools.view_image=false`, `project_doc_max_bytes=0`. Пользовательский config
+не загружается, авторизация остаётся штатной, auth.json не читается приложением.
+Флаги проверены на Codex 0.164.0 через `codex exec --help`, ключи по
+[официальному справочнику](https://developers.openai.com/codex/config-reference);
+изоляция config описана в [CLI reference](https://developers.openai.com/codex/cli/reference).
+Старый CLI без обязательных флагов завершится с ошибкой.
+
+Остаточный риск: это ограничение возможностей установленного CLI, а не отдельная
+ОС-песочница без доступа к файлам. Read-only sandbox сам по себе разрешает чтение.
+У Codex нет используемого здесь универсального флага отключения всех текущих и
+будущих инструментов; managed-конфигурация и изменения версий CLI могут влиять
+на изоляцию. У Claude managed-настройки также остаются в силе. CLI запускается
+с правами пользователя, поэтому для строгой границы конфиденциальности используйте
+HTTP-провайдер или отдельную учётную запись ОС без доступа к библиотеке Local.
 
 ## Автоматический конспект и правки
 

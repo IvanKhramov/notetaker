@@ -163,6 +163,7 @@ impl Connections {
                             });
                             ui.small("В окне Claude выполните /login. Токенами входа управляет Claude Code.");
                         } else { ui.small("Вход откроет браузер. Учётными данными управляет Codex CLI."); }
+                        ui.small("Пользовательские MCP отключены. Ограничение инструментов CLI не гарантирует изоляцию Local-файлов: доступ зависит от версии CLI и managed-настроек. Для строгой конфиденциальности используйте HTTP-провайдер.");
                         if ui.button("Войти").clicked() { operation = Some(Operation::Login); }
                     } else {
                         if index == 2 {
