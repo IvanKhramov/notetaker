@@ -67,6 +67,28 @@ impl Server {
     }
     fn call(&self, name: &str, args: Value) -> Result<Value> {
         match name {
+            "list_tasks" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    status: Option<String>,
+                    owner: Option<String>,
+                }
+                let input: Input = serde_json::from_value(args)?;
+                let completed = match input.status.as_deref() {
+                    None | Some("all") => None,
+                    Some("open") => Some(false),
+                    Some("completed") | Some("done") => Some(true),
+                    _ => anyhow::bail!("status: open, completed или all"),
+                };
+                self.library.reindex_incremental()?;
+                Ok(serde_json::to_value(self.library.list_tasks(
+                    completed,
+                    input.owner.as_deref(),
+                    self.exclude_local,
+                )?)?)
+            }
+
             "search_meetings" => {
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]
@@ -196,6 +218,7 @@ fn ten() -> usize {
 }
 fn tools() -> Value {
     json!({"tools":[
+        {"name":"list_tasks","description":"Задачи из конспектов. Соблюдает фильтр Local.","inputSchema":{"type":"object","properties":{"status":{"type":"string","enum":["all","open","completed","done"]},"owner":{"type":"string"}},"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}},
         {"name":"search_meetings","description":"Поиск встреч по словам, BM25. Local-встречи скрыты по настройке.","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer","minimum":0,"maximum":100}},"required":["query"],"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}},
         {"name":"get_meeting","description":"Заметки, конспект и транскрипт с именами. Укажите id или path внутри библиотеки.","inputSchema":{"type":"object","properties":{"id":{"type":"string"},"path":{"type":"string"}},"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}},
         {"name":"get_speaker_timeline","description":"Таймлайн спикеров, суммарное время, доли, реплики и монологи. meeting: UUID или путь внутри библиотеки. Политика Local применяется.","inputSchema":{"type":"object","properties":{"meeting":{"type":"string"}},"required":["meeting"],"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}},
@@ -237,6 +260,7 @@ fn handle(server: &Server, request: Value, initialized: &mut bool) -> Option<Val
                 return Some(error(id, -32602, "Missing tool name"));
             };
             if ![
+                "list_tasks",
                 "search_meetings",
                 "get_meeting",
                 "get_speaker_timeline",
@@ -296,6 +320,53 @@ mod tests {
     use notetaker_core::{Channel, MeetingMeta, Segment, Source, SpeakerId, Transcript};
     use std::io::Cursor;
     #[cfg(unix)]
+    #[test]
+    fn tasks_recheck_source_privacy() {
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open(root.path()).unwrap();
+        let meeting = library
+            .create_meeting(notetaker_core::MeetingMeta::new(
+                "Secret",
+                chrono::Utc::now(),
+            ))
+            .unwrap();
+        meeting
+            .write_enhanced("- [ ] Secret task - Иван - завтра")
+            .unwrap();
+        let server = Server {
+            library,
+            exclude_local: true,
+        };
+        assert_eq!(server.call("list_tasks", json!({})).unwrap(), json!([]));
+        let mut meta = meeting.read_meta().unwrap();
+        meta.mode = Mode::Hybrid;
+        meeting.write_meta(&meta).unwrap();
+        assert_eq!(
+            server
+                .call("list_tasks", json!({"status":"open","owner":"иван"}))
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let response = handle(&server, json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_tasks","arguments":{"status":"open"}}}), &mut true).unwrap();
+        assert_eq!(response["result"]["isError"], false);
+        meta.mode = Mode::Local;
+        meeting.write_meta(&meta).unwrap();
+        assert!(
+            server
+                .library
+                .list_tasks(None, None, true)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            server
+                .call("list_tasks", json!({"status":"invalid"}))
+                .is_err()
+        );
+    }
     #[test]
     fn all_tools_refuse_sources_linked_outside_the_specific_meeting() {
         use std::os::unix::fs::symlink;
@@ -453,7 +524,7 @@ mod tests {
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
         assert_eq!(responses.len(), 10);
-        assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 4);
+        assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 5);
         for response in &responses[2..5] {
             assert_eq!(response["result"]["isError"], false);
         }

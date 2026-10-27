@@ -121,6 +121,61 @@ impl Library {
         Ok(hits)
     }
 
+    /// Recheck source privacy and revision even if the index is stale.
+    pub fn list_tasks(
+        &self,
+        completed: Option<bool>,
+        owner: Option<&str>,
+        exclude_local: bool,
+    ) -> Result<Vec<crate::Task>> {
+        let connection = self.open_index()?;
+        let mut statement =
+            connection.prepare("SELECT path, item FROM tasks ORDER BY path, line")?;
+        let mut rows = statement.query([])?;
+        let mut result = Vec::new();
+        let mut loaded = HashMap::new();
+        while let Some(row) = rows.next()? {
+            let path = PathBuf::from(row.get::<_, String>(0)?);
+            if path.parent() != Some(self.root())
+                || path.canonicalize().ok().as_deref().and_then(Path::parent) != Some(self.root())
+            {
+                continue;
+            }
+            if !loaded.contains_key(&path) {
+                let meeting = Meeting { path: path.clone() };
+                if meeting.validate_source_paths().is_err() {
+                    continue;
+                }
+                let Ok(meta) = meeting.read_meta() else {
+                    continue;
+                };
+                if exclude_local && meta.mode == crate::Mode::Local {
+                    continue;
+                }
+                let Ok(text) = meeting.load_enhanced() else {
+                    continue;
+                };
+                loaded.insert(path.clone(), (meta, text));
+            }
+            let (meta, text) = &loaded[&path];
+            let mut task: crate::Task = serde_json::from_str(&row.get::<_, String>(1)?)?;
+            if text.value.lines().nth(task.line.saturating_sub(1)) != Some(task.source.as_str()) {
+                continue;
+            }
+            if completed.is_some_and(|value| task.completed != value)
+                || owner.is_some_and(|value| !crate::person_matches(&task.owner, value))
+            {
+                continue;
+            }
+            task.path = path;
+            task.meeting_id = meta.id;
+            task.revision = text.revision;
+            task.meeting_title = meta.title.clone();
+            result.push(task);
+        }
+        Ok(result)
+    }
+
     fn open_index(&self) -> Result<Connection> {
         let path = self.index_path();
         fs::create_dir_all(path.parent().expect("index has a parent"))?;
@@ -140,6 +195,7 @@ impl Library {
         let transaction = connection.transaction()?;
         if full {
             transaction.execute("DELETE FROM meetings", [])?;
+            transaction.execute("DELETE FROM tasks", [])?;
         }
         let mut existing: HashMap<String, String> = {
             let mut statement = transaction.prepare("SELECT path, stamp FROM meetings")?;
@@ -171,10 +227,21 @@ impl Library {
                 Err(error) => {
                     tracing::warn!(%path, %error, "skipping invalid meeting during indexing");
                     transaction.execute("DELETE FROM meetings WHERE path = ?1", [path])?;
+                    transaction.execute("DELETE FROM tasks WHERE path = ?1", [path])?;
                     continue;
                 }
             };
             transaction.execute("DELETE FROM meetings WHERE path = ?1", [path])?;
+            transaction.execute("DELETE FROM tasks WHERE path = ?1", [path])?;
+            for mut task in crate::parse_tasks(&enhanced, meta.started_at.date_naive()) {
+                task.meeting_id = meta.id;
+                task.path = meeting.path.clone();
+                task.meeting_title = meta.title.clone();
+                transaction.execute(
+                    "INSERT INTO tasks (path, line, item) VALUES (?1, ?2, ?3)",
+                    params![path, task.line as i64, serde_json::to_string(&task)?],
+                )?;
+            }
             transaction.execute(
                 "INSERT INTO meetings (meeting_id, path, stamp, title, notes, enhanced, transcript)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -191,6 +258,7 @@ impl Library {
         }
         for path in existing.keys() {
             transaction.execute("DELETE FROM meetings WHERE path = ?1", [path])?;
+            transaction.execute("DELETE FROM tasks WHERE path = ?1", [path])?;
         }
         transaction.commit()?;
         Ok(())
@@ -213,13 +281,21 @@ fn source_stamp(meeting: &Meeting) -> Result<String> {
 fn connect_index(path: &Path) -> Result<Connection> {
     let connection = Connection::open(path)?;
     connection.busy_timeout(Duration::from_secs(5))?;
+    let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version != 2 {
+        connection.execute_batch(
+            "DROP TABLE IF EXISTS meetings; DROP TABLE IF EXISTS tasks; PRAGMA user_version = 2;",
+        )?;
+    }
     connection.execute_batch(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS meetings USING fts5(
+        "CREATE TABLE IF NOT EXISTS tasks (path TEXT NOT NULL, line INTEGER NOT NULL, item TEXT NOT NULL, PRIMARY KEY(path, line));
+        CREATE VIRTUAL TABLE IF NOT EXISTS meetings USING fts5(
             meeting_id UNINDEXED, path UNINDEXED, stamp UNINDEXED,
             title, notes, enhanced, transcript,
             tokenize = 'unicode61 remove_diacritics 2'
         );",
     )?;
+    connection.prepare("SELECT path, line, item FROM tasks LIMIT 0")?;
     connection.prepare(
         "SELECT meeting_id, path, stamp, title, notes, enhanced, transcript FROM meetings LIMIT 0",
     )?;
@@ -345,6 +421,49 @@ fn retrieval_query(question: &str) -> String {
 mod retrieval_tests {
     use super::*;
     use crate::{MeetingMeta, Mode};
+    #[test]
+    fn tasks_incremental_rebuild_and_old_schema() {
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open(root.path()).unwrap();
+        let meeting = library
+            .create_meeting(MeetingMeta::new("Задачи", chrono::Utc::now()))
+            .unwrap();
+        meeting
+            .write_enhanced("- [ ] Сделать - Иван - завтра")
+            .unwrap();
+        library.reindex_full().unwrap();
+        assert_eq!(
+            library
+                .list_tasks(Some(false), Some("ИВАН"), false)
+                .unwrap()
+                .len(),
+            1
+        );
+        meeting
+            .write_enhanced("- [x] Сделать - Иван - завтра\n- [ ] Ещё - Анна - до пт")
+            .unwrap();
+        library.reindex_incremental().unwrap();
+        assert_eq!(
+            library.list_tasks(Some(false), None, false).unwrap().len(),
+            1
+        );
+        assert_eq!(library.list_tasks(None, None, false).unwrap().len(), 2);
+        let connection = Connection::open(library.index_path()).unwrap();
+        connection
+            .execute_batch("DROP TABLE tasks; PRAGMA user_version = 0;")
+            .unwrap();
+        drop(connection);
+        library.reindex_incremental().unwrap();
+        assert_eq!(library.list_tasks(None, None, false).unwrap().len(), 2);
+        meeting.write_enhanced("").unwrap();
+        library.reindex_incremental().unwrap();
+        assert!(library.list_tasks(None, None, false).unwrap().is_empty());
+        meeting.write_enhanced("- [ ] Дело").unwrap();
+        library.reindex_full().unwrap();
+        std::fs::remove_dir_all(meeting.path()).unwrap();
+        library.reindex_incremental().unwrap();
+        assert!(library.list_tasks(None, None, false).unwrap().is_empty());
+    }
     #[test]
     fn natural_question_bm25_ranking_and_source_privacy() {
         let root = tempfile::tempdir().unwrap();

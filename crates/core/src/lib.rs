@@ -1,11 +1,16 @@
 //! Meeting files are the source of truth; the SQLite search index is disposable.
 mod attachments;
+mod brief;
 pub mod calendar;
 mod export;
+mod identity;
 mod index;
+pub use identity::configured_user_name;
 mod model;
 mod speakers;
 mod storage;
+mod tasks;
+pub use tasks::{Task, parse_tasks, person_matches, resolve_due};
 mod vocabulary;
 mod voices;
 pub use export::{ExportFormat, format_timestamp};
@@ -42,6 +47,8 @@ pub enum Error {
     },
     #[error("invalid index data: {0}")]
     InvalidIndex(String),
+    #[error("task edit failed: {0}")]
+    TaskEdit(String),
     #[error("speaker edit failed: {0}")]
     SpeakerEdit(String),
 }
