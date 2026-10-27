@@ -3,6 +3,8 @@
 //! Load [`Config`], select a [`ProviderConfig`], call [`create_provider`] for the
 //! meeting mode, then call [`enhance_meeting`]. Callbacks receive final Markdown
 //! deltas only; intermediate map/reduce summaries are kept internal.
+pub mod calendar;
+mod chat;
 mod cli;
 mod config;
 mod credentials;
@@ -10,7 +12,10 @@ mod enhance;
 mod provider;
 mod template;
 
-pub use config::{Config, Defaults, KeySource, ProviderConfig, ProviderKind};
+pub use chat::{ChatResult, ChatTurn, Citation, ask};
+pub use config::{
+    Config, Defaults, KeySource, ModelChoice, ProviderConfig, ProviderKind, Scenario, Scenarios,
+};
 pub use enhance::{
     EnhanceResult, enhance, enhance_meeting, enhance_meeting_if_unedited, estimate_tokens,
 };

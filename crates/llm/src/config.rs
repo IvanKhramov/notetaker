@@ -8,13 +8,15 @@ use std::{
 use anyhow::{Context, Result, bail, ensure};
 use directories::ProjectDirs;
 use notetaker_core::Mode;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub defaults: Defaults,
     pub providers: Vec<ProviderConfig>,
+    #[serde(default)]
+    pub scenarios: Scenarios,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -22,6 +24,27 @@ pub struct Config {
 pub struct Defaults {
     pub local: String,
     pub hybrid: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Scenarios {
+    pub summary: ModelChoice,
+    pub chat: ModelChoice,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ModelChoice {
+    /// Empty fields inherit the privacy-specific default provider and its model.
+    pub provider: String,
+    pub model: String,
+}
+
+#[derive(Clone, Copy)]
+pub enum Scenario {
+    Summary,
+    Chat,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -107,7 +130,43 @@ impl Config {
                 "selected LLM provider is not configured"
             );
         }
+        for choice in [&config.scenarios.summary, &config.scenarios.chat] {
+            ensure!(
+                choice.provider.is_empty()
+                    || config.providers.iter().any(|p| p.id == choice.provider),
+                "Провайдер сценария не настроен"
+            );
+        }
         Ok(config)
+    }
+
+    /// An explicitly selected cloud scenario never bypasses a Local meeting.
+    /// Local falls back to the local default, without a cloud-specific model.
+    pub fn select_scenario(
+        &self,
+        mode: Mode,
+        scenario: Scenario,
+        override_id: Option<&str>,
+    ) -> Result<ProviderConfig> {
+        if let Some(id) = override_id {
+            return Ok(self.select(mode, Some(id))?.clone());
+        }
+        let choice = match scenario {
+            Scenario::Summary => &self.scenarios.summary,
+            Scenario::Chat => &self.scenarios.chat,
+        };
+        let mut provider = if choice.provider.is_empty() {
+            self.select(mode, None)?.clone()
+        } else if mode == Mode::Local && self.select(mode, Some(&choice.provider)).is_err() {
+            return Ok(self.select(mode, None)?.clone());
+        } else {
+            self.select(mode, Some(&choice.provider))?.clone()
+        };
+        if !choice.model.trim().is_empty() {
+            provider.model = choice.model.clone();
+        }
+        provider.validate(mode)?;
+        Ok(provider)
     }
 
     pub fn select(&self, mode: Mode, id: Option<&str>) -> Result<&ProviderConfig> {
@@ -181,5 +240,54 @@ impl ProviderConfig {
             "api_key_env must name an environment variable"
         );
         Ok(url)
+    }
+}
+
+#[cfg(test)]
+mod scenario_tests {
+    use super::*;
+    #[test]
+    fn scenarios_inherit_defaults_override_models_and_fall_back_for_local() {
+        let base = "[defaults]\nlocal='local'\nhybrid='cloud'\n[[providers]]\nid='local'\nkind='openai'\nbase_url='http://localhost:11434/v1'\nmodel='local-model'\n[[providers]]\nid='cloud'\nkind='openai'\nbase_url='https://example.invalid/v1'\nmodel='default-cloud'\n";
+        let config = Config::parse(base).unwrap();
+        assert_eq!(
+            config
+                .select_scenario(Mode::Hybrid, Scenario::Chat, None)
+                .unwrap()
+                .model,
+            "default-cloud"
+        );
+        let config = Config::parse(&format!("{base}\n[scenarios.chat]\nprovider='cloud'\nmodel='chat-model'\n[scenarios.summary]\nprovider='local'\nmodel='summary-model'\n")).unwrap();
+        assert_eq!(
+            config
+                .select_scenario(Mode::Hybrid, Scenario::Chat, None)
+                .unwrap()
+                .model,
+            "chat-model"
+        );
+        assert_eq!(
+            config
+                .select_scenario(Mode::Hybrid, Scenario::Summary, None)
+                .unwrap()
+                .model,
+            "summary-model"
+        );
+        let local = config
+            .select_scenario(Mode::Local, Scenario::Chat, None)
+            .unwrap();
+        assert_eq!(local.id, "local");
+        assert_eq!(local.model, "local-model");
+        assert!(
+            config
+                .select_scenario(Mode::Local, Scenario::Chat, Some("cloud"))
+                .is_err()
+        );
+        assert_eq!(
+            config
+                .select_scenario(Mode::Hybrid, Scenario::Summary, Some("cloud"))
+                .unwrap()
+                .model,
+            "default-cloud"
+        );
     }
 }

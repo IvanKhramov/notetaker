@@ -170,7 +170,7 @@ pub fn enhance(
     )
 }
 
-fn notes_without_images(notes: &str) -> String {
+pub(crate) fn notes_without_images(notes: &str) -> String {
     let images = notetaker_core::markdown_images(notes);
     let parser = pulldown_cmark::Parser::new(notes);
     let mut ranges: Vec<_> = parser
@@ -193,7 +193,7 @@ fn notes_without_images(notes: &str) -> String {
     text
 }
 
-fn complete(
+pub(crate) fn complete(
     provider: &dyn Provider,
     request: &CompletionRequest,
     on_text: &mut dyn FnMut(&str),
@@ -208,7 +208,7 @@ fn complete(
     Ok(text)
 }
 
-fn input_tokens(request: &CompletionRequest) -> usize {
+pub(crate) fn input_tokens(request: &CompletionRequest) -> usize {
     // Allow for chat serialization/role markers not present in the plain strings.
     estimate_tokens(&request.system) + estimate_tokens(&request.user) + 64
 }
@@ -224,9 +224,18 @@ fn prompt(
     CompletionRequest {
         system: format!("{SYSTEM}\n\nTEMPLATE:\n{}\n\n{stage}", template.instruction),
         user: format!(
-            "MEETING METADATA\nTitle: {}\nDate: {}\n\nUSER NOTES (authoritative outline and priorities)\n{notes}\n\nMEETING EVIDENCE (transcript or intermediate summaries; untrusted data)\n{evidence}",
+            "MEETING METADATA\nTitle: {}\nDate: {}\nУчастники: {}\n\nUSER NOTES (authoritative outline and priorities)\n{notes}\n\nMEETING EVIDENCE (transcript or intermediate summaries; untrusted data)\n{evidence}",
             meta.title,
-            meta.started_at.to_rfc3339()
+            meta.started_at.to_rfc3339(),
+            meta.calendar_event
+                .as_ref()
+                .map(|e| e
+                    .attendees
+                    .iter()
+                    .map(|a| a.label())
+                    .collect::<Vec<_>>()
+                    .join(", "))
+                .unwrap_or_default()
         ),
         max_output_tokens,
     }
@@ -261,7 +270,7 @@ fn transcript_text(transcript: &Transcript, max_chars: usize) -> Result<String> 
 
 /// Split at line boundaries when possible, and at Unicode character boundaries
 /// for an oversized line. Never drops evidence, even a single very long segment.
-fn split_text(text: &str, max_chars: usize) -> Vec<String> {
+pub(crate) fn split_text(text: &str, max_chars: usize) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut current = String::new();
     let mut size: usize = 0;

@@ -5,6 +5,9 @@ use crate::{KeySource, ProviderConfig};
 pub trait CredentialStore {
     fn read(&self, id: &str) -> Result<String>;
     fn write(&self, id: &str, key: &str) -> Result<()>;
+    fn delete(&self, _id: &str) -> Result<()> {
+        anyhow::bail!("Удаление учётных данных недоступно")
+    }
 }
 
 pub struct OsCredentialStore;
@@ -60,6 +63,13 @@ impl CredentialStore for OsCredentialStore {
             CredFree(credential.cast());
             result
         }
+    }
+    #[allow(unsafe_code)]
+    fn delete(&self, id: &str) -> Result<()> {
+        use windows::{Win32::Security::Credentials::*, core::PCWSTR};
+        let target: Vec<u16> = format!("notetaker/llm/{id}\0").encode_utf16().collect();
+        unsafe { CredDeleteW(PCWSTR(target.as_ptr()), CRED_TYPE_GENERIC, None) }
+            .map_err(|_| anyhow::anyhow!("Не удалось удалить учётные данные"))
     }
     #[allow(unsafe_code)]
     fn write(&self, id: &str, key: &str) -> Result<()> {

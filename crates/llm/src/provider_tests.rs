@@ -300,3 +300,65 @@ fn models_use_api_root_and_authorization_without_completion_request() {
         }
     }
 }
+
+#[test]
+fn chat_streams_with_citations_attendees_and_local_fallback() {
+    let server = Mock::start(
+        "200 OK",
+        "text/event-stream",
+        concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Иван: готово [1]\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        ),
+        "",
+    );
+    let root = tempfile::tempdir().unwrap();
+    let library = notetaker_core::Library::open(root.path()).unwrap();
+    let now = chrono::DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+    let mut meta = notetaker_core::MeetingMeta::new("План", now);
+    meta.calendar_event = Some(notetaker_core::calendar::EventLink {
+        uid: "event".into(),
+        title: "План".into(),
+        call_url: None,
+        attendees: vec![notetaker_core::calendar::Attendee {
+            name: "Иван".into(),
+            email: "ivan@example.org".into(),
+        }],
+    });
+    let meeting = library.create_meeting(meta).unwrap();
+    meeting.write_notes("Выпуск готов").unwrap();
+    let mut transcript = notetaker_core::Transcript::default();
+    transcript.rename_speaker("s1", "Иван");
+    transcript.segments.push(notetaker_core::Segment {
+        id: meeting.read_meta().unwrap().id,
+        speaker: notetaker_core::SpeakerId("s1".into()),
+        channel: notetaker_core::Channel::System,
+        start_ms: 0,
+        end_ms: 1000,
+        text: "готово".into(),
+        source: notetaker_core::Source::Final,
+        edited: false,
+    });
+    meeting.write_transcript(&transcript).unwrap();
+    let config = crate::Config::parse(&format!("[defaults]\nlocal='local'\nhybrid='cloud'\n[[providers]]\nid='local'\nkind='openai'\nbase_url='{}'\nmodel='local-chat'\ncontext_tokens=4096\n[[providers]]\nid='cloud'\nkind='openai'\nbase_url='https://example.invalid/v1'\nmodel='cloud'\n[scenarios.chat]\nprovider='cloud'\nmodel='never-send-local'", server.base)).unwrap();
+    let mut streamed = String::new();
+    let result = crate::ask(
+        &library,
+        Some(&meeting),
+        "Что с выпуском?",
+        &[],
+        &config,
+        crate::Cancellation::default(),
+        &mut |text| streamed.push_str(text),
+    )
+    .unwrap();
+    assert_eq!(result.turn.mode, Mode::Local);
+    assert_eq!(result.turn.answer, streamed);
+    assert_eq!(result.citations[0].meeting.path(), meeting.path());
+    let (_, body) = server.handle.join().unwrap();
+    assert_eq!(body["model"], "local-chat");
+    let prompt = body["messages"][1]["content"].as_str().unwrap();
+    assert!(prompt.contains("Участники: Иван"));
+    assert!(prompt.contains("Иван: готово"));
+    assert!(prompt.contains("[1: План,"));
+}
