@@ -4,6 +4,8 @@ use std::{
     io::{Read, Seek, SeekFrom},
     path::Path,
     process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail, ensure};
@@ -288,8 +290,20 @@ fn decode_ffmpeg(
         .args([
             "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000", "-f", "f32le", "-",
         ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped());
+        .stdin(Stdio::null());
+    decode_ffmpeg_command(command, wav, progress, Duration::from_secs(120))
+}
+
+fn decode_ffmpeg_command(
+    mut command: Command,
+    wav: &Path,
+    progress: &mut dyn FnMut(f32) -> Result<()>,
+    idle_timeout: Duration,
+) -> Result<u64> {
+    // Independent file handles avoid both pipe stalls and shared seek offsets.
+    // Reads at EOF never wait for ffmpeg, so cancellation and exit are polled.
+    let pcm = tempfile::NamedTempFile::new()?;
+    command.stdout(pcm.reopen()?);
     // stderr goes to a temporary file: no pipe deadlock or unbounded log in RAM.
     let stderr = tempfile::tempfile()?;
     command.stderr(stderr.try_clone()?);
@@ -302,15 +316,30 @@ fn decode_ffmpeg(
         .spawn()
         .context("Не удалось декодировать файл. Установите ffmpeg и добавьте его в PATH")?;
     let result = (|| -> Result<u64> {
-        let mut stdout = child.stdout.take().context("Нет stdout ffmpeg")?;
+        let mut stdout = File::open(pcm.path())?;
+        let mut last_output = Instant::now();
+        let mut status = None;
         let mut output = Output::new(wav, progress)?;
         let mut block = [0; 16384];
         let mut pending = Vec::new();
         loop {
+            output.write(&[], 0.0)?; // Poll cancellation even while ffmpeg is silent.
             let count = stdout.read(&mut block)?;
             if count == 0 {
-                break;
+                if status.is_some() {
+                    break;
+                }
+                status = child.try_wait()?;
+                if status.is_none() {
+                    ensure!(
+                        last_output.elapsed() < idle_timeout,
+                        "ffmpeg не выдаёт аудио более 120 секунд"
+                    );
+                    thread::sleep(Duration::from_millis(50));
+                }
+                continue;
             }
+            last_output = Instant::now();
             pending.extend_from_slice(&block[..count]);
             let count = pending.len() / 4 * 4;
             let samples: Vec<_> = pending[..count]
@@ -323,7 +352,7 @@ fn decode_ffmpeg(
             pending.drain(..count);
         }
         ensure!(pending.is_empty(), "Неполный PCM от ffmpeg");
-        if !child.wait()?.success() {
+        if !status.context("Нет статуса ffmpeg")?.success() {
             let mut stderr = stderr;
             stderr.seek(SeekFrom::Start(0))?;
             let mut message = String::new();
@@ -341,6 +370,67 @@ fn decode_ffmpeg(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn ffmpeg_output_is_drained_after_the_process_exits() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("out.wav");
+        let mut command = Command::new("sh");
+        command.args(["-c", r"printf '\000\000\000\077'"]);
+        assert_eq!(
+            decode_ffmpeg_command(command, &wav, &mut |_| Ok(()), Duration::from_secs(120))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            hound::WavReader::open(wav)
+                .unwrap()
+                .samples::<f32>()
+                .next()
+                .unwrap()
+                .unwrap(),
+            0.5
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn silent_ffmpeg_can_be_cancelled_and_reaped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut command = Command::new("sleep");
+        command.arg("30");
+        let mut polls = 0;
+        let result = decode_ffmpeg_command(
+            command,
+            &dir.path().join("out.wav"),
+            &mut |_| {
+                polls += 1;
+                ensure!(polls < 2, "Импорт отменён");
+                Ok(())
+            },
+            Duration::from_secs(120),
+        );
+        assert!(result.unwrap_err().to_string().contains("отменён"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ffmpeg_deadline_covers_silence_after_output_and_before_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        for script in ["exec sleep 30", r"printf '\000\000\000\000'; exec sleep 30"] {
+            let mut command = Command::new("sh");
+            command.args(["-c", script]);
+            let error = decode_ffmpeg_command(
+                command,
+                &dir.path().join("out.wav"),
+                &mut |_| Ok(()),
+                Duration::from_millis(100),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("120 секунд"));
+        }
+    }
+
     #[test]
     fn import_limit_is_checked_before_writing_the_next_block() {
         let dir = tempfile::tempdir().unwrap();
