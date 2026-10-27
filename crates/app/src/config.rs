@@ -34,6 +34,10 @@ pub struct Settings {
     pub diarize: bool,
     pub speakers: Option<u32>,
     pub voice_library: bool,
+    /// Only credential IDs and display names, never subscription URLs.
+    pub calendars: Vec<notetaker_llm::calendar::Subscription>,
+    pub calendar_timezone: String,
+    pub mcp_exclude_local: bool,
 }
 
 impl Default for Settings {
@@ -60,6 +64,9 @@ impl Default for Settings {
             diarize: true,
             speakers: None,
             voice_library: false,
+            calendars: Vec::new(),
+            calendar_timezone: "Europe/Moscow".into(),
+            mcp_exclude_local: true,
         }
     }
 }
@@ -113,6 +120,19 @@ impl Settings {
                 "Приложения для звонков: укажите имена exe без путей, по одному на строку"
             );
         }
+        notetaker_core::calendar::timezone(&self.calendar_timezone)?;
+        ensure!(
+            self.calendars.len() <= 16,
+            "Можно добавить до 16 календарей"
+        );
+        let mut calendar_ids = std::collections::HashSet::new();
+        for calendar in &self.calendars {
+            ensure!(
+                calendar_ids.insert(&calendar.id),
+                "Повторяющийся id календаря"
+            );
+            calendar.validate()?;
+        }
         validate_hotkey(&self.hotkey)
     }
 }
@@ -123,6 +143,8 @@ impl Settings {
 pub struct LlmSettings {
     pub defaults: LlmDefaults,
     pub providers: Vec<ProviderSettings>,
+    #[serde(default)]
+    pub scenarios: notetaker_llm::Scenarios,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -162,6 +184,7 @@ impl ProviderSettings {
                 hybrid: self.id.clone(),
             },
             providers: vec![self.clone()],
+            scenarios: Default::default(),
         };
         Ok(notetaker_llm::Config::parse(&toml::to_string(&settings)?)?
             .providers
@@ -191,6 +214,7 @@ impl Default for LlmSettings {
                 hybrid: "ollama".into(),
             },
             providers: vec![ProviderSettings::default()],
+            scenarios: Default::default(),
         }
     }
 }

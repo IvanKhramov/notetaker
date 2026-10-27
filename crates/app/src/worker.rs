@@ -14,7 +14,10 @@ use anyhow::{Context, Result, ensure};
 use chrono::Utc;
 use notetaker_capture::{AudioSource, Inventory, LiveOptions, inventory, live_sources};
 use notetaker_core::{Library, Meeting, MeetingMeta, Revision, Transcript};
-use notetaker_llm::{Cancellation, Config, Template, create_provider, enhance_meeting};
+use notetaker_llm::{
+    Cancellation, Config, CredentialStore, OsCredentialStore, Template, create_provider,
+    enhance_meeting,
+};
 use notetaker_pipeline::{
     Asr, AsrConfig, PipelineEvent, RecordingConfig, RecordingSession, StopHandle,
 };
@@ -149,11 +152,24 @@ impl Save {
 pub struct RecordRequest {
     pub settings: Settings,
     pub title: String,
+    pub event: Option<notetaker_core::calendar::CalendarEvent>,
     pub process_id: Option<u32>,
     pub app: Option<String>,
 }
 
 pub enum Command {
+    Calendar {
+        subscriptions: Vec<notetaker_llm::calendar::Subscription>,
+        timezone: String,
+        generation: u64,
+    },
+    Chat {
+        root: PathBuf,
+        scope: Option<Meeting>,
+        question: String,
+        history: Vec<notetaker_llm::ChatTurn>,
+        cancel: Cancellation,
+    },
     Ai(crate::ai::Action),
     Attach {
         meeting: Meeting,
@@ -191,11 +207,18 @@ pub enum Command {
     Settings {
         settings: Settings,
         llm: LlmSettings,
+        calendar_secrets: Vec<(String, String)>,
     },
 }
 // Rare worker-to-UI messages; boxing variants buys nothing measurable.
 #[allow(clippy::large_enum_variant)]
 pub enum Event {
+    Calendar {
+        generation: u64,
+        result: Result<Vec<notetaker_core::calendar::CalendarEvent>, String>,
+    },
+    ChatChunk(String),
+    ChatDone(Result<notetaker_llm::ChatResult, String>),
     Ai(crate::ai::Response),
     Attached {
         path: PathBuf,
@@ -311,6 +334,51 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
         });
         for command in rx {
             match command {
+                Command::Calendar {
+                    subscriptions,
+                    timezone,
+                    generation,
+                } => {
+                    let events = events.clone();
+                    thread::spawn(move || {
+                        let result = notetaker_llm::calendar::refresh(
+                            &subscriptions,
+                            &timezone,
+                            Utc::now(),
+                            &OsCredentialStore,
+                        )
+                        .map_err(error_text);
+                        let _ = events.send(Event::Calendar { generation, result });
+                    });
+                }
+                Command::Chat {
+                    root,
+                    scope,
+                    question,
+                    history,
+                    cancel,
+                } => {
+                    let events = events.clone();
+                    thread::spawn(move || {
+                        let result = (|| -> Result<_> {
+                            let library = Library::open(root)?;
+                            let config = Config::load()?;
+                            notetaker_llm::ask(
+                                &library,
+                                scope.as_ref(),
+                                &question,
+                                &history,
+                                &config,
+                                cancel,
+                                &mut |text| {
+                                    let _ = events.send(Event::ChatChunk(text.into()));
+                                },
+                            )
+                        })()
+                        .map_err(error_text);
+                        let _ = events.send(Event::ChatDone(result));
+                    });
+                }
                 Command::Ai(action) => {
                     let events = events.clone();
                     thread::spawn(move || {
@@ -441,6 +509,7 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                             RecordRequest {
                                 settings,
                                 title: String::new(),
+                                event: None,
                                 process_id: None,
                                 app: None,
                             },
@@ -464,7 +533,11 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                             let template_data = Template::load(root, &template)?;
                             let config = Config::load()?;
                             let provider = create_provider(
-                                config.select(meta.mode, None)?.clone(),
+                                config.select_scenario(
+                                    meta.mode,
+                                    notetaker_llm::Scenario::Summary,
+                                    None,
+                                )?,
                                 meta.mode,
                                 cancel,
                             )?;
@@ -512,13 +585,36 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                         let _ = events.send(Event::Downloaded(result));
                     });
                 }
-                Command::Settings { settings, llm } => {
+                Command::Settings {
+                    settings,
+                    llm,
+                    calendar_secrets,
+                } => {
                     let result = (|| {
                         settings.validate()?;
                         let llm_text = llm.validate()?;
+                        let previous = Settings::load().unwrap_or_default();
+                        for (id, url) in &calendar_secrets {
+                            let subscription = settings
+                                .calendars
+                                .iter()
+                                .find(|s| &s.id == id)
+                                .context("Нет календаря для URL")?;
+                            subscription.save_url(url, &OsCredentialStore)?;
+                        }
+                        for subscription in &settings.calendars {
+                            OsCredentialStore
+                                .read(&subscription.id)
+                                .context("Укажите приватный URL календаря")?;
+                        }
                         Library::open(&settings.library)?;
                         atomic_write(&notetaker_llm::Config::path()?, &llm_text)?;
                         atomic_write(&Settings::path()?, &toml::to_string_pretty(&settings)?)?;
+                        for subscription in &previous.calendars {
+                            if !settings.calendars.iter().any(|s| s.id == subscription.id) {
+                                let _ = OsCredentialStore.delete(&subscription.id);
+                            }
+                        }
                         voice_library_enabled = settings.voice_library;
                         let _ = events.send(Event::Voices(
                             Library::open(&settings.library)
@@ -757,6 +853,9 @@ fn record(request: RecordRequest, import_file: Option<PathBuf>, events: &Sender<
             let mut meta = MeetingMeta::new(request.title, Utc::now());
             meta.mode = request.settings.mode;
             meta.app = request.app;
+            if let Some(event) = &request.event {
+                notetaker_core::calendar::link_meeting(&mut meta, event, true);
+            }
             RecordingSession::start_with_asr(library.clone(), meta, sources, asr, config)?
         };
         let meeting = session.meeting().clone();

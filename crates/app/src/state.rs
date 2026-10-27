@@ -222,6 +222,15 @@ pub struct AppState {
     llm: LlmSettings,
     llm_configured: bool,
     pub connections: crate::ai::Connections,
+    pub chat: crate::chat::Panel,
+    pub calendar_events: Vec<notetaker_core::calendar::CalendarEvent>,
+    pub calendar_secrets: HashMap<String, String>,
+    pub calendar_busy: bool,
+    pub calendar_status: String,
+    calendar_checked: Option<Instant>,
+    calendar_generation: u64,
+    prefilled_title: Option<String>,
+    selected_event: Option<notetaker_core::calendar::CalendarEvent>,
     pub generation_cancel: notetaker_llm::Cancellation,
     pending_summary: Option<PathBuf>,
     pub ready: bool,
@@ -274,6 +283,15 @@ impl AppState {
             llm: LlmSettings::default(),
             llm_configured: false,
             connections: crate::ai::Connections::default(),
+            chat: Default::default(),
+            calendar_events: Vec::new(),
+            calendar_secrets: HashMap::new(),
+            calendar_busy: false,
+            calendar_status: String::new(),
+            calendar_checked: None,
+            calendar_generation: 0,
+            prefilled_title: None,
+            selected_event: None,
             generation_cancel: notetaker_llm::Cancellation::default(),
             pending_summary: None,
             ready: false,
@@ -389,6 +407,7 @@ impl AppState {
                 .and_then(|call| call.meeting_title.as_ref())
         {
             self.title = title.clone();
+            self.prefilled_title = Some(title.clone());
         }
     }
     pub fn start_recording(&mut self) {
@@ -445,7 +464,15 @@ impl AppState {
         let mut settings = self.settings.clone();
         settings.model = self.record_model.clone();
         settings.mode = self.record_mode;
-        let title = if self.title.trim().is_empty() {
+        let event = self.selected_event.take().or_else(|| {
+            notetaker_core::calendar::overlapping(&self.calendar_events, chrono::Utc::now())
+                .cloned()
+        });
+        let typed = !self.title.trim().is_empty()
+            && self.prefilled_title.as_deref() != Some(self.title.as_str());
+        let title = if let Some(event) = event.as_ref().filter(|_| !typed) {
+            event.link.title.clone()
+        } else if self.title.trim().is_empty() {
             call.and_then(|call| call.meeting_title).unwrap_or_else(|| {
                 chrono::Local::now()
                     .format("Встреча %d.%m.%Y %H:%M")
@@ -463,9 +490,56 @@ impl AppState {
         self.send(Command::Record(RecordRequest {
             settings,
             title,
+            event,
             process_id: self.process_id,
             app,
         }));
+    }
+    pub fn start_event(&mut self, event: notetaker_core::calendar::CalendarEvent) {
+        if !self.ready
+            || self.recording.busy()
+            || self.downloading
+            || self.settings_pending
+            || self.exit_requested
+        {
+            return;
+        }
+        self.title.clear();
+        self.prefilled_title = None;
+        self.selected_event = Some(event);
+        self.record_model = self.settings.model.clone();
+        self.record_mode = self.settings.mode;
+        self.start_recording();
+    }
+    pub fn refresh_calendar(&mut self) {
+        if self.calendar_busy {
+            return;
+        }
+        self.calendar_busy = true;
+        self.calendar_checked = Some(Instant::now());
+        self.calendar_generation += 1;
+        self.send(Command::Calendar {
+            subscriptions: self.settings.calendars.clone(),
+            timezone: self.settings.calendar_timezone.clone(),
+            generation: self.calendar_generation,
+        });
+    }
+    pub fn ask(&mut self) {
+        if self.chat.busy || self.unsaved() || self.settings_pending || self.recording.busy() {
+            return;
+        }
+        self.chat.pending = std::mem::take(&mut self.chat.question);
+        self.chat.streaming.clear();
+        self.chat.error = None;
+        self.chat.busy = true;
+        self.chat.cancel = Default::default();
+        self.send(Command::Chat {
+            root: self.settings.library.clone(),
+            scope: self.chat.scope.clone(),
+            question: self.chat.pending.clone(),
+            history: self.chat.messages.iter().map(|m| m.turn.clone()).collect(),
+            cancel: self.chat.cancel.clone(),
+        });
     }
     pub fn import_recording(&mut self, file: PathBuf) {
         if !self.ready
@@ -554,6 +628,7 @@ impl AppState {
     pub fn save_settings(&mut self) {
         if self.recording.busy()
             || self.enhancing.is_some()
+            || self.chat.busy
             || self.unsaved()
             || self.settings_pending
         {
@@ -571,10 +646,17 @@ impl AppState {
         self.send(Command::Settings {
             settings: self.settings_draft.clone(),
             llm: self.llm_draft.clone(),
+            calendar_secrets: self
+                .calendar_secrets
+                .iter()
+                .filter(|(_, secret)| !secret.trim().is_empty())
+                .map(|(id, secret)| (id.clone(), secret.clone()))
+                .collect(),
         });
     }
     pub fn exit(&mut self) {
         self.exit_requested = true;
+        self.chat.cancel.cancel();
         self.recording.request_stop();
         self.flush();
     }
@@ -582,6 +664,7 @@ impl AppState {
         self.exit_requested
             && !self.recording.busy()
             && self.enhancing.is_none()
+            && !self.chat.busy
             && !self.downloading
             && !self.unsaved()
             && !self.settings_pending
@@ -600,6 +683,16 @@ impl AppState {
             ));
         }
         self.poll_detection();
+        if self.ready
+            && !self.settings.calendars.is_empty()
+            && !self.exit_requested
+            && !self.calendar_busy
+            && self
+                .calendar_checked
+                .is_none_or(|last| last.elapsed() >= Duration::from_secs(600))
+        {
+            self.refresh_calendar();
+        }
         if self
             .query_changed
             .is_some_and(|time| time.elapsed() > Duration::from_millis(300))
@@ -694,6 +787,35 @@ impl AppState {
     }
     fn apply(&mut self, event: Event) {
         match event {
+            Event::Calendar { generation, result } => {
+                if generation == self.calendar_generation {
+                    self.calendar_busy = false;
+                    match result {
+                        Ok(events) => {
+                            self.calendar_status = format!("Событий: {}", events.len());
+                            self.calendar_events = events;
+                        }
+                        Err(error) => self.calendar_status = error,
+                    }
+                }
+            }
+            Event::ChatChunk(text) => self.chat.streaming.push_str(&text),
+            Event::ChatDone(result) => {
+                self.chat.busy = false;
+                self.chat.streaming.clear();
+                match result {
+                    Ok(result) => {
+                        self.chat.messages.push(result);
+                        if self.chat.messages.len() > 20 {
+                            self.chat.messages.remove(0);
+                        }
+                    }
+                    Err(error) => {
+                        self.chat.error = Some(error);
+                        self.chat.question = self.chat.pending.clone();
+                    }
+                }
+            }
             Event::Ai(response) => {
                 if response.operation == crate::ai::Operation::Default {
                     self.settings_pending = false;
@@ -1024,6 +1146,11 @@ impl AppState {
                     Ok((settings, llm)) => {
                         self.llm_configured = true;
                         let changed_library = self.settings.library != settings.library;
+                        self.calendar_secrets.clear();
+                        self.calendar_events.clear();
+                        self.calendar_busy = false;
+                        self.calendar_generation += 1;
+                        self.calendar_checked = None;
                         if self.settings.detect_calls != settings.detect_calls
                             || self.settings.detect_browsers != settings.detect_browsers
                             || self.settings.detect_any_microphone != settings.detect_any_microphone
@@ -1039,6 +1166,7 @@ impl AppState {
                         self.llm = llm.clone();
                         self.llm_draft = llm;
                         if changed_library {
+                            self.chat = Default::default();
                             self.selected = None;
                             self.documents.clear();
                             self.rows.clear();
@@ -1061,7 +1189,11 @@ fn auto_summary_ready(enabled: bool, data: &DocumentData, llm: &LlmSettings) -> 
             .validate()
             .ok()
             .and_then(|text| notetaker_llm::Config::parse(&text).ok())
-            .is_some_and(|config| config.select(data.meta.mode, None).is_ok())
+            .is_some_and(|config| {
+                config
+                    .select_scenario(data.meta.mode, notetaker_llm::Scenario::Summary, None)
+                    .is_ok()
+            })
 }
 
 pub fn timestamp(ms: u64) -> String {
@@ -1670,5 +1802,92 @@ mod tests {
         };
         assert!(automatic);
         assert_eq!(template, "general");
+    }
+}
+
+#[cfg(test)]
+mod calendar_tests {
+    use super::*;
+    use notetaker_core::calendar::{CalendarEvent, EventLink};
+    fn fixture() -> (AppState, Receiver<Command>) {
+        let (tx, commands) = std::sync::mpsc::channel();
+        let (_events, rx) = std::sync::mpsc::channel();
+        let mut state = AppState::with_channels(tx, rx);
+        state.ready = true;
+        let now = chrono::Utc::now();
+        state.calendar_events.push(CalendarEvent {
+            link: EventLink {
+                uid: "event".into(),
+                title: "Календарный план".into(),
+                attendees: Vec::new(),
+                call_url: None,
+            },
+            start: now - chrono::Duration::minutes(5),
+            end: now + chrono::Duration::minutes(55),
+            all_day: false,
+            organizer: None,
+        });
+        (state, commands)
+    }
+    #[test]
+    fn manual_call_prefill_and_explicit_event_preserve_title_rules() {
+        for (title, prefilled, expected) in [
+            ("", None, "Календарный план"),
+            ("Из браузера", Some("Из браузера"), "Календарный план"),
+            ("Моё название", None, "Моё название"),
+        ] {
+            let (mut state, commands) = fixture();
+            state.title = title.into();
+            state.prefilled_title = prefilled.map(str::to_owned);
+            state.start_recording();
+            let Command::Record(request) = commands.try_recv().unwrap() else {
+                panic!("record expected")
+            };
+            assert_eq!(request.title, expected);
+            assert_eq!(request.event.unwrap().link.uid, "event");
+        }
+        let (mut state, commands) = fixture();
+        let mut event = state.calendar_events[0].clone();
+        event.start += chrono::Duration::hours(5);
+        event.end += chrono::Duration::hours(5);
+        state.start_event(event);
+        let Command::Record(request) = commands.try_recv().unwrap() else {
+            panic!("record expected")
+        };
+        assert_eq!(request.title, "Календарный план");
+        assert!(request.event.is_some());
+    }
+    #[test]
+    fn calendar_refresh_discards_stale_settings_results_and_runs_every_ten_minutes() {
+        let (mut state, commands) = fixture();
+        state
+            .settings
+            .calendars
+            .push(notetaker_llm::calendar::Subscription {
+                id: "calendar-test".into(),
+                name: "Test".into(),
+            });
+        state.poll();
+        let Command::Calendar { generation, .. } = commands.try_recv().unwrap() else {
+            panic!("calendar expected")
+        };
+        state.apply(Event::Calendar {
+            generation: generation - 1,
+            result: Ok(Vec::new()),
+        });
+        assert_eq!(state.calendar_events.len(), 1);
+        state.apply(Event::Calendar {
+            generation,
+            result: Ok(Vec::new()),
+        });
+        assert!(state.calendar_events.is_empty());
+        state.poll();
+        assert!(commands.try_recv().is_err());
+        state.calendar_checked = Some(Instant::now() - Duration::from_secs(601));
+        state.poll();
+        assert!(matches!(
+            commands.try_recv().unwrap(),
+            Command::Calendar { .. }
+        ));
     }
 }

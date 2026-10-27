@@ -2,6 +2,7 @@
 
 mod ai;
 mod attachments;
+mod chat;
 mod config;
 #[cfg(windows)]
 mod desktop;

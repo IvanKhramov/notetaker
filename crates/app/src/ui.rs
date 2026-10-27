@@ -80,6 +80,9 @@ impl NotetakerApp {
                 }
             },
         );
+        if ui.button("Спросить").clicked() {
+            self.state.chat.open(None, String::new());
+        }
         let search = ui.add(
             egui::TextEdit::singleline(&mut self.state.query)
                 .id_salt("library_search")
@@ -113,6 +116,68 @@ impl NotetakerApp {
                     ui.small("Завершаем задачи перед выходом…");
                 }
             });
+        let mut start_event = None;
+        egui::CollapsingHeader::new("Сегодня")
+            .default_open(true)
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("calendar_events")
+                    .max_height(220.0)
+                    .show(ui, |ui| {
+                        let now = chrono::Utc::now();
+                        let events: Vec<_> = self
+                            .state
+                            .calendar_events
+                            .iter()
+                            .filter(|e| {
+                                e.end >= now && e.start <= now + chrono::Duration::hours(12)
+                            })
+                            .collect();
+                        if events.is_empty() {
+                            ui.small("Нет ближайших событий");
+                        }
+                        for event in events.into_iter().take(30) {
+                            ui.label(format!(
+                                "{} · {}",
+                                if event.all_day {
+                                    "Весь день".into()
+                                } else {
+                                    event
+                                        .start
+                                        .with_timezone(&chrono::Local)
+                                        .format("%H:%M")
+                                        .to_string()
+                                },
+                                event.link.title
+                            ));
+                            ui.horizontal_wrapped(|ui| {
+                                if ui
+                                    .add_enabled(
+                                        cfg!(windows)
+                                            && self.state.ready
+                                            && !self.state.recording.busy()
+                                            && !self.state.settings_pending
+                                            && !self.state.downloading,
+                                        egui::Button::new("Начать запись"),
+                                    )
+                                    .clicked()
+                                {
+                                    start_event = Some(event.clone());
+                                }
+                                if let Some(url) = &event.link.call_url {
+                                    ui.hyperlink_to("Открыть звонок", url);
+                                }
+                            });
+                        }
+                        if self.state.calendar_busy {
+                            ui.spinner();
+                        }
+                        ui.small(&self.state.calendar_status);
+                    });
+            });
+        if let Some(event) = start_event {
+            self.state.start_event(event);
+        }
         let mut select = None;
         let today = chrono::Local::now().date_naive();
         egui::ScrollArea::vertical()
@@ -243,11 +308,34 @@ impl NotetakerApp {
         let locked =
             self.state.recording.busy() && self.state.recording.path.as_ref() == Some(&path);
         let live = locked && self.state.recording.phase == Phase::Recording;
+        if let Some(document) = self.state.documents.get(&path)
+            && ui
+                .add_enabled(
+                    !self.state.chat.busy,
+                    egui::Button::new("Спросить про эту встречу"),
+                )
+                .clicked()
+        {
+            self.state.chat.open(
+                Some(document.data.meeting.clone()),
+                document.data.meta.title.clone(),
+            );
+        }
         let Some(document) = self.state.documents.get_mut(&path) else {
             ui.spinner();
             return;
         };
         ui.heading(RichText::new(&document.data.meta.title).strong());
+        if let Some(event) = &document.data.meta.calendar_event {
+            ui.horizontal_wrapped(|ui| {
+                for attendee in &event.attendees {
+                    theme::chip(ui, attendee.label());
+                }
+                if let Some(url) = &event.call_url {
+                    ui.hyperlink_to("Открыть звонок", url);
+                }
+            });
+        }
         ui.horizontal_wrapped(|ui| {
             let start = document.data.meta.started_at.with_timezone(&chrono::Local);
             let range = match document.data.meta.ended_at {
@@ -652,10 +740,50 @@ impl NotetakerApp {
                     if let Some(name) = delete { self.state.send(Command::Voices { root:self.state.settings.library.clone(), delete:Some(name) }); }
                 });
                 ui.checkbox(&mut self.state.settings_draft.auto_summary, "Делать конспект автоматически");
+                ui.separator(); ui.heading("Календари");
+                ui.small("Приватные ICS-подписки. URL хранится в Credential Manager. Обновление при запуске и каждые 10 минут.");
+                ui.horizontal(|ui| { ui.label("Часовой пояс без TZID:"); ui.text_edit_singleline(&mut self.state.settings_draft.calendar_timezone); });
+                #[cfg(not(windows))]
+                ui.small("Сохранение URL доступно на Windows, как и ключей шлюзов.");
+                let mut remove_calendar = None;
+                for calendar in &mut self.state.settings_draft.calendars {
+                    ui.push_id(&calendar.id, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.text_edit_singleline(&mut calendar.name);
+                            if ui.button("Удалить").clicked() { remove_calendar = Some(calendar.id.clone()); }
+                        });
+                        let secret = self.state.calendar_secrets.entry(calendar.id.clone()).or_default();
+                        ui.add(egui::TextEdit::singleline(secret).password(true).hint_text("Приватный HTTPS URL ICS (пусто - сохранённый)"));
+                    });
+                }
+                if let Some(id) = remove_calendar {
+                    self.state.settings_draft.calendars.retain(|s| s.id != id);
+                    self.state.calendar_secrets.remove(&id);
+                }
+                if ui.add_enabled(cfg!(windows), egui::Button::new("Добавить календарь")).clicked() {
+                    self.state.settings_draft.calendars.push(notetaker_llm::calendar::Subscription { id: format!("calendar-{}", uuid::Uuid::now_v7()), name: "Календарь".into() });
+                }
+                if ui.add_enabled(!self.state.calendar_busy, egui::Button::new("Обновить календари")).clicked() { self.state.refresh_calendar(); }
+                ui.small(&self.state.calendar_status);
+                ui.checkbox(&mut self.state.settings_draft.mcp_exclude_local, "MCP: не отдавать Local-встречи");
                 ui.separator(); ui.heading("Подключение AI");
-                let can_default = self.state.ready && !self.state.recording.busy() && self.state.enhancing.is_none() && !self.state.unsaved() && !self.state.settings_pending;
+                let can_default = self.state.ready && !self.state.recording.busy() && self.state.enhancing.is_none() && !self.state.chat.busy && !self.state.unsaved() && !self.state.settings_pending;
                 let actions = self.state.connections.ui(ui, &self.state.llm_draft.defaults.hybrid, can_default);
                 for action in actions { self.state.send(Command::Ai(action)); }
+                ui.collapsing("Модели по сценариям", |ui| {
+                    let llm = &mut self.state.llm_draft;
+                    for (label, choice) in [("Конспект", &mut llm.scenarios.summary), ("Чат", &mut llm.scenarios.chat)] {
+                        ui.push_id(label, |ui| {
+                            ui.label(label);
+                            egui::ComboBox::from_id_salt("provider").selected_text(if choice.provider.is_empty() { "По умолчанию" } else { &choice.provider }).show_ui(ui, |ui| {
+                                ui.selectable_value(&mut choice.provider, String::new(), "По умолчанию");
+                                for provider in &llm.providers { ui.selectable_value(&mut choice.provider, provider.id.clone(), &provider.id); }
+                            });
+                            ui.add(egui::TextEdit::singleline(&mut choice.model).hint_text("Модель (пусто - модель провайдера)"));
+                        });
+                    }
+                    ui.small("Для Local облачный сценарий заменяется локальным провайдером по умолчанию и его моделью.");
+                });
                 ui.collapsing("Расширенные", |ui| {
                 ui.label("Указывайте имена переменных окружения; значения ключей здесь не хранятся. Для Local разрешены только loopback-провайдеры.");
                 let llm = &mut self.state.llm_draft;
@@ -686,7 +814,7 @@ impl NotetakerApp {
                 if ui.button("Добавить провайдер").clicked() { llm.providers.push(ProviderSettings { id: format!("provider-{}", llm.providers.len() + 1), ..ProviderSettings::default() }); }
                 });
                 ui.separator();
-                let can_save = self.state.ready && !self.state.recording.busy() && self.state.enhancing.is_none() && !self.state.unsaved() && !self.state.settings_pending;
+                let can_save = self.state.ready && !self.state.recording.busy() && self.state.enhancing.is_none() && !self.state.chat.busy && !self.state.unsaved() && !self.state.settings_pending;
                 if ui.add_enabled(can_save, egui::Button::new("Сохранить настройки")).clicked() { self.state.save_settings(); }
                 if self.state.recording.busy() || self.state.enhancing.is_some() { ui.small("Сохранение настроек доступно после завершения записи и конспекта."); }
                 ui.small("Настройки приложения и LLM сохраняются отдельно. Ключи шлюзов хранятся в Credential Manager на Windows; также поддерживается окружение.");
@@ -1011,6 +1139,17 @@ impl eframe::App for NotetakerApp {
                 self.image_viewer = None;
             }
         }
+        let can_ask = self.state.ready
+            && !self.state.settings_pending
+            && !self.state.recording.busy()
+            && !self.state.unsaved();
+        if self.state.chat.open {
+            match self.state.chat.show(&ctx, can_ask) {
+                Some(crate::chat::Action::Ask) => self.state.ask(),
+                Some(crate::chat::Action::Open(meeting)) => self.state.select(meeting),
+                None => {}
+            }
+        }
         self.notifications(&ctx);
         if self.show_record {
             self.recording_dialog(&ctx);
@@ -1271,6 +1410,18 @@ fn transcript_view(
                                         {
                                             rename = Some((id.clone(), name.clone(), false));
                                             ui.close();
+                                        }
+                                        if let Some(event) = &document.data.meta.calendar_event {
+                                            for attendee in &event.attendees {
+                                                if ui.button(attendee.label()).clicked() {
+                                                    rename = Some((
+                                                        id.clone(),
+                                                        attendee.label().to_owned(),
+                                                        false,
+                                                    ));
+                                                    ui.close();
+                                                }
+                                            }
                                         }
                                         let key = ui.make_persistent_id(("speaker-name", path, id));
                                         let mut name = ui
