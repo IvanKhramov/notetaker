@@ -114,9 +114,15 @@ fn dismissal_survives_separate_calls_in_same_process() {
 }
 
 #[test]
-fn browsers_are_opt_in_and_playback_alone_is_never_a_call() {
+fn browsers_are_enabled_by_default_and_playback_alone_is_never_a_call() {
     for (exe, config) in [
-        ("chrome.exe", DetectConfig::default()),
+        (
+            "chrome.exe",
+            DetectConfig {
+                detect_browsers: false,
+                ..DetectConfig::default()
+            },
+        ),
         ("unknown.exe", DetectConfig::default()),
     ] {
         let mut d = detector(exe, &[true, true], config);
@@ -256,4 +262,44 @@ fn failed_snapshots_reset_unconfirmed_start_evidence() {
     assert_eq!(d.take_warnings().len(), 1);
     assert!(d.poll(at(9)).is_empty());
     assert!(started(&d.poll(at(14))));
+}
+
+#[test]
+fn stopped_recording_reoffers_a_continuing_call_after_cooldown() {
+    let mut d = detector("Teams.exe", &[true; 5], DetectConfig::default());
+    d.poll(at(0));
+    assert!(started(&d.poll(at(5))));
+    d.poll(at(100));
+    d.recording_stopped();
+    assert!(d.poll(at(699)).is_empty());
+    assert!(started(&d.poll(at(700))));
+}
+
+#[test]
+fn browser_toggle_preserves_active_call_and_dismissal() {
+    let mut d = detector(
+        "chrome.exe",
+        &[true, true, true, true, true, false, false],
+        DetectConfig::default(),
+    );
+    d.poll(at(0));
+    assert!(matches!(
+        d.poll(at(5)).as_slice(),
+        [DetectEvent::CallStarted { .. }]
+    ));
+    d.dismiss(7);
+    d.set_detect_browsers(false);
+    assert!(d.poll(at(50)).is_empty());
+    d.set_detect_browsers(true);
+    assert!(d.poll(at(604)).is_empty());
+    assert!(matches!(
+        d.poll(at(605)).as_slice(),
+        [DetectEvent::CallStarted { .. }]
+    ));
+    d.set_detect_browsers(false);
+    assert!(d.poll(at(606)).is_empty());
+    assert!(matches!(
+        d.poll(at(626)).as_slice(),
+        [DetectEvent::CallEnded { .. }]
+    ));
 }

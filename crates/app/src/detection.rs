@@ -47,6 +47,7 @@ pub struct Monitor {
 enum Command {
     Configure { enabled: bool, browsers: bool },
     Dismiss(u32),
+    RecordingStopped,
 }
 impl Monitor {
     pub fn start(&mut self) {
@@ -74,15 +75,10 @@ impl Monitor {
                             browsers,
                         }) => {
                             enabled = on;
-                            detector = CallDetector::new(
-                                WindowsSnapshot,
-                                DetectConfig {
-                                    detect_browsers: browsers,
-                                    ..DetectConfig::default()
-                                },
-                            );
+                            detector.set_detect_browsers(browsers);
                         }
                         Ok(Command::Dismiss(pid)) => detector.dismiss(pid),
+                        Ok(Command::RecordingStopped) => detector.recording_stopped(),
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                     }
@@ -117,6 +113,12 @@ impl Monitor {
         #[cfg(windows)]
         if let Some((tx, _)) = &self.channels {
             let _ = tx.send(Command::Dismiss(_pid));
+        }
+    }
+    pub fn recording_stopped(&self) {
+        #[cfg(windows)]
+        if let Some((tx, _)) = &self.channels {
+            let _ = tx.send(Command::RecordingStopped);
         }
     }
     pub fn poll(&self) -> Vec<DetectEvent> {

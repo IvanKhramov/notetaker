@@ -668,6 +668,7 @@ impl AppState {
                     doc.data.transcript = data.transcript;
                     doc.data.revisions.transcript = data.revisions.transcript;
                 }
+                self.detector.recording_stopped();
                 self.recording.phase = Phase::Idle;
                 self.recording.stop = None;
                 if let Some(error) = error {

@@ -43,7 +43,7 @@ impl Default for Settings {
             retention_days: Some(7),
             hotkey: "Ctrl+Alt+R".into(),
             detect_calls: true,
-            detect_browsers: false,
+            detect_browsers: true,
             auto_stop_minutes: 15,
         }
     }
@@ -210,7 +210,7 @@ mod tests {
         let settings: Settings = toml::from_str("hotkey = 'Ctrl+Alt+R'").unwrap();
         assert_eq!(settings.theme, crate::theme::Theme::System);
         assert!(settings.detect_calls);
-        assert!(!settings.detect_browsers);
+        assert!(settings.detect_browsers);
         assert_eq!(settings.auto_stop_minutes, 15);
         let settings: Settings =
             toml::from_str("auto_stop_minutes = 0\ndetect_calls = false\ndetect_browsers = true")

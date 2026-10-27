@@ -42,7 +42,7 @@ pub struct DetectConfig {
     pub start_delay: Duration,
     pub end_delay: Duration,
     pub dismiss_cooldown: Duration,
-    /// Opt in: browser dictation/voice messages can also hold the microphone.
+    /// Browser dictation/voice messages can also hold the microphone.
     pub detect_browsers: bool,
     /// Later entries override earlier ones with the same executable name.
     pub apps: Vec<AppRule>,
@@ -54,7 +54,7 @@ impl Default for DetectConfig {
             start_delay: Duration::from_secs(5),
             end_delay: Duration::from_secs(20),
             dismiss_cooldown: Duration::from_secs(10 * 60),
-            detect_browsers: false,
+            detect_browsers: true,
             apps: KNOWN_APPS
                 .iter()
                 .map(|&(exe, name, browser)| AppRule {
@@ -165,7 +165,9 @@ impl<P: SnapshotProvider> CallDetector<P> {
                 .find(|a| a.exe.eq_ignore_ascii_case(&process.exe));
             if process.microphone
                 && let Some(rule) = rule
-                && (!rule.browser || self.config.detect_browsers)
+                && (!rule.browser
+                    || self.config.detect_browsers
+                    || self.states.get(&key).is_some_and(|state| state.active))
             {
                 let state = self.states.entry(key).or_insert_with(|| State {
                     app: rule.name.clone(),
@@ -178,18 +180,24 @@ impl<P: SnapshotProvider> CallDetector<P> {
                 if state.missing_since.take().is_some() {
                     state.since = now;
                 }
-                present.insert(key, process.output_active);
+                present.insert(
+                    key,
+                    (
+                        process.output_active,
+                        !rule.browser || self.config.detect_browsers,
+                    ),
+                );
             }
         }
         let mut events = vec![];
         self.states.retain(|&(pid, started_at), state| {
             let key = (pid, started_at);
-            if let Some(&output) = present.get(&key) {
+            if let Some(&(output, can_offer)) = present.get(&key) {
                 let ready = now.saturating_sub(state.since) >= self.config.start_delay;
                 let cooldown = state
                     .dismissed
                     .is_none_or(|at| now.saturating_sub(at) >= self.config.dismiss_cooldown);
-                if ready && cooldown && (!state.active || state.repeat) {
+                if can_offer && ready && cooldown && (!state.active || state.repeat) {
                     state.active = true;
                     state.repeat = false;
                     events.push(DetectEvent::CallStarted {
@@ -233,6 +241,20 @@ impl<P: SnapshotProvider> CallDetector<P> {
                 state.dismissed = Some(self.now);
                 state.repeat = true;
             }
+        }
+    }
+
+    /// Change eligibility without discarding established calls or dismissals.
+    pub fn set_detect_browsers(&mut self, enabled: bool) {
+        self.config.detect_browsers = enabled;
+    }
+
+    /// Calls offered while recording were intentionally ignored by the UI.
+    /// Rearm all continuing calls after the usual dismissal cooldown.
+    pub fn recording_stopped(&mut self) {
+        for state in self.states.values_mut().filter(|state| state.active) {
+            state.dismissed = Some(self.now);
+            state.repeat = true;
         }
     }
 
