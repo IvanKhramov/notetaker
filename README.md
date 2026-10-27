@@ -3,13 +3,13 @@
 An open-source AI notebook for online meetings, inspired by Granola and written
 in Rust. Windows comes first, with macOS and Linux capture support planned.
 
-**v0.1.0:** the desktop app and CLI support Windows recording, local ASR,
-meeting notes, transcript editing, search, and LLM note enhancement.
+**v0.4.0:** Windows recording, local ASR with echo deduplication and custom
+vocabulary, audio/video import, meeting notes, search, and automatic summaries.
 See [the project plan](docs/PLAN.md) for architecture and milestones.
 
 ## Install
 
-Download `notetaker-0.1.0-windows-x64.zip` from this repository's **Releases**
+Download `notetaker-0.4.0-windows-x64.zip` from this repository's **Releases**
 page and extract it into a folder. Keep all files together and run
 `notetaker-app.exe`. The binaries are unsigned: Windows SmartScreen may warn;
 choose **More info → Run anyway** if you trust the download. A SHA-256 checksum
@@ -111,6 +111,53 @@ progress and Me/Them segments, edit and reopen a transcript, stream a local and
 remote summary, verify shortcut conflict errors, hide/reopen/exit from the tray,
 and confirm the indicator stays above the call without taking keyboard focus.
 CI builds all three Windows binaries into `notetaker-windows-x64`.
+
+## Transcript quality and import
+
+The final pass streams WAV through Silero VAD with a roughly 30-second speech
+limit and sample-based timestamps. Unedited microphone duplicates within
+300 ms of system speech are dropped (best-effort live too). Jaccard must reach
+0.6 and all mic words must occur in order on the system track; short replies,
+additional words and manual edits survive. No schema change or energy gating.
+
+Settings **Словарь** stores one term per line in `app.toml` (`vocabulary`).
+`<library>/.notetaker/vocabulary.txt` merges terms and overrides matching names:
+
+```text
+Deckhouse
+Kubernetes
+Flant
+fesco
+werf = верф, вёрф
+```
+
+Exact aliases/case and unique single-edit matches (alphabetic tokens and terms
+of at least five characters, same script) are corrected after ASR. Transliteration
+requires an explicit alias. Summary prompts always receive spelling context.
+Both shipped models are NeMo transducers, including GigaAM v3 punct (RNNT) and
+Parakeet v3 (TDT). Nonempty vocabulary enables `modified_beam_search`, four paths,
+score 1.5 and a temporary BPE vocabulary derived from tokens, following the
+[upstream 2.0.0 example](https://github.com/k2-fsa/sherpa-onnx/blob/v2.0.0/nodejs-addon-examples/test_asr_non_streaming_nemo_parakeet_tdt_v2_hotwords.js).
+This costs more CPU; only model-encodable spellings can be biased.
+
+Use **Импорт записи** in the sidebar, paste a path or drop a file into the dialog,
+then choose model/mode. Progress and the automatic-summary setting are reused.
+CLI reads the same app defaults:
+
+```sh
+notetaker import meeting.mp4
+notetaker import meeting.opus --library /path/to/library --model gigaam-v3 --no-summary
+```
+
+wav/mp3/m4a/ogg/opus/flac/mp4/webm/mkv use Symphonia and existing `opus-rs`.
+Unsupported codecs, chained Ogg and Opus mappings other than mono/stereo family 0
+fall back to ffmpeg on PATH, with an installation error if missing. Compressed
+container padding differences may remain. Import creates a system/them meeting,
+titled from filename and dated by mtime. Temporary PCM uses about 230 MB/hour
+on disk and is cleaned on success/failure; RAM stays bounded by packets and
+speech chunks. Opus follows retention settings (zero only after successful ASR).
+Long ASR deadlines allow five minutes plus four times the recording duration;
+Ctrl+C/exit cancellation is observed at decode and ASR progress boundaries.
 
 ## Local transcription
 
