@@ -9,6 +9,15 @@ Markdown, SRT, VTT, CSV or JSON from the app or CLI. Voice-linked renames can
 update previous meetings. See [speaker editing](docs/speakers.md),
 [calendar setup](docs/calendar.md), and [chat and MCP setup](docs/mcp.md).
 
+## Задачи и подготовка встреч (0.8.0)
+
+Экран «Задачи» собирает флажки из конспектов: фильтры «Мои»/ответственный,
+сроки, группировка, переход к строке и сохранение статуса. В «Ближайшие события» доступен
+бриф по предыдущим встречам и задачам участников; после конспекта можно
+подготовить сообщение команде или клиенту. Имя и алиасы задаются в настройках.
+CLI: `notetaker tasks --mine --open`; MCP: `list_tasks(status, owner)`.
+Подробности и правила Local: [задачи и брифы](docs/tasks.md).
+
 ## Install
 
 Download `notetaker-0.7.0-windows-x64.zip` from this repository's **Releases**
