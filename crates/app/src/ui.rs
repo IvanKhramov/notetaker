@@ -1207,12 +1207,41 @@ fn duration_label(seconds: Option<i64>) -> String {
         |s| format!("{} мин", s.max(0) / 60),
     )
 }
+// Pure string conversion keeps Windows canonical paths testable on every OS.
+fn file_uri(path: &str) -> Option<String> {
+    let path = if path.starts_with('/') {
+        path.to_owned()
+    } else if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+        format!("//{}", unc.replace('\\', "/"))
+    } else {
+        path.strip_prefix(r"\\?\")
+            .unwrap_or(path)
+            .replace('\\', "/")
+    };
+    let prefix = if path.starts_with("//") {
+        "file:"
+    } else if path.starts_with('/') {
+        "file://"
+    } else if path.as_bytes().get(1..3) == Some(b":/") {
+        "file:///"
+    } else {
+        return None;
+    };
+    let mut uri = prefix.to_owned();
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || b"/-._~:".contains(&byte) {
+            uri.push(char::from(byte));
+        } else {
+            use std::fmt::Write;
+            write!(uri, "%{byte:02X}").ok()?;
+        }
+    }
+    Some(uri)
+}
+
 fn image_uri(path: &std::path::Path, relative: &str) -> Option<String> {
     let image = notetaker_core::attachment_image_path(path, relative)?;
-    Some(format!(
-        "file://{}",
-        image.to_string_lossy().replace('\\', "/")
-    ))
+    file_uri(image.to_str()?)
 }
 
 fn preview_markdown(text: &str, path: &std::path::Path) -> (String, Vec<Option<String>>) {
@@ -1515,6 +1544,27 @@ fn transcript_view(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn file_uris_strip_windows_verbatim_prefix_and_encode_utf8() {
+        for (path, uri) in [
+            (
+                r"\\?\C:\Users\A B\attachments\тест.png",
+                "file:///C:/Users/A%20B/attachments/%D1%82%D0%B5%D1%81%D1%82.png",
+            ),
+            (r"C:\notes\a#b%.png", "file:///C:/notes/a%23b%25.png"),
+            (
+                r"\\?\UNC\server\share\a b.png",
+                "file://server/share/a%20b.png",
+            ),
+            (r"\\server\share\a.png", "file://server/share/a.png"),
+            ("/tmp/a b.png", "file:///tmp/a%20b.png"),
+            (r"/tmp/a\b.png", "file:///tmp/a%5Cb.png"),
+        ] {
+            assert_eq!(super::file_uri(path).as_deref(), Some(uri));
+        }
+        assert!(super::file_uri("relative/path.png").is_none());
+    }
+
     #[test]
     fn preview_checks_standalone_inline_and_reference_images() {
         let dir = tempfile::tempdir().unwrap();
