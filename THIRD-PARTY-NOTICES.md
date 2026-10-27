@@ -19,8 +19,8 @@ The optional CUDA/shared feature is not enabled in CI or release builds.
 - SentencePiece: Apache-2.0; <https://github.com/google/sentencepiece>.
 - utf8proc: MIT; <https://github.com/JuliaStrings/utf8proc>.
 
-Models are downloaded separately and are not included in this ZIP. GigaAM v3
-and Silero VAD use MIT; Parakeet v3 uses CC-BY-4.0. Model attribution and source
+Models are downloaded separately and are not included in this ZIP. GigaAM v3,
+Silero VAD and Whisper tiny use MIT; Parakeet v3 uses CC-BY-4.0. Model attribution and source
 links are in README.md. Rust dependency versions and declared licenses can be
 inspected using `cargo metadata --locked --format-version 1` in the source tree.
 

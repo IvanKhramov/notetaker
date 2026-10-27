@@ -206,12 +206,20 @@ plus models, after releasing ASR weights.
 
 ## Local transcription
 
+**0.10.0:** **Авто (рус/англ)** routes VAD chunks through Whisper tiny language ID
+to GigaAM or multilingual Parakeet and stores optional segment languages.
+ASR settings control acceleration and up to eight physical CPU cores.
+DirectML is explicitly unavailable in this build; the portable CPU package
+requires no GPU runtime. See [ASR setup, GPU findings and benchmarks](docs/asr.md).
+
+
 Build both binaries, then download the model (Silero VAD is installed with it):
 
 ```sh
 cargo build -p notetaker-asr-worker -p notetaker-cli -j 2
 ./target/debug/notetaker-asr download gigaam-v3
 ./target/debug/notetaker-asr download parakeet-v3
+./target/debug/notetaker-asr download auto
 ./target/debug/notetaker transcribe input.wav
 ./target/debug/notetaker transcribe input.wav --model parakeet-v3
 ```
@@ -219,7 +227,7 @@ cargo build -p notetaker-asr-worker -p notetaker-cli -j 2
 Input must be mono WAV at 8–192 kHz (integer PCM or float); the worker resamples
 it to 16 kHz using sherpa. Output is one VAD segment
 per line: `[00:01.234 - 00:03.456] text`. Timestamps describe speech chunks,
-not individual words. GigaAM v3 with punctuation is the default Russian model;
+not individual words. GigaAM v3 with punctuation is the Russian model;
 Parakeet TDT v3 int8 supports English and 24 other European languages.
 No audio leaves the machine; only the explicit `download` command uses the network.
 
@@ -228,6 +236,7 @@ Models go to `ProjectDirs("", "", "notetaker").data_local_dir()/models`:
 `%LOCALAPPDATA%\notetaker\data\models` on Windows. Override with
 `NOTETAKER_MODELS_DIR`. Downloads are verified against pinned SHA-256 and size
 before extraction, then installed atomically. Models and test WAVs are not in Git.
+Benchmark with `notetaker-asr bench input.wav --model auto --provider cpu`.
 The CLI finds `notetaker-asr` alongside itself or on PATH; `NOTETAKER_ASR_BIN`
 can select another executable.
 
@@ -247,6 +256,9 @@ from the [sherpa-onnx model releases](https://github.com/k2-fsa/sherpa-onnx/rele
   [original model and attribution](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3);
   archive 487.2 MB. Preserve NVIDIA attribution and indicate the ONNX/int8 conversion
   when redistributing these weights.
+- `whisper-tiny`: OpenAI, multilingual Whisper tiny int8 for language ID,
+  [MIT](https://github.com/openai/whisper/blob/main/LICENSE); archive 116.2 MB,
+  retained int8 weights 102.8 MB.
 - `silero-vad`: Silero Team, [MIT](https://github.com/snakers4/silero-vad/blob/master/LICENSE),
   [upstream](https://github.com/snakers4/silero-vad); ONNX file 643.9 KB.
 

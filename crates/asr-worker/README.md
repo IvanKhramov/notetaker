@@ -9,7 +9,20 @@ all segment timestamps. Requests are sequential; failed model loads unload the
 previous model to keep memory use bounded. A worker/client pair handles one
 request at a time.
 
-CPU (two ASR threads, one VAD thread) is the default; `auto` currently selects CPU.
+CPU is the portable default. `num_threads: 0` (also the default when absent)
+selects min(physical cores, 8); 1-8 overrides ASR, Language ID, VAD and diarization.
+`model_id: "auto"` requires GigaAM, Parakeet, Whisper tiny and Silero VAD;
+`download auto` installs them with pinned checksums. Auto routes each VAD chunk
+by Whisper language ID, returns optional `lang`, and biases both ASR models with
+hotwords. The protocol version remains 1; older segments omit `lang`.
+`provider: "auto"` in this CPU worker resolves to CPU. Frontends can select a
+separate optional GPU worker. DirectML requests fail explicitly in this build.
+See [ASR details and GPU investigation](../../docs/asr.md).
+
+`notetaker-asr bench input.wav --model auto --provider cpu --threads 0 --runs 3`
+prints model loading time, pass duration and RTF (excluding load/diarization).
+`check-provider cpu|directml` checks build capabilities without loading models.
+
 For explicit `provider: "cuda"`, build with `--features cuda` and point
 `SHERPA_ONNX_LIB_DIR` to a compatible CUDA-enabled sherpa-onnx **shared** native
 library directory. This feature switches native linking to shared libraries;
