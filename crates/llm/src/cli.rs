@@ -335,6 +335,13 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    // Forks from parallel tests can briefly hold another test's freshly written
+    // script open for writing, so exec fails with ETXTBSY. Run them serially.
+    pub(super) fn serial() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     fn fixture(kind: ProviderKind, script: &str) -> (tempfile::TempDir, CliProvider) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(binary_name(kind));
@@ -367,6 +374,7 @@ mod tests {
     }
     #[test]
     fn claude_stdin_json_and_no_bare_or_tools() {
+        let _serial = serial();
         let (_dir, provider) = fixture(
             ProviderKind::ClaudeCli,
             r#"
@@ -399,6 +407,7 @@ printf '%s' '{"result":"summary","is_error":false}'
     }
     #[test]
     fn codex_uses_last_message_and_empty_read_only_workspace() {
+        let _serial = serial();
         let (_dir, provider) = fixture(
             ProviderKind::CodexCli,
             r#"
@@ -418,6 +427,7 @@ printf '%s' 'tool log must never be treated as final text'
     }
     #[test]
     fn cli_failures_empty_results_and_login_status() {
+        let _serial = serial();
         for script in [
             "exit 1",
             "printf '%s' '{\"result\":\"\"}'",
@@ -439,6 +449,7 @@ printf '%s' 'tool log must never be treated as final text'
     }
     #[test]
     fn timeout_and_running_cancellation_reap_child() {
+        let _serial = serial();
         let (_dir, mut provider) = fixture(ProviderKind::ClaudeCli, "exec sleep 30");
         provider.timeout = Duration::from_millis(100);
         assert!(
@@ -467,6 +478,7 @@ printf '%s' 'tool log must never be treated as final text'
 #[cfg(all(test, unix))]
 #[test]
 fn cli_provider_uses_the_shared_map_reduce_for_long_transcripts() {
+    let _serial = tests::serial();
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let binary = dir.path().join("claude");
