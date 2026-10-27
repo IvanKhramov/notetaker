@@ -590,44 +590,56 @@ impl NotetakerApp {
         self.state.offer_model_download &= open;
     }
     fn call_notification(&mut self, ctx: &egui::Context) {
-        if self.state.call_prompt.is_none() {
+        let Some(prompt) = self.state.call_prompt.clone() else {
             return;
-        }
+        };
         let mut accept = false;
         let mut dismiss = false;
         ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("call-notification"),
             egui::ViewportBuilder::default()
                 .with_title("notetaker · звонок")
-                .with_inner_size([420.0, 130.0])
+                .with_inner_size([350.0, 142.0])
                 .with_resizable(false)
+                .with_decorations(false)
+                .with_transparent(true)
                 .with_window_level(egui::WindowLevel::AlwaysOnTop)
-                .with_minimize_button(false)
-                .with_maximize_button(false)
                 .with_active(false),
             |ui, _| {
-                let (message, button) = match &self.state.call_prompt {
-                    Some(CallPrompt::Start { app, .. }) => (
-                        format!("Похоже, идёт звонок в {app}. Записать?"),
-                        "Записать",
-                    ),
-                    _ => ("Звонок закончился. Остановить запись?".into(), "Остановить"),
-                };
-                ui.label(message);
-                ui.horizontal(|ui| {
-                    accept = ui
-                        .add_enabled(
-                            self.state.ready
-                                && !self.state.downloading
-                                && !self.state.settings_pending,
-                            egui::Button::new(button),
-                        )
-                        .clicked();
-                    dismiss = ui.button("Не сейчас").clicked();
-                });
-                if self.state.recording.capture_incomplete {
-                    ui.colored_label(Palette::of(ui).red, "⚠ Неполный захват звука");
-                }
+                let p = Palette::of(ui);
+                egui::Frame::new()
+                    .fill(p.card)
+                    .stroke(egui::Stroke::new(1.0, p.border))
+                    .corner_radius(12)
+                    .inner_margin(16)
+                    .show(ui, |ui| {
+                        ui.set_width(318.0);
+                        let (title, question, button) = match &prompt {
+                            CallPrompt::Start { app, .. } => {
+                                (format!("Звонок в {app}"), "Записать встречу?", "Записать")
+                            }
+                            CallPrompt::Stop { .. } => (
+                                "Звонок закончился".into(),
+                                "Остановить запись?",
+                                "Остановить",
+                            ),
+                        };
+                        ui.label(RichText::new(title).strong());
+                        ui.weak(question);
+                        ui.horizontal(|ui| {
+                            ui.add_enabled_ui(
+                                self.state.ready
+                                    && !self.state.downloading
+                                    && !self.state.settings_pending,
+                                |ui| {
+                                    accept =
+                                        theme::button(ui, button, ButtonStyle::Primary).clicked();
+                                },
+                            );
+                            dismiss =
+                                theme::button(ui, "Не сейчас", ButtonStyle::Secondary).clicked();
+                        });
+                    });
                 if ui.input(|input| input.viewport().close_requested()) {
                     dismiss = true;
                     ui.ctx()
@@ -642,40 +654,62 @@ impl NotetakerApp {
         }
     }
     fn indicator(&mut self, ctx: &egui::Context) {
-        if !self.state.recording.busy() {
+        let show = ctx.input(|input| {
+            indicator_visible(
+                self.state.recording.phase,
+                input.viewport().minimized.unwrap_or(false),
+                input.viewport().focused.unwrap_or(false),
+            )
+        });
+        if !show {
             return;
         }
+        let title = self
+            .state
+            .recording
+            .path
+            .as_ref()
+            .and_then(|path| self.state.documents.get(path))
+            .map_or("Встреча", |doc| doc.data.meta.title.as_str());
         let mut stop = false;
+        let mut open = false;
         ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("recording-indicator"),
             egui::ViewportBuilder::default()
                 .with_title("notetaker · запись")
-                .with_inner_size([280.0, 112.0])
+                .with_inner_size([430.0, 52.0])
+                .with_min_inner_size([430.0, 52.0])
+                .with_max_inner_size([430.0, 52.0])
                 .with_resizable(false)
+                .with_decorations(false)
+                .with_transparent(true)
                 .with_window_level(egui::WindowLevel::AlwaysOnTop)
-                .with_close_button(false)
-                .with_minimize_button(false)
-                .with_maximize_button(false)
                 .with_active(false),
             |ui, _| {
-                ui.horizontal(|ui| {
-                    ui.colored_label(Palette::of(ui).red, "●");
-                    ui.label(timestamp(self.state.recording.elapsed().as_millis() as u64));
-                    stop = ui
-                        .add_enabled(
-                            self.state.recording.phase != Phase::Finalizing,
-                            egui::Button::new("Стоп"),
-                        )
-                        .clicked();
-                });
-                ui.label(match self.state.recording.phase {
-                    Phase::Starting => "Загружаем модель…",
-                    Phase::Finalizing => "Чистовой проход…",
-                    _ => "Идёт запись",
-                });
-                if self.state.recording.capture_incomplete {
-                    ui.colored_label(Palette::of(ui).red, "⚠ Неполный захват звука");
-                }
+                let p = Palette::of(ui);
+                egui::Frame::new()
+                    .fill(p.card)
+                    .stroke(egui::Stroke::new(1.0, p.border))
+                    .corner_radius(26)
+                    .inner_margin(10)
+                    .show(ui, |ui| {
+                        ui.set_width(410.0);
+                        ui.horizontal(|ui| {
+                            theme::recording_dot(ui);
+                            ui.label(
+                                RichText::new(timestamp(
+                                    self.state.recording.elapsed().as_millis() as u64,
+                                ))
+                                .strong(),
+                            );
+                            ui.add_sized(
+                                [145.0, 28.0],
+                                egui::Label::new(RichText::new(title).color(p.muted)).truncate(),
+                            );
+                            open = theme::button(ui, "Открыть", ButtonStyle::Secondary).clicked();
+                            stop = theme::button(ui, "Стоп", ButtonStyle::Danger).clicked();
+                        });
+                    });
                 if ui.input(|input| input.viewport().close_requested()) {
                     ui.ctx()
                         .send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -683,6 +717,14 @@ impl NotetakerApp {
                 ui.ctx().request_repaint_after(Duration::from_millis(200));
             },
         );
+        if open {
+            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd_to(
+                egui::ViewportId::ROOT,
+                egui::ViewportCommand::Minimized(false),
+            );
+            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
+        }
         if stop {
             self.state.recording.request_stop();
         }
@@ -724,6 +766,10 @@ impl NotetakerApp {
     }
 }
 impl eframe::App for NotetakerApp {
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0; 4]
+    }
+
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // eframe calls this even when the root window is hidden in the tray.
         self.state.poll();
@@ -812,6 +858,9 @@ fn model_selector(ui: &mut egui::Ui, id: &str, model: &mut String) {
         });
 }
 
+fn indicator_visible(phase: Phase, minimized: bool, focused: bool) -> bool {
+    phase == Phase::Recording && (minimized || !focused)
+}
 fn day_label(date: chrono::NaiveDate, today: chrono::NaiveDate) -> String {
     if date == today {
         "Сегодня".into()
@@ -922,6 +971,15 @@ fn transcript_view(ui: &mut egui::Ui, document: &mut Document, path: &std::path:
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn indicator_only_shows_during_recording_outside_main_window() {
+        assert!(!indicator_visible(Phase::Recording, false, true));
+        assert!(indicator_visible(Phase::Recording, true, true));
+        assert!(indicator_visible(Phase::Recording, false, false));
+        for phase in [Phase::Idle, Phase::Starting, Phase::Finalizing] {
+            assert!(!indicator_visible(phase, true, false));
+        }
+    }
     #[test]
     fn groups_by_local_calendar_day_including_year_boundary() {
         let today = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
