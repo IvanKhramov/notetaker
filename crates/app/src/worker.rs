@@ -506,7 +506,11 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                     });
                 }
                 Command::Reveal(path) => {
-                    let _ = events.send(Event::Revealed(reveal_file(&path).map_err(error_text)));
+                    let events = events.clone();
+                    thread::spawn(move || {
+                        let _ =
+                            events.send(Event::Revealed(reveal_file(&path).map_err(error_text)));
+                    });
                 }
                 Command::Export { meeting, text } => {
                     let _ = events.send(Event::Exported(
@@ -782,6 +786,7 @@ fn templates(root: &Path) -> Vec<String> {
             let path = entry.path();
             if path.extension().is_some_and(|ext| ext == "md")
                 && let Some(name) = path.file_stem().and_then(|name| name.to_str())
+                && !name.starts_with("followup-")
                 && Template::load(root, name).is_ok()
                 && !names.iter().any(|n| n == name)
             {
@@ -1035,7 +1040,8 @@ fn reveal_file(path: &Path) -> Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .context("Не удалось открыть папку")?;
+        .context("Не удалось открыть папку")?
+        .wait()?;
     Ok(())
 }
 
