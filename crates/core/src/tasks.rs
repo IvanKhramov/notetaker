@@ -125,14 +125,16 @@ pub fn parse_tasks(text: &str, date: NaiveDate) -> Vec<Task> {
     tasks
 }
 fn clean_field(value: &str, prefixes: &[&str]) -> String {
-    let value = value.trim().trim_matches('*').trim();
-    let lower = value.to_lowercase();
-    let value = prefixes
-        .iter()
-        .find_map(|prefix| {
-            lower
-                .starts_with(prefix)
-                .then(|| value[prefix.len()..].trim())
+    let unmarked = value.replace(['*', '`'], "");
+    let value = unmarked.trim().trim_matches('_').trim();
+    let value = value
+        .split_once(':')
+        .and_then(|(label, rest)| {
+            let label = label.trim().trim_matches('_').trim().to_lowercase();
+            prefixes
+                .iter()
+                .any(|prefix| prefix.trim_end_matches(':') == label)
+                .then(|| rest.trim().trim_matches('_').trim())
         })
         .unwrap_or(value);
     if [
@@ -223,6 +225,20 @@ impl Meeting {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn marked_labels_missing_fields_and_unicode_separators() {
+        let date = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
+        let text = "- [ ] Сделать \u{2014} **Ответственный:** Иван \u{2013} **Срок:** _завтра_\n- [ ] Проверить; owner: @Анна; due: до 30.10\n- [ ] Дело - не указан - не указан\n- [ ] Другое - завтра";
+        let tasks = parse_tasks(text, date);
+        assert_eq!(tasks.len(), 4);
+        assert_eq!(tasks[0].owner, "Иван");
+        assert_eq!(tasks[0].due, date.succ_opt());
+        assert!(person_matches(&tasks[1].owner, "анна"));
+        assert!(tasks[2].owner.is_empty());
+        assert!(tasks[2].due.is_none());
+        assert!(tasks[3].owner.is_empty());
+        assert_eq!(tasks[3].due, date.succ_opt());
+    }
     #[test]
     fn formats_dates_nesting_and_code() {
         let date = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
