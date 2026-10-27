@@ -132,6 +132,20 @@ impl LoopbackBuffer {
     }
 }
 
+/// WASAPI may flag the first packets even when capture starts normally.
+#[cfg(any(windows, test))]
+#[derive(Default)]
+pub(crate) struct StartupWarnings {
+    first_packet: Option<Duration>,
+}
+#[cfg(any(windows, test))]
+impl StartupWarnings {
+    pub(crate) fn allows(&mut self, now: Duration) -> bool {
+        let first = *self.first_packet.get_or_insert(now);
+        now.saturating_sub(first) >= Duration::from_millis(500)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,20 +245,6 @@ mod tests {
         let tail = buffer.finish().unwrap();
         assert_eq!(tail.captured_at, at(90));
         assert_eq!(tail.samples.len(), 160000);
-    }
-}
-
-/// WASAPI may flag the first packets even when capture starts normally.
-#[cfg(any(windows, test))]
-#[derive(Default)]
-pub(crate) struct StartupWarnings {
-    first_packet: Option<Duration>,
-}
-#[cfg(any(windows, test))]
-impl StartupWarnings {
-    pub(crate) fn allows(&mut self, now: Duration) -> bool {
-        let first = *self.first_packet.get_or_insert(now);
-        now.saturating_sub(first) >= Duration::from_millis(500)
     }
 }
 

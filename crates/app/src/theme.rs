@@ -169,40 +169,6 @@ pub fn install(ctx: &egui::Context) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn embedded_font_covers_ui_text_and_symbols() {
-        let ctx = egui::Context::default();
-        install(&ctx);
-        let output =
-            ctx.run_pass(egui::RawInput::default(), |ctx| {
-                ctx.fonts_mut(|fonts| {
-                    for font in [FontId::proportional(16.0), FontId::monospace(16.0)] {
-                        assert!(fonts.has_glyphs(&font,
-                        "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдеёжзийклмнопрстуфхцчшщъыьэюя +·…–"));
-                    }
-                });
-            });
-        output.drop_without_applying_deltas();
-    }
-    #[test]
-    fn system_tracks_os_and_explicit_theme_overrides_it() {
-        let ctx = egui::Context::default();
-        install(&ctx);
-        for system in [egui::Theme::Light, egui::Theme::Dark] {
-            ctx.options_mut(|options| options.system_theme = Some(system));
-            Theme::System.apply(&ctx);
-            assert_eq!(ctx.style().visuals.dark_mode, system == egui::Theme::Dark);
-            Theme::Light.apply(&ctx);
-            assert!(!ctx.style().visuals.dark_mode);
-            Theme::Dark.apply(&ctx);
-            assert!(ctx.style().visuals.dark_mode);
-        }
-    }
-}
-
 pub enum ButtonStyle {
     Primary,
     Secondary,
@@ -269,4 +235,51 @@ pub fn bar(p: Palette) -> egui::Frame {
         .stroke(Stroke::new(1.0, p.border))
         .corner_radius(10)
         .inner_margin(10)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn embedded_font_covers_ui_text_and_symbols() {
+        let ctx = egui::Context::default();
+        install(&ctx);
+        let output = ctx.run_pass(egui::RawInput::default(), |ctx| {
+            ctx.fonts_mut(|fonts| {
+                for font in [
+                    FontId::proportional(16.0),
+                    FontId::monospace(16.0),
+                    FontId::new(16.0, FontFamily::Name("heading".into())),
+                ] {
+                    assert!(fonts.has_glyphs(
+                        &font,
+                        "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдеёжзийклмнопрстуфхцчшщъыьэюя +·…–«»"
+                    ));
+                }
+            });
+        });
+        output.drop_without_applying_deltas();
+    }
+    #[test]
+    fn system_tracks_os_and_explicit_theme_overrides_it() {
+        let ctx = egui::Context::default();
+        install(&ctx);
+        for system in [egui::Theme::Light, egui::Theme::Dark] {
+            let output = ctx.run_pass(
+                egui::RawInput {
+                    system_theme: Some(system),
+                    ..Default::default()
+                },
+                |ctx| {
+                    Theme::System.apply(ctx);
+                    assert_eq!(ctx.theme(), system);
+                    Theme::Light.apply(ctx);
+                    assert!(!ctx.global_style().visuals.dark_mode);
+                    Theme::Dark.apply(ctx);
+                    assert!(ctx.global_style().visuals.dark_mode);
+                },
+            );
+            output.drop_without_applying_deltas();
+        }
+    }
 }

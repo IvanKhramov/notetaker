@@ -226,7 +226,12 @@ mod tests {
             ..Settings::default()
         };
         assert!(settings.validate().is_ok());
+        settings.theme = crate::theme::Theme::Dark;
         let text = toml::to_string(&settings).unwrap();
+        assert_eq!(
+            toml::from_str::<Settings>(&text).unwrap().theme,
+            crate::theme::Theme::Dark
+        );
         assert_eq!(
             toml::from_str::<Settings>(&text).unwrap().hotkey,
             "Ctrl+Alt+R"

@@ -23,6 +23,7 @@ pub struct NotetakerApp {
     show_record: bool,
     show_settings: bool,
     toasts: VecDeque<(Instant, String)>,
+    main_rect: Option<egui::Rect>,
     #[cfg(windows)]
     desktop: Option<crate::desktop::Desktop>,
     #[cfg(windows)]
@@ -40,6 +41,7 @@ impl NotetakerApp {
             show_record: false,
             show_settings: false,
             toasts: VecDeque::new(),
+            main_rect: None,
             #[cfg(windows)]
             desktop: None,
             #[cfg(windows)]
@@ -206,7 +208,7 @@ impl NotetakerApp {
                 let can_stop = matches!(r.phase, Phase::Starting | Phase::Recording);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if can_stop && theme::button(ui, "Стоп", ButtonStyle::Danger).clicked() {
-                        self.state.recording.request_stop();
+                        self.state.toggle_recording();
                     }
                 });
             });
@@ -595,9 +597,13 @@ impl NotetakerApp {
         };
         let mut accept = false;
         let mut dismiss = false;
+        let mut builder = egui::ViewportBuilder::default();
+        if let Some(rect) = self.main_rect {
+            builder = builder.with_position(rect.right_bottom() - egui::vec2(368.0, 160.0));
+        }
         ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("call-notification"),
-            egui::ViewportBuilder::default()
+            builder
                 .with_title("notetaker · звонок")
                 .with_inner_size([350.0, 142.0])
                 .with_resizable(false)
@@ -726,7 +732,7 @@ impl NotetakerApp {
             ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
         }
         if stop {
-            self.state.recording.request_stop();
+            self.state.toggle_recording();
         }
     }
     #[cfg(windows)]
@@ -774,6 +780,13 @@ impl eframe::App for NotetakerApp {
         // eframe calls this even when the root window is hidden in the tray.
         self.state.poll();
         self.state.settings.theme.apply(ctx);
+        ctx.input(|input| {
+            if !input.viewport().minimized.unwrap_or(false)
+                && let Some(rect) = input.viewport().outer_rect
+            {
+                self.main_rect = Some(rect);
+            }
+        });
         #[cfg(windows)]
         self.desktop(ctx);
         if ctx.input(|input| input.viewport().close_requested()) && !self.state.can_exit() {

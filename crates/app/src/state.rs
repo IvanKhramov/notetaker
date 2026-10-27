@@ -314,6 +314,9 @@ impl AppState {
             }
             Some(CallPrompt::Stop { .. }) => {
                 self.recording.request_stop();
+                if self.selected == self.recording.path {
+                    self.tab = Tab::Enhanced;
+                }
                 self.call_prompt = None;
             }
             None => {}
@@ -366,6 +369,9 @@ impl AppState {
     pub fn toggle_recording(&mut self) {
         if self.recording.busy() {
             self.recording.request_stop();
+            if self.selected == self.recording.path {
+                self.tab = Tab::Enhanced;
+            }
         } else {
             self.start_recording();
         }
@@ -637,18 +643,23 @@ impl AppState {
                 self.recording.phase = Phase::Recording;
                 if self.recording.stop_requested {
                     self.recording.request_stop();
+                    self.tab = Tab::Enhanced;
                 }
                 self.documents.insert(path, Document::new(*document));
                 self.refresh();
             }
             Event::Pipeline(event) => {
+                let previous = self.recording.phase;
                 self.recording.apply(&event);
                 if let PipelineEvent::Error(message)
                 | PipelineEvent::CaptureEvent(CaptureEvent::Error { message, .. }) = &event
                 {
                     self.error = Some(message.clone());
                 }
-                if self.recording.phase == Phase::Finalizing {
+                if previous != Phase::Finalizing
+                    && self.recording.phase == Phase::Finalizing
+                    && self.selected == self.recording.path
+                {
                     self.tab = Tab::Enhanced;
                 }
                 if let PipelineEvent::CaptureIssue(issue) = &event
@@ -935,6 +946,24 @@ mod tests {
         );
         state.selected = Some(path.clone());
         (state, commands, root, path)
+    }
+    #[test]
+    fn final_progress_does_not_override_navigation_after_initial_transition() {
+        let (mut state, _commands, _root, path) = fixture();
+        state.recording.path = Some(path);
+        state.recording.phase = Phase::Recording;
+        state.tab = Tab::Notes;
+        state.apply(Event::Pipeline(PipelineEvent::FinalPassProgress {
+            completed: 0,
+            total: 2,
+        }));
+        assert!(state.tab == Tab::Enhanced);
+        state.tab = Tab::Transcript;
+        state.apply(Event::Pipeline(PipelineEvent::FinalPassProgress {
+            completed: 1,
+            total: 2,
+        }));
+        assert!(state.tab == Tab::Transcript);
     }
     #[test]
     fn call_acceptance_uses_pid_and_defaults_without_audio_inventory() {
