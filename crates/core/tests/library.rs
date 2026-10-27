@@ -30,6 +30,7 @@ fn transcript(text: &str) -> Transcript {
         speaker_names: Default::default(),
         speaker_suggestions: Default::default(),
         self_speaker: None,
+        speaker_voice_ids: Default::default(),
         segments: vec![
             Segment {
                 id: Uuid::now_v7(),

@@ -1,13 +1,18 @@
 //! Meeting files are the source of truth; the SQLite search index is disposable.
 mod attachments;
 pub mod calendar;
+mod export;
 mod index;
 mod model;
+mod speakers;
 mod storage;
 mod vocabulary;
 mod voices;
+pub use export::{ExportFormat, format_timestamp};
+pub use speakers::{MergeUndo, SpeakerStats, SpeakerTimeline, TimelineSegment};
 pub use vocabulary::Vocabulary;
 pub use voices::{MeetingVoices, SELF_THRESHOLD, VOICE_MODEL, Voice, VoiceLibrary, cosine};
+pub use voices::{SpeakerEdit, SpeakerEditResult, SpeakerUndo};
 
 pub use attachments::{attachment_image_path, attachment_references, markdown_images};
 pub use index::Hit;
@@ -37,6 +42,8 @@ pub enum Error {
     },
     #[error("invalid index data: {0}")]
     InvalidIndex(String),
+    #[error("speaker edit failed: {0}")]
+    SpeakerEdit(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

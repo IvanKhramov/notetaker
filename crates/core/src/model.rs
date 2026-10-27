@@ -91,6 +91,8 @@ pub struct Transcript {
     pub speaker_suggestions: std::collections::BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub self_speaker: Option<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub speaker_voice_ids: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for Transcript {
@@ -101,6 +103,7 @@ impl Default for Transcript {
             speaker_names: Default::default(),
             speaker_suggestions: Default::default(),
             self_speaker: None,
+            speaker_voice_ids: Default::default(),
         }
     }
 }
