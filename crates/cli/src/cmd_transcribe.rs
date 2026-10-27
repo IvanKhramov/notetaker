@@ -6,7 +6,7 @@ use std::path::PathBuf;
 #[derive(Parser)]
 pub struct Args {
     pub file: PathBuf,
-    #[arg(long, default_value = "gigaam-v3", value_parser = ["gigaam-v3", "parakeet-v3"])]
+    #[arg(long, default_value = "gigaam-v3", value_parser = ["auto", "gigaam-v3", "parakeet-v3"])]
     pub model: String,
 }
 

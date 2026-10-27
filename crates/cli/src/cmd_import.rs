@@ -12,7 +12,7 @@ pub struct Args {
     pub file: PathBuf,
     #[arg(long)]
     pub library: Option<PathBuf>,
-    #[arg(long, value_parser = ["gigaam-v3", "parakeet-v3"])]
+    #[arg(long, value_parser = ["auto", "gigaam-v3", "parakeet-v3"])]
     pub model: Option<String>,
     #[arg(long, value_parser = ["local", "hybrid"])]
     pub mode: Option<String>,
@@ -25,6 +25,8 @@ pub struct Args {
 struct Preferences {
     library: PathBuf,
     model: String,
+    asr_acceleration: notetaker_asr_proto::Provider,
+    asr_threads: u32,
     mode: Mode,
     retention_days: Option<u32>,
     auto_summary: bool,
@@ -42,6 +44,8 @@ impl Default for Preferences {
         Self {
             library: documents.join("notetaker"),
             model: "gigaam-v3".into(),
+            asr_acceleration: notetaker_asr_proto::Provider::default(),
+            asr_threads: 0,
             mode: Mode::Local,
             retention_days: Some(7),
             auto_summary: true,
@@ -64,6 +68,8 @@ pub fn run(args: Args) -> Result<()> {
     };
     let library = Library::open(args.library.unwrap_or(settings.library))?;
     let mut asr = AsrConfig::new(args.model.unwrap_or(settings.model))?;
+    asr.provider = settings.asr_acceleration;
+    asr.num_threads = settings.asr_threads;
     asr.vocabulary = Vocabulary::load(library.root())?;
     let mode = match args.mode.as_deref() {
         Some("hybrid") => Mode::Hybrid,

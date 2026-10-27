@@ -15,7 +15,7 @@ pub struct Args {
     library: PathBuf,
     #[arg(long)]
     title: String,
-    #[arg(long, default_value = "gigaam-v3", value_parser = ["gigaam-v3", "parakeet-v3"])]
+    #[arg(long, default_value = "gigaam-v3", value_parser = ["auto", "gigaam-v3", "parakeet-v3"])]
     model: String,
     #[arg(long, conflicts_with = "app", value_parser = clap::value_parser!(u32).range(1..))]
     pid: Option<u32>,

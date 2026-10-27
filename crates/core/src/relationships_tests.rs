@@ -189,6 +189,7 @@ fn person_timing_unions_segments_across_explicitly_merged_speakers() {
             text: "Да".into(),
             source: Source::Final,
             edited: false,
+            lang: None,
         });
     }
     meeting.write_transcript(&transcript).unwrap();
