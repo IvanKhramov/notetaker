@@ -316,6 +316,12 @@ mod tests {
             strip_internal("Решение\n[internal] оценка\n<!-- internal\nсекрет\n-->\nСрок"),
             "Решение\nСрок"
         );
+        assert_eq!(
+            strip_internal(
+                "## Решения\nПроверить\n## Внутренние заметки\nSECRET\n### Детали\nSECRET\n## Сроки\nЗавтра"
+            ),
+            "## Решения\nПроверить\n## Сроки\nЗавтра"
+        );
         struct Fake(crate::ProviderConfig);
         impl Provider for Fake {
             fn config(&self) -> &crate::ProviderConfig {

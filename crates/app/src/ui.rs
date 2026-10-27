@@ -174,7 +174,8 @@ impl NotetakerApp {
                                                 && self.state.ready
                                                 && !self.state.recording.busy()
                                                 && !self.state.settings_pending
-                                                && !self.state.downloading,
+                                                && !self.state.downloading
+                                                && !self.state.draft_busy,
                                             egui::Button::new("Начать запись"),
                                         )
                                         .clicked()
@@ -357,16 +358,22 @@ impl NotetakerApp {
                 .default_size([650.0, 500.0])
                 .show(&ctx, |ui| {
                     ui.horizontal(|ui| {
-                        ui.selectable_value(
-                            &mut self.state.followup_kind,
-                            notetaker_llm::FollowupKind::Team,
-                            "В команду",
-                        );
-                        ui.selectable_value(
-                            &mut self.state.followup_kind,
-                            notetaker_llm::FollowupKind::Client,
-                            "Клиенту",
-                        );
+                        let previous = self.state.followup_kind;
+                        ui.add_enabled_ui(!self.state.draft_busy, |ui| {
+                            ui.selectable_value(
+                                &mut self.state.followup_kind,
+                                notetaker_llm::FollowupKind::Team,
+                                "В команду",
+                            );
+                            ui.selectable_value(
+                                &mut self.state.followup_kind,
+                                notetaker_llm::FollowupKind::Client,
+                                "Клиенту",
+                            );
+                        });
+                        if previous != self.state.followup_kind {
+                            self.state.followup_text.clear();
+                        }
                         if ui
                             .add_enabled(
                                 !self.state.draft_busy && !self.state.unsaved(),
@@ -389,7 +396,13 @@ impl NotetakerApp {
                             .desired_width(f32::INFINITY),
                     );
                     ui.horizontal(|ui| {
-                        if ui.button("Копировать").clicked() {
+                        if ui
+                            .add_enabled(
+                                !self.state.draft_busy && !self.state.followup_text.is_empty(),
+                                egui::Button::new("Копировать"),
+                            )
+                            .clicked()
+                        {
                             ctx.copy_text(self.state.followup_text.clone());
                         }
                         if ui
@@ -955,7 +968,11 @@ impl NotetakerApp {
             self.state.chat.open(Some(meeting), title);
         }
         if followup {
+            self.state.brief_open = false;
             self.state.followup_open = true;
+            if self.state.followup_path.as_ref() != Some(&path) {
+                self.state.followup_text.clear();
+            }
             self.state.followup_path = Some(path.clone());
         }
         if let Some(edit) = speaker_edit {

@@ -519,6 +519,7 @@ impl AppState {
             || self.recording.busy()
             || self.downloading
             || self.settings_pending
+            || self.draft_busy
             || self.exit_requested
         {
             return;
@@ -637,6 +638,7 @@ impl AppState {
         }
         self.brief = None;
         self.brief_open = true;
+        self.followup_open = false;
         self.draft_busy = true;
         self.draft_cancel = Default::default();
         self.send(Command::Brief {
@@ -1259,7 +1261,11 @@ impl AppState {
                 }
                 self.refresh();
             }
-            Event::Revealed(result) => { if let Err(error) = result { self.error = Some(error); } }
+            Event::Revealed(result) => {
+                if let Err(error) = result {
+                    self.error = Some(error);
+                }
+            }
             Event::Exported(result) => match result {
                 Ok(path) => self.exported.push_back(path),
                 Err(error) => self.error = Some(error),
@@ -1287,7 +1293,12 @@ impl AppState {
                 stop,
                 importing,
             } => {
+                let mut document = document;
+                document
+                    .transcript
+                    .default_self_name(&self.settings.user_name);
                 let path = document.meeting.path().to_owned();
+                self.tasks_open = false;
                 self.selected = Some(path.clone());
                 self.tab = Tab::Notes;
                 self.recording.path = Some(path.clone());
