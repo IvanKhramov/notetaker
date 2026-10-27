@@ -18,9 +18,21 @@ update previous meetings. See [speaker editing](docs/speakers.md),
 CLI: `notetaker tasks --mine --open`; MCP: `list_tasks(status, owner)`.
 Подробности и правила Local: [задачи и брифы](docs/tasks.md).
 
+## Люди, серии и дайджест (0.9.0)
+
+«Люди» связывает участников календаря, спикеров, голоса и задачи. В карточке:
+последние встречи, поручения, время речи, сводка по конспектам. Имена можно
+объединить, переименовать и скрыть; разные email не объединяются по догадке.
+«Серии» связывает повторные встречи и показывает решения и открытые задачи
+с прошлой встречи, с явной вставкой в заметки. «Дайджест» собирает недельные
+итоги, сохраняет один Markdown на период и исключает Local из LLM-обработки.
+CLI: `people`, `person <name|email>`, `digest --week [--prev]`.
+MCP: `list_people`, `get_person`, `get_series`, `get_digest` с фильтром Local.
+Подробности: [люди, серии и дайджест](docs/people.md).
+
 ## Install
 
-Download `notetaker-0.7.0-windows-x64.zip` from this repository's **Releases**
+Download `notetaker-0.9.0-windows-x64.zip` from this repository's **Releases**
 page and extract it into a folder. Keep all files together and run
 `notetaker-app.exe`. The binaries are unsigned: Windows SmartScreen may warn;
 choose **More info → Run anyway** if you trust the download. A SHA-256 checksum

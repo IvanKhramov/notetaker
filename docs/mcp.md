@@ -24,6 +24,11 @@ notetaker.exe mcp --library C:\Users\User\Documents\notetaker
 - `list_tasks(status, owner)` - задачи из конспектов; `open`, `completed` или `all`,
   фильтр ответственного и общая политика Local. Подробности: [задачи](tasks.md).
 - `list_recent(n=10)` - последние доступные встречи, до 100.
+- `list_people()` и `get_person(person)` - люди, их встречи и задачи.
+- `get_series(meeting)` - встречи одной серии по UUID или пути встречи.
+- `get_digest(start?, end?, prev?, person?, series?)` - дайджест доступных
+  источников без LLM и записи на диск. Сохранённые `.digests` не читаются.
+  Параметры и ограничения: [люди, серии и дайджест](people.md).
 
 Встречи не изменяются. Перед поиском обновляется только пересоздаваемый
 SQLite-индекс в `.notetaker`. Голосовые отпечатки, аудио и URL подписок
