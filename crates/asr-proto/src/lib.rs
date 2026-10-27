@@ -61,6 +61,8 @@ pub enum Request {
         model_id: String,
         #[serde(default)]
         provider: Provider,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        hotwords: Vec<String>,
     },
     Transcribe {
         id: String,
@@ -162,6 +164,7 @@ mod tests {
             Request::LoadModel {
                 model_id: "gigaam-v3".into(),
                 provider: Provider::Auto,
+                hotwords: Vec::new(),
             },
             Request::Transcribe {
                 id: "a".into(),
@@ -227,6 +230,20 @@ mod tests {
             r#"{"type":"shutdown"}"#
         );
     }
+    #[test]
+    fn legacy_model_requests_default_to_no_hotwords() {
+        let request: Request =
+            serde_json::from_str(r#"{"type":"load_model","model_id":"gigaam-v3"}"#).unwrap();
+        assert!(matches!(request, Request::LoadModel { hotwords, .. } if hotwords.is_empty()));
+        let request = Request::LoadModel {
+            model_id: "gigaam-v3".into(),
+            provider: Provider::Cpu,
+            hotwords: vec!["Deckhouse".into()],
+        };
+        let text = serde_json::to_string(&request).unwrap();
+        assert_eq!(serde_json::from_str::<Request>(&text).unwrap(), request);
+    }
+
     #[test]
     fn pcm_validation_and_framing() {
         let AudioInput::Pcm {

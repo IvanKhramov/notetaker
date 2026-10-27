@@ -120,3 +120,36 @@ fn parakeet_english_wav_and_pcm() {
     println!("Parakeet: {text}");
     assert!(text.to_lowercase().contains("your country"));
 }
+
+#[test]
+#[ignore = "requires downloaded GigaAM v3, Parakeet v3 and Silero VAD models"]
+fn nemo_models_accept_hotwords_and_preserve_offsets() {
+    let _guard = MODEL_TEST.lock().unwrap();
+    let root =
+        PathBuf::from(std::env::var_os("NOTETAKER_MODELS_DIR").expect("set NOTETAKER_MODELS_DIR"));
+    for (model, wav, term) in [
+        ("gigaam-v3", "example.wav", "Лукоморья"),
+        ("parakeet-v3", "en.wav", "country"),
+    ] {
+        let mut client = AsrClient::spawn(env!("CARGO_BIN_EXE_notetaker-asr")).unwrap();
+        client
+            .load_model_with_hotwords(model, Provider::Cpu, &[term.into()])
+            .unwrap();
+        let path = root
+            .join(model)
+            .join("test_wavs")
+            .join(wav)
+            .canonicalize()
+            .unwrap();
+        let segments = client
+            .transcribe("hotwords", AudioInput::WavPath(path), "system", 12345)
+            .unwrap();
+        assert!(!segments.is_empty());
+        assert!(
+            segments
+                .iter()
+                .all(|s| s.start_ms >= 12345 && s.end_ms > s.start_ms)
+        );
+        client.shutdown().unwrap();
+    }
+}

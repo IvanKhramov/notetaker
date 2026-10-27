@@ -165,14 +165,29 @@ impl AsrClient {
         }
     }
 
+    /// Applies to subsequent requests, including serialization and progress.
+    pub fn set_timeout(&mut self, timeout: Duration) {
+        self.timeout = timeout;
+    }
+
     pub fn load_model(
         &mut self,
         model_id: &str,
         provider: Provider,
     ) -> Result<Provider, ClientError> {
+        self.load_model_with_hotwords(model_id, provider, &[])
+    }
+
+    pub fn load_model_with_hotwords(
+        &mut self,
+        model_id: &str,
+        provider: Provider,
+        hotwords: &[String],
+    ) -> Result<Provider, ClientError> {
         self.send(&Request::LoadModel {
             model_id: model_id.into(),
             provider,
+            hotwords: hotwords.to_vec(),
         })?;
         match self.receive()? {
             Response::ModelLoaded {
@@ -193,6 +208,17 @@ impl AsrClient {
         channel: &str,
         offset_ms: u64,
     ) -> Result<Vec<Segment>, ClientError> {
+        self.transcribe_with_progress(id, input, channel, offset_ms, &mut |_| {})
+    }
+
+    pub fn transcribe_with_progress(
+        &mut self,
+        id: &str,
+        input: AudioInput,
+        channel: &str,
+        offset_ms: u64,
+        progress: &mut dyn FnMut(f32),
+    ) -> Result<Vec<Segment>, ClientError> {
         self.send(&Request::Transcribe {
             id: id.into(),
             input,
@@ -201,7 +227,10 @@ impl AsrClient {
         })?;
         loop {
             match self.receive()? {
-                Response::Progress { id: received, .. } if received == id => {}
+                Response::Progress {
+                    id: received,
+                    fraction,
+                } if received == id => progress(fraction),
                 Response::Segments {
                     id: received,
                     segments,

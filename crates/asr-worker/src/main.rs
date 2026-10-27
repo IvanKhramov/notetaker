@@ -69,10 +69,14 @@ fn serve(input: &mut impl BufRead, output: &mut impl Write) -> Result<()> {
         let id = request.id().map(str::to_owned);
         let result: Result<Response> = match request {
             Request::Shutdown => return Ok(()),
-            Request::LoadModel { model_id, provider } => {
+            Request::LoadModel {
+                model_id,
+                provider,
+                hotwords,
+            } => {
                 // Free the old model first: two recognizers can exceed the memory budget.
                 recognizer = None;
-                Recognizer::load(&model_id, provider).map(|loaded| {
+                Recognizer::load(&model_id, provider, &hotwords).map(|loaded| {
                     recognizer = Some(loaded);
                     Response::ModelLoaded {
                         model_id,

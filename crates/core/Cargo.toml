@@ -8,6 +8,8 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+directories = "6"
+toml = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
 deunicode = "1"
 percent-encoding = "2"

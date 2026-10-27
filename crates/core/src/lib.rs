@@ -3,6 +3,8 @@ mod attachments;
 mod index;
 mod model;
 mod storage;
+mod vocabulary;
+pub use vocabulary::Vocabulary;
 
 pub use attachments::{attachment_references, markdown_images};
 pub use index::Hit;

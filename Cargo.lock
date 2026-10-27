@@ -2380,6 +2380,7 @@ version = "0.3.0"
 dependencies = [
  "chrono",
  "deunicode",
+ "directories",
  "percent-encoding",
  "pulldown-cmark",
  "rusqlite",
@@ -2389,6 +2390,7 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.21",
+ "toml",
  "tracing",
  "uuid",
 ]

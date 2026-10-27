@@ -8,12 +8,27 @@ use notetaker_capture::Channel;
 /// Results already include `offset_ms`, just like the wire protocol.
 pub trait Asr: Send + 'static {
     fn start(&mut self) -> Result<()>;
+    fn set_timeout(&mut self, _timeout: Duration) {}
+    fn cancellation_handle(&self) -> Option<notetaker_asr_proto::CancellationHandle> {
+        None
+    }
     fn transcribe(
         &mut self,
         input: AudioInput,
         channel: Channel,
         offset_ms: u64,
     ) -> Result<Vec<Segment>>;
+    fn transcribe_with_progress(
+        &mut self,
+        input: AudioInput,
+        channel: Channel,
+        offset_ms: u64,
+        progress: &mut dyn FnMut(f32),
+    ) -> Result<Vec<Segment>> {
+        let result = self.transcribe(input, channel, offset_ms)?;
+        progress(1.0);
+        Ok(result)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -22,6 +37,7 @@ pub struct AsrConfig {
     pub model: String,
     pub provider: Provider,
     pub timeout: Duration,
+    pub vocabulary: notetaker_core::Vocabulary,
 }
 
 impl AsrConfig {
@@ -48,6 +64,7 @@ impl AsrConfig {
             model: model.into(),
             provider: Provider::Cpu,
             timeout: Duration::from_secs(300),
+            vocabulary: notetaker_core::Vocabulary::default(),
         })
     }
 }
@@ -69,12 +86,25 @@ impl WorkerAsr {
 }
 
 impl Asr for WorkerAsr {
+    fn set_timeout(&mut self, timeout: Duration) {
+        self.config.timeout = self.config.timeout.max(timeout);
+        if let Some(client) = &mut self.client {
+            client.set_timeout(self.config.timeout);
+        }
+    }
+    fn cancellation_handle(&self) -> Option<notetaker_asr_proto::CancellationHandle> {
+        self.client.as_ref().map(AsrClient::cancellation_handle)
+    }
     fn start(&mut self) -> Result<()> {
         self.client.take(); // Reap the old process before spawning another.
         let mut client =
             AsrClient::spawn_command(Command::new(&self.config.binary), self.config.timeout)
                 .with_context(|| format!("launch {}", self.config.binary.display()))?;
-        client.load_model(&self.config.model, self.config.provider)?;
+        client.load_model_with_hotwords(
+            &self.config.model,
+            self.config.provider,
+            &self.config.vocabulary.hotwords(),
+        )?;
         self.client = Some(client);
         Ok(())
     }
@@ -85,15 +115,34 @@ impl Asr for WorkerAsr {
         channel: Channel,
         offset_ms: u64,
     ) -> Result<Vec<Segment>> {
+        self.transcribe_with_progress(input, channel, offset_ms, &mut |_| {})
+    }
+    fn transcribe_with_progress(
+        &mut self,
+        input: AudioInput,
+        channel: Channel,
+        offset_ms: u64,
+        progress: &mut dyn FnMut(f32),
+    ) -> Result<Vec<Segment>> {
         self.request += 1;
         let channel = match channel {
             Channel::Mic => "mic",
             Channel::System => "system",
         };
-        Ok(self
+        let mut segments = self
             .client
             .as_mut()
             .context("ASR is not started")?
-            .transcribe(&self.request.to_string(), input, channel, offset_ms)?)
+            .transcribe_with_progress(
+                &self.request.to_string(),
+                input,
+                channel,
+                offset_ms,
+                progress,
+            )?;
+        for segment in &mut segments {
+            segment.text = self.config.vocabulary.correct(&segment.text);
+        }
+        Ok(segments)
     }
 }

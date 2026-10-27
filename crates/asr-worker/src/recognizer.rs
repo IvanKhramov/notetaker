@@ -5,7 +5,7 @@ use sherpa_onnx::{
     LinearResampler, OfflineRecognizer, OfflineRecognizerConfig, OfflineTransducerModelConfig,
     SileroVadModelConfig, VadModelConfig, VoiceActivityDetector,
 };
-use std::path::Path;
+use std::{io::Write, path::Path};
 
 const SAMPLE_RATE: u64 = 16_000;
 
@@ -35,7 +35,7 @@ fn native_path(path: &Path) -> Result<String> {
 }
 
 impl Recognizer {
-    pub fn load(id: &str, provider: Provider) -> Result<Self> {
+    pub fn load(id: &str, provider: Provider, hotwords: &[String]) -> Result<Self> {
         let provider = provider_name(provider)?;
         let model = models::manifest(id)?;
         ensure!(
@@ -54,6 +54,9 @@ impl Recognizer {
         config.model_config.provider = Some(provider.into());
         config.model_config.model_type = Some("nemo_transducer".into());
         config.decoding_method = Some("greedy_search".into());
+        // NeMo RNNT and TDT support contextual biasing in sherpa 2.0.0.
+        // Derive equal-score BPE pieces as in upstream's Parakeet example.
+        let _hotword_files = configure_hotwords(&mut config, &directory, hotwords)?;
         let asr = OfflineRecognizer::create(&config)
             .context("cannot create recognizer; see stderr for sherpa diagnostics")?;
         let vad_config = VadModelConfig {
@@ -63,7 +66,7 @@ impl Recognizer {
                 min_silence_duration: 0.4,
                 min_speech_duration: 0.15,
                 window_size: 512,
-                max_speech_duration: 20.0,
+                max_speech_duration: 29.0,
             },
             sample_rate: SAMPLE_RATE as i32,
             num_threads: 1,
@@ -81,30 +84,45 @@ impl Recognizer {
         offset_ms: u64,
         mut progress: impl FnMut(f32) -> Result<()>,
     ) -> Result<Vec<Segment>> {
-        let samples = match input {
-            AudioInput::WavPath(path) => read_wav(&path)?,
-            AudioInput::Pcm {
-                samples_f32_16k_mono,
-            } => AudioInput::decode_pcm(&samples_f32_16k_mono).map_err(anyhow::Error::msg)?,
-        };
-        let duration_ms = samples.len() as u64 * 1000 / SAMPLE_RATE;
-        ensure!(
-            offset_ms.checked_add(duration_ms).is_some(),
-            "timestamp overflow"
-        );
         self.vad.reset();
         let mut segments = Vec::new();
+        let mut pending = Vec::new();
+        let mut processed = 0usize;
         progress(0.0)?;
-        for (index, chunk) in samples.chunks(512).enumerate() {
-            self.vad.accept_waveform(chunk);
-            self.drain(&mut segments, offset_ms, samples.len())?;
-            // Progress also advances through silence; at most one event per second.
-            if index % 32 == 31 {
-                progress(((index + 1) * 512).min(samples.len()) as f32 / samples.len() as f32)?;
+        let mut feed = |samples: &[f32], total: usize| -> Result<()> {
+            ensure!(
+                offset_ms.checked_add(total as u64 / 16).is_some(),
+                "timestamp overflow"
+            );
+            pending.extend_from_slice(samples);
+            let count = pending.len() / 512 * 512;
+            for chunk in pending[..count].as_chunks::<512>().0 {
+                self.vad.accept_waveform(chunk);
+                processed += chunk.len();
+                self.drain(&mut segments, offset_ms, processed)?;
+                if processed.is_multiple_of(16384) {
+                    progress((processed as f32 / total.max(1) as f32).min(1.0))?;
+                }
+            }
+            pending.drain(..count);
+            Ok(())
+        };
+        match input {
+            AudioInput::WavPath(path) => stream_wav(&path, &mut feed)?,
+            AudioInput::Pcm {
+                samples_f32_16k_mono,
+            } => {
+                let samples =
+                    AudioInput::decode_pcm(&samples_f32_16k_mono).map_err(anyhow::Error::msg)?;
+                feed(&samples, samples.len())?;
             }
         }
+        if !pending.is_empty() {
+            self.vad.accept_waveform(&pending);
+            processed += pending.len();
+        }
         self.vad.flush();
-        self.drain(&mut segments, offset_ms, samples.len())?;
+        self.drain(&mut segments, offset_ms, processed)?;
         progress(1.0)?;
         Ok(segments)
     }
@@ -146,50 +164,178 @@ fn transducer_config(
     })
 }
 
-/// WAV input is mono PCM/float; convert to the fixed 16 kHz VAD/ASR timebase.
-fn read_wav(path: &Path) -> Result<Vec<f32>> {
+/// Bounded WAV decoding; VAD owns at most one speech chunk, never a full track.
+fn stream_wav(path: &Path, mut emit: impl FnMut(&[f32], usize) -> Result<()>) -> Result<()> {
     let mut reader =
         hound::WavReader::open(path).with_context(|| format!("read WAV {}", path.display()))?;
     let spec = reader.spec();
     ensure!(
         spec.channels == 1 && (8000..=192000).contains(&spec.sample_rate),
-        "expected mono WAV at 8–192 kHz, got {} Hz / {} channels",
-        spec.sample_rate,
-        spec.channels
+        "expected mono WAV at 8-192 kHz"
     );
-    let samples: Vec<f32> = match spec.sample_format {
-        hound::SampleFormat::Float => reader.samples::<f32>().collect::<Result<_, _>>()?,
-        hound::SampleFormat::Int => {
-            ensure!(
-                (1..=32).contains(&spec.bits_per_sample),
-                "unsupported WAV bit depth"
-            );
-            let scale = 2f32.powi(i32::from(spec.bits_per_sample) - 1);
-            reader
-                .samples::<i32>()
-                .map(|s| s.map(|v| v as f32 / scale))
-                .collect::<Result<_, _>>()?
-        }
-    };
     ensure!(
-        samples.iter().all(|s| s.is_finite() && s.abs() <= 1.0),
-        "WAV samples must be finite and normalized"
+        (1..=32).contains(&spec.bits_per_sample),
+        "unsupported WAV bit depth"
     );
-    if spec.sample_rate != SAMPLE_RATE as u32 && !samples.is_empty() {
+    let total = reader.duration() as usize * SAMPLE_RATE as usize / spec.sample_rate as usize;
+    let resampler = if spec.sample_rate != SAMPLE_RATE as u32 {
+        Some(
+            LinearResampler::create(spec.sample_rate as i32, SAMPLE_RATE as i32)
+                .context("cannot create WAV resampler")?,
+        )
+    } else {
+        None
+    };
+    let scale = 2f32.powi(i32::from(spec.bits_per_sample) - 1);
+    let mut samples: Box<dyn Iterator<Item = Result<f32, hound::Error>> + '_> =
+        match spec.sample_format {
+            hound::SampleFormat::Float => Box::new(reader.samples::<f32>()),
+            hound::SampleFormat::Int => {
+                Box::new(reader.samples::<i32>().map(|s| s.map(|v| v as f32 / scale)))
+            }
+        };
+    loop {
+        let block: Vec<_> = samples.by_ref().take(8192).collect::<Result<_, _>>()?;
+        if block.is_empty() {
+            break;
+        }
         ensure!(
-            samples.len() <= i32::MAX as usize,
-            "WAV too large for resampling"
+            block.iter().all(|s| s.is_finite() && s.abs() <= 1.0),
+            "WAV samples must be finite and normalized"
         );
-        let resampler = LinearResampler::create(spec.sample_rate as i32, SAMPLE_RATE as i32)
-            .context("cannot create WAV resampler")?;
-        return Ok(resampler.resample(&samples, true));
+        if let Some(resampler) = &resampler {
+            emit(&resampler.resample(&block, false), total)?;
+        } else {
+            emit(&block, total)?;
+        }
     }
+    if let Some(resampler) = &resampler {
+        emit(&resampler.resample(&[], true), total)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn read_wav(path: &Path) -> Result<Vec<f32>> {
+    let mut samples = Vec::new();
+    stream_wav(path, |block, _| {
+        samples.extend_from_slice(block);
+        Ok(())
+    })?;
     Ok(samples)
+}
+
+fn configure_hotwords(
+    config: &mut OfflineRecognizerConfig,
+    directory: &Path,
+    hotwords: &[String],
+) -> Result<Option<tempfile::TempDir>> {
+    if hotwords.is_empty() {
+        return Ok(None);
+    }
+    ensure!(
+        hotwords.iter().all(|s| !s.trim().is_empty()
+            && s.chars()
+                .all(|c| c.is_alphanumeric() || c == ' ' || c == '-')),
+        "invalid hotword"
+    );
+    let temporary = tempfile::tempdir()?;
+    let bpe = temporary.path().join("bpe.vocab");
+    let mut vocab = std::fs::File::create(&bpe)?;
+    for line in std::fs::read_to_string(directory.join("tokens.txt"))?.lines() {
+        if let Some((piece, _)) = line.rsplit_once(' ') {
+            writeln!(vocab, "{piece}\t-1.0")?;
+        }
+    }
+    drop(vocab);
+    let words = temporary.path().join("hotwords.txt");
+    // Include both cases: the English/Russian models have different casing.
+    let words_text = hotwords
+        .iter()
+        .flat_map(|s| [s.clone(), s.to_lowercase(), s.to_uppercase()])
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&words, words_text)?;
+    config.model_config.modeling_unit = Some("bpe".into());
+    config.model_config.bpe_vocab = Some(native_path(&bpe)?);
+    config.decoding_method = Some("modified_beam_search".into());
+    config.max_active_paths = 4;
+    config.hotwords_score = 1.5;
+    config.hotwords_file = Some(native_path(&words)?);
+    Ok(Some(temporary))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn hotwords_use_beam_search_and_temporary_bpe_files() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("tokens.txt"),
+            "<unk> 0\n▁ 1\nwerf 2\n<blk> 3\n",
+        )
+        .unwrap();
+        let mut config = OfflineRecognizerConfig::default();
+        assert!(
+            configure_hotwords(&mut config, directory.path(), &[])
+                .unwrap()
+                .is_none()
+        );
+        let files = configure_hotwords(&mut config, directory.path(), &["werf".into()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            config.decoding_method.as_deref(),
+            Some("modified_beam_search")
+        );
+        assert_eq!(config.model_config.modeling_unit.as_deref(), Some("bpe"));
+        assert_eq!(config.hotwords_score, 1.5);
+        assert!(
+            std::fs::read_to_string(files.path().join("bpe.vocab"))
+                .unwrap()
+                .contains("werf\t-1.0")
+        );
+        let words = std::fs::read_to_string(files.path().join("hotwords.txt")).unwrap();
+        assert_eq!(words.lines().count(), 2);
+        assert!(configure_hotwords(&mut config, directory.path(), &["bad:999".into()]).is_err());
+    }
+
+    #[test]
+    fn wav_stream_bounds_memory_and_preserves_all_samples() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("long.wav");
+        let mut writer = hound::WavWriter::create(
+            &path,
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 16000,
+                bits_per_sample: 32,
+                sample_format: hound::SampleFormat::Float,
+            },
+        )
+        .unwrap();
+        for _ in 0..160017 {
+            writer.write_sample(0.25_f32).unwrap();
+        }
+        writer.finalize().unwrap();
+        let mut count = 0;
+        let mut blocks = 0;
+        stream_wav(&path, |samples, total| {
+            assert_eq!(total, 160017);
+            assert!(samples.len() <= 8192);
+            assert!(samples.iter().all(|s| *s == 0.25));
+            count += samples.len();
+            blocks += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(count, 160017);
+        assert!(blocks > 1);
+    }
+
     #[test]
     fn provider_defaults() {
         assert_eq!(provider_name(Provider::Auto).unwrap(), "cpu");

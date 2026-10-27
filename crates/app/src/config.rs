@@ -27,6 +27,7 @@ pub struct Settings {
     /// Zero disables the silence timeout.
     pub auto_stop_minutes: u32,
     pub auto_summary: bool,
+    pub vocabulary: String,
 }
 
 impl Default for Settings {
@@ -47,6 +48,7 @@ impl Default for Settings {
             detect_browsers: true,
             auto_stop_minutes: 15,
             auto_summary: true,
+            vocabulary: String::new(),
         }
     }
 }

@@ -69,7 +69,12 @@ fn enhance_meeting_with_policy(
     provider.config().validate(meta.mode)?;
     let notes = meeting.read_notes()?;
     let transcript = meeting.read_transcript()?;
-    let result = enhance(&meta, &notes, &transcript, template, provider, on_text)?;
+    let vocabulary = notetaker_core::Vocabulary::load(
+        meeting.path().parent().context("meeting has no library")?,
+    )?;
+    let mut template = template.clone();
+    template.instruction.push_str(&vocabulary.prompt_context());
+    let result = enhance(&meta, &notes, &transcript, &template, provider, on_text)?;
     let revision = meeting.save_enhanced(&result, enhanced_revision)?;
     let stamp = notetaker_core::SummaryStamp::new(&notes, &transcript, template_id, &result);
     let mut warnings = Vec::new();

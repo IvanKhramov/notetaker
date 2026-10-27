@@ -419,3 +419,34 @@ fn builtins_share_action_format_and_transcript_language() {
         );
     }
 }
+
+#[test]
+fn library_vocabulary_reaches_summary_prompts() {
+    let dir = tempfile::tempdir().unwrap();
+    let library = Library::open(dir.path()).unwrap();
+    fs::create_dir(dir.path().join(".notetaker")).unwrap();
+    fs::write(
+        dir.path().join(".notetaker/vocabulary.txt"),
+        "Deckhouse\nwerf = верф, вёрф",
+    )
+    .unwrap();
+    let meeting = library.create_meeting(meta()).unwrap();
+    meeting
+        .write_transcript(&transcript("Обсудили верф"))
+        .unwrap();
+    let provider = Fake::new(4096);
+    enhance_meeting(
+        &meeting,
+        "general",
+        &Template::builtin("general").unwrap(),
+        &provider,
+        &mut |_| {},
+    )
+    .unwrap();
+    let calls = provider.calls.lock().unwrap();
+    assert!(calls.iter().all(
+        |(system, _, _)| system.contains("Правильное написание терминов:")
+            && system.contains("Deckhouse")
+            && system.contains("werf (верф, вёрф)")
+    ));
+}

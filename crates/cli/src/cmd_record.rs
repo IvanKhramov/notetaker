@@ -65,11 +65,13 @@ pub fn run(args: Args) -> Result<()> {
         .retention_days
         .checked_mul(86400)
         .context("retention too large")?;
+    let mut asr = AsrConfig::new(args.model)?;
+    asr.vocabulary = notetaker_core::Vocabulary::load(library.root())?;
     let session = RecordingSession::start(
         library,
         meta,
         sources,
-        AsrConfig::new(args.model)?,
+        asr,
         RecordingConfig {
             retention: Some(Duration::from_secs(retention)),
             auto_stop_after_silence: (args.auto_stop_silence_seconds != 0)
