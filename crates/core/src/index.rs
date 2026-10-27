@@ -246,7 +246,10 @@ impl Library {
             };
             transaction.execute("DELETE FROM meetings WHERE path = ?1", [path])?;
             transaction.execute("DELETE FROM tasks WHERE path = ?1", [path])?;
-            for mut task in crate::parse_tasks(&enhanced, meta.started_at.date_naive()) {
+            for mut task in crate::parse_tasks(
+                &enhanced,
+                meta.started_at.with_timezone(&chrono::Local).date_naive(),
+            ) {
                 task.meeting_id = meta.id;
                 task.path = meeting.path.clone();
                 task.meeting_title = meta.title.clone();
