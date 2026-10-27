@@ -19,7 +19,10 @@ use notetaker_pipeline::{
     Asr, AsrConfig, PipelineEvent, RecordingConfig, RecordingSession, StopHandle,
 };
 
-use crate::config::{LlmSettings, Settings, atomic_write};
+use crate::{
+    attachments::{self, ImageInput, InsertAt},
+    config::{LlmSettings, Settings, atomic_write},
+};
 
 pub struct MeetingRow {
     pub meeting: Meeting,
@@ -151,6 +154,11 @@ pub struct RecordRequest {
 }
 
 pub enum Command {
+    Attach {
+        meeting: Meeting,
+        inputs: Vec<ImageInput>,
+        anchor: InsertAt,
+    },
     Export {
         folder: PathBuf,
         text: String,
@@ -177,6 +185,11 @@ pub enum Command {
 // Rare worker-to-UI messages; boxing variants buys nothing measurable.
 #[allow(clippy::large_enum_variant)]
 pub enum Event {
+    Attached {
+        path: PathBuf,
+        anchor: InsertAt,
+        results: Vec<Result<String, String>>,
+    },
     Exported(Result<PathBuf, String>),
     Boot {
         settings: Settings,
@@ -238,6 +251,11 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
             warnings.push(format!("{error:#}"));
             LlmSettings::default()
         });
+        if let Err(error) =
+            Library::open(&settings.library).and_then(|library| library.sweep_audio(Utc::now()))
+        {
+            warnings.push(format!("Не удалось очистить старые файлы: {error:#}"));
+        }
         // Reuse the worker's model manifest and path resolution; do not load
         // hundreds of MB of weights just to check first-run readiness.
         let needs_model = !crate::config::MODELS.iter().any(|model| {
@@ -258,6 +276,21 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
         });
         for command in rx {
             match command {
+                Command::Attach {
+                    meeting,
+                    inputs,
+                    anchor,
+                } => {
+                    let results = inputs
+                        .into_iter()
+                        .map(|input| attachments::import(&meeting, input).map_err(error_text))
+                        .collect();
+                    let _ = events.send(Event::Attached {
+                        path: meeting.path().to_owned(),
+                        anchor,
+                        results,
+                    });
+                }
                 Command::Export { folder, text } => {
                     let result = (|| -> Result<PathBuf> {
                         let path = folder.join(format!(

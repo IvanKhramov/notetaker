@@ -8,6 +8,7 @@ use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use notetaker_core::Mode;
 
 use crate::{
+    attachments::ImageInput,
     config::{MODELS, ProviderSettings},
     detection::CallPrompt,
     state::{AppState, Document, Phase, Tab, edit_segment, speaker, timestamp},
@@ -18,6 +19,7 @@ use crate::{
 pub struct NotetakerApp {
     state: AppState,
     cache: CommonMarkCache,
+    image_viewer: Option<String>,
     notes_preview: bool,
     enhanced_preview: bool,
     show_record: bool,
@@ -36,6 +38,7 @@ impl NotetakerApp {
         Self {
             state: AppState::new(),
             cache: CommonMarkCache::default(),
+            image_viewer: None,
             notes_preview: false,
             enhanced_preview: true,
             show_record: false,
@@ -280,16 +283,18 @@ impl NotetakerApp {
                 });
             });
         }
+        let mut images = Vec::new();
         if live {
             let height = ui.available_height();
             ui.columns(2, |columns| {
                 columns[0].set_height(height);
                 columns[1].set_height(height);
                 columns[0].weak("МОИ ЗАМЕТКИ");
-                notes_editor(&mut columns[0], document, &path);
+                images = notes_editor(&mut columns[0], document, &path, &mut self.image_viewer);
                 columns[1].weak("ТРАНСКРИПТ");
                 transcript_view(&mut columns[1], document, &path, true);
             });
+            self.state.attach(images);
             return;
         }
         theme::segmented(
@@ -358,10 +363,16 @@ impl NotetakerApp {
                     egui::ScrollArea::vertical()
                         .id_salt(("notes_preview", &path))
                         .show(ui, |ui| {
-                            CommonMarkViewer::new().show(ui, &mut self.cache, &document.data.notes);
+                            markdown_preview(
+                                ui,
+                                &mut self.cache,
+                                &document.data.notes,
+                                &path,
+                                &mut self.image_viewer,
+                            );
                         });
                 } else {
-                    notes_editor(ui, document, &path);
+                    images = notes_editor(ui, document, &path, &mut self.image_viewer);
                 }
             }
             Tab::Enhanced => {
@@ -370,16 +381,24 @@ impl NotetakerApp {
                     .id_salt(("enhanced", &path))
                     .show(ui, |ui| {
                         if let Some(text) = &document.generation {
-                            CommonMarkViewer::new().show(ui, &mut self.cache, text);
+                            markdown_preview(
+                                ui,
+                                &mut self.cache,
+                                text,
+                                &path,
+                                &mut self.image_viewer,
+                            );
                         } else if document.data.enhanced.is_empty() && self.enhanced_preview {
                             ui.weak(
                                 "Выберите шаблон и нажмите «Пересоздать», чтобы собрать конспект.",
                             );
                         } else if self.enhanced_preview {
-                            CommonMarkViewer::new().show(
+                            markdown_preview(
                                 ui,
                                 &mut self.cache,
                                 &document.data.enhanced,
+                                &path,
+                                &mut self.image_viewer,
                             );
                         } else if ui
                             .add(
@@ -398,6 +417,7 @@ impl NotetakerApp {
             }
             Tab::Transcript => transcript_view(ui, document, &path, locked),
         }
+        self.state.attach(images);
         if enhance {
             self.state.enhance();
         }
@@ -818,6 +838,13 @@ impl eframe::App for NotetakerApp {
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        let dropped = ctx.input_mut(|input| std::mem::take(&mut input.raw.dropped_files));
+        self.state.attach(
+            dropped
+                .into_iter()
+                .map(|file| ImageInput::File(file.path().to_owned()))
+                .collect(),
+        );
         let p = Palette::of(ui);
         egui::Panel::left("library")
             .resizable(true)
@@ -835,6 +862,23 @@ impl eframe::App for NotetakerApp {
             .show(ui, |ui| {
                 ui.add_enabled_ui(!self.state.settings_pending, |ui| self.meeting(ui));
             });
+        if let Some(uri) = self.image_viewer.clone() {
+            let mut open = true;
+            egui::Window::new("Изображение")
+                .open(&mut open)
+                .resizable(true)
+                .default_size([800.0, 600.0])
+                .show(&ctx, |ui| {
+                    ui.add(
+                        egui::Image::from_uri(uri)
+                            .max_size(ui.available_size())
+                            .shrink_to_fit(),
+                    );
+                });
+            if !open {
+                self.image_viewer = None;
+            }
+        }
         self.notifications(&ctx);
         if self.show_record {
             self.recording_dialog(&ctx);
@@ -889,25 +933,158 @@ fn duration_label(seconds: Option<i64>) -> String {
         |s| format!("{} мин", s.max(0) / 60),
     )
 }
-fn notes_editor(ui: &mut egui::Ui, document: &mut Document, path: &std::path::Path) {
+fn image_uri(path: &std::path::Path, relative: &str) -> String {
+    if relative.contains("://") {
+        return relative.to_owned();
+    }
+    format!(
+        "file://{}",
+        path.join(relative).to_string_lossy().replace('\\', "/")
+    )
+}
+
+fn attachment_strip(
+    ui: &mut egui::Ui,
+    notes: &str,
+    path: &std::path::Path,
+    viewer: &mut Option<String>,
+) {
+    let images = notetaker_core::attachment_references(notes);
+    if images.is_empty() {
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        for relative in images {
+            let uri = image_uri(path, &relative);
+            if ui
+                .add(
+                    egui::Image::from_uri(&uri)
+                        .max_size(egui::vec2(100.0, 64.0))
+                        .sense(egui::Sense::click()),
+                )
+                .on_hover_text("Открыть изображение")
+                .clicked()
+            {
+                *viewer = Some(uri);
+            }
+        }
+    });
+}
+
+fn markdown_preview(
+    ui: &mut egui::Ui,
+    cache: &mut CommonMarkCache,
+    text: &str,
+    path: &std::path::Path,
+    viewer: &mut Option<String>,
+) {
+    // CommonMark's image widget has no click handler. Render standalone images
+    // through its HTML callback, preserving the surrounding Markdown structure.
+    let images = notetaker_core::markdown_images(text);
+    let mut markdown = text.to_owned();
+    let uris: Vec<_> = images
+        .iter()
+        .map(|(_, destination)| image_uri(path, destination))
+        .collect();
+    for (index, (range, _)) in images.iter().enumerate().rev() {
+        let line_start = text[..range.start].rfind('\n').map_or(0, |i| i + 1);
+        let line_end = text[range.end..]
+            .find('\n')
+            .map_or(text.len(), |i| range.end + i);
+        if text[line_start..range.start].trim().is_empty()
+            && text[range.end..line_end].trim().is_empty()
+        {
+            markdown.replace_range(
+                range.clone(),
+                &format!("\n\n<div data-notetaker-image=\"{index}\"></div>\n\n"),
+            );
+        }
+    }
+    let clicked = std::rc::Rc::new(std::cell::Cell::new(None));
+    let selected = clicked.clone();
+    let image_uris = uris.clone();
+    let render = move |ui: &mut egui::Ui, html: &str| {
+        if let Some(index) = html
+            .trim()
+            .strip_prefix("<div data-notetaker-image=\"")
+            .and_then(|text| text.strip_suffix("\"></div>"))
+            .and_then(|text| text.parse::<usize>().ok())
+            .filter(|index| *index < image_uris.len())
+        {
+            if ui
+                .add(
+                    egui::Image::from_uri(&image_uris[index])
+                        .max_width(ui.available_width())
+                        .sense(egui::Sense::click()),
+                )
+                .on_hover_text("Открыть изображение")
+                .clicked()
+            {
+                selected.set(Some(index));
+            }
+        } else {
+            ui.label(html);
+        }
+    };
+    CommonMarkViewer::new()
+        .default_implicit_uri_scheme(format!("{}/", image_uri(path, "").trim_end_matches('/')))
+        .render_html_fn(Some(&render))
+        .show(ui, cache, &markdown);
+    if let Some(index) = clicked.get() {
+        *viewer = Some(uris[index].clone());
+    }
+}
+
+fn notes_editor(
+    ui: &mut egui::Ui,
+    document: &mut Document,
+    path: &std::path::Path,
+    viewer: &mut Option<String>,
+) -> Vec<ImageInput> {
+    attachment_strip(ui, &document.data.notes, path, viewer);
+    let mut images = Vec::new();
     egui::ScrollArea::vertical()
         .id_salt(("notes", path))
         .show(ui, |ui| {
-            if ui
-                .add(
-                    egui::TextEdit::multiline(&mut document.data.notes)
-                        .id_salt(("notes_edit", path))
-                        .hint_text("Пишите важное здесь…")
-                        .frame(egui::Frame::NONE)
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(24),
-                )
-                .changed()
-            {
+            let id = egui::Id::unique(("notes_edit", path));
+            if ui.memory(|memory| memory.has_focus(id)) {
+                ui.input_mut(|input| {
+                    input.events.retain(|event| {
+                        if let egui::Event::PasteImage(image) = event {
+                            images.push(ImageInput::Clipboard(image.clone()));
+                            false
+                        } else {
+                            true
+                        }
+                    })
+                });
+            }
+            if let Some(cursor) = document.inserted_cursor.take() {
+                let mut state = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
+                state
+                    .cursor
+                    .set_char_range(Some(egui::text::CCursorRange::one(
+                        egui::text::CCursor::new(cursor),
+                    )));
+                state.store(ui.ctx(), id);
+            }
+            let output = egui::TextEdit::multiline(&mut document.data.notes)
+                .id(id)
+                .hint_text("Пишите важное здесь… Вставьте скриншот или перетащите PNG/JPEG")
+                .frame(egui::Frame::NONE)
+                .desired_width(f32::INFINITY)
+                .desired_rows(24)
+                .show(ui);
+            if let Some(range) = output.cursor_range {
+                let [start, end] = range.sorted_cursors();
+                document.notes_cursor = Some(start.index.into()..end.index.into());
+            }
+            if output.response.changed() {
                 document.dirty.notes = true;
                 document.changed();
             }
         });
+    images
 }
 fn transcript_view(ui: &mut egui::Ui, document: &mut Document, path: &std::path::Path, live: bool) {
     let p = Palette::of(ui);
@@ -984,6 +1161,55 @@ fn transcript_view(ui: &mut egui::Ui, document: &mut Document, path: &std::path:
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn editor_preserves_text_paste_and_only_captures_images_while_focused() {
+        let root = tempfile::tempdir().unwrap();
+        let meeting = notetaker_core::Library::open(root.path())
+            .unwrap()
+            .create_meeting(notetaker_core::MeetingMeta::new(
+                "Images",
+                chrono::Utc::now(),
+            ))
+            .unwrap();
+        let path = meeting.path().to_owned();
+        let mut document = Document {
+            data: crate::worker::DocumentData::read(meeting).unwrap(),
+            attachments_pending: 0,
+            notes_cursor: None,
+            inserted_cursor: None,
+            dirty: Default::default(),
+            saving: false,
+            changed_at: Instant::now(),
+            generation: None,
+            template: "general".into(),
+        };
+        let ctx = egui::Context::default();
+        let mut viewer = None;
+        let image = std::sync::Arc::new(egui::ColorImage::filled([2, 2], egui::Color32::WHITE));
+        for focused in [false, true] {
+            let input = egui::RawInput {
+                events: vec![
+                    egui::Event::Paste("Текст".into()),
+                    egui::Event::PasteImage(image.clone()),
+                ],
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    if focused {
+                        ui.memory_mut(|memory| {
+                            memory.request_focus(egui::Id::unique(("notes_edit", path.as_path())))
+                        });
+                    }
+                    let imported = notes_editor(ui, &mut document, &path, &mut viewer);
+                    assert_eq!(imported.len(), usize::from(focused));
+                });
+            });
+            output.drop_without_applying_deltas();
+        }
+        assert_eq!(document.data.notes, "Текст");
+    }
+
     #[test]
     fn indicator_only_shows_during_recording_outside_main_window() {
         assert!(!indicator_visible(Phase::Recording, false, true));

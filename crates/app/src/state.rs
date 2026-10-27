@@ -135,6 +135,9 @@ impl AudioWarnings {
 }
 
 pub struct Document {
+    pub attachments_pending: usize,
+    pub notes_cursor: Option<std::ops::Range<usize>>,
+    pub inserted_cursor: Option<usize>,
     pub data: DocumentData,
     pub dirty: Fields,
     pub saving: bool,
@@ -150,6 +153,9 @@ impl Document {
             .clone()
             .unwrap_or_else(|| "general".into());
         Self {
+            attachments_pending: 0,
+            notes_cursor: None,
+            inserted_cursor: None,
             data,
             dirty: Fields::default(),
             saving: false,
@@ -162,7 +168,7 @@ impl Document {
         self.changed_at = Instant::now();
     }
     fn save(&mut self) -> Option<Save> {
-        if self.saving || !self.dirty.any() {
+        if self.saving || self.attachments_pending > 0 || !self.dirty.any() {
             return None;
         }
         let save = Save {
@@ -267,6 +273,31 @@ impl AppState {
             self.error = Some("Фоновый поток завершился; перезапустите приложение".into());
         }
     }
+    pub fn attach(&mut self, inputs: Vec<crate::attachments::ImageInput>) {
+        if inputs.is_empty() || self.settings_pending || self.exit_requested {
+            return;
+        }
+        let Some(document) = self
+            .selected
+            .as_ref()
+            .and_then(|path| self.documents.get_mut(path))
+        else {
+            return;
+        };
+        let command = Command::Attach {
+            meeting: document.data.meeting.clone(),
+            inputs,
+            anchor: crate::attachments::InsertAt {
+                notes: document.data.notes.clone(),
+                cursor: document.notes_cursor.clone(),
+            },
+        };
+        document.attachments_pending += 1;
+        if self.tx.send(command).is_err() {
+            document.attachments_pending -= 1;
+            self.error = Some("Фоновый поток завершился; перезапустите приложение".into());
+        }
+    }
     pub fn refresh(&mut self) {
         self.request += 1;
         self.listing = true;
@@ -298,7 +329,7 @@ impl AppState {
     pub fn unsaved(&self) -> bool {
         self.documents
             .values()
-            .any(|doc| doc.saving || doc.dirty.any())
+            .any(|doc| doc.saving || doc.dirty.any() || doc.attachments_pending > 0)
     }
     pub fn start_recording(&mut self) {
         self.start_recording_with_app(None);
@@ -486,6 +517,7 @@ impl AppState {
                 || enhancing.as_ref() == Some(path)
                 || doc.dirty.any()
                 || doc.saving
+                || doc.attachments_pending > 0
         });
     }
     fn poll_detection(&mut self) {
@@ -523,6 +555,30 @@ impl AppState {
     }
     fn apply(&mut self, event: Event) {
         match event {
+            Event::Attached {
+                path,
+                anchor,
+                results,
+            } => {
+                let mut images = Vec::new();
+                for result in results {
+                    match result {
+                        Ok(image) => images.push(image),
+                        Err(error) => self.warnings.push(error),
+                    }
+                }
+                if let Some(document) = self.documents.get_mut(&path) {
+                    document.attachments_pending = document.attachments_pending.saturating_sub(1);
+                    if !images.is_empty() {
+                        let cursor =
+                            crate::attachments::insert(&mut document.data.notes, anchor, &images);
+                        document.inserted_cursor = Some(cursor);
+                        document.notes_cursor = Some(cursor..cursor);
+                        document.dirty.notes = true;
+                        document.changed();
+                    }
+                }
+            }
             Event::Boot {
                 settings,
                 llm,
@@ -947,6 +1003,61 @@ mod tests {
         state.selected = Some(path.clone());
         (state, commands, root, path)
     }
+    #[test]
+    fn attachment_import_blocks_autosave_exit_and_eviction_until_reference_is_inserted() {
+        let (mut state, commands, _root, path) = fixture();
+        let document = state.documents.get_mut(&path).unwrap();
+        document.data.notes = "До".into();
+        document.notes_cursor = Some(2..2);
+        document.dirty.notes = true;
+        state.attach(vec![crate::attachments::ImageInput::File(
+            path.join("source.png"),
+        )]);
+        let Command::Attach { anchor, .. } = commands.try_recv().unwrap() else {
+            panic!("expected attachment import")
+        };
+        state.flush();
+        assert!(commands.try_recv().is_err());
+        assert!(state.unsaved());
+        assert!(state.documents[&path].attachments_pending > 0);
+        state.selected = None;
+        state.poll();
+        assert!(state.documents.contains_key(&path));
+        state.apply(Event::Attached {
+            path: path.clone(),
+            anchor,
+            results: vec![Ok("attachments/a.png".into())],
+        });
+        let document = &state.documents[&path];
+        assert_eq!(document.attachments_pending, 0);
+        assert_eq!(document.data.notes, "До\n![](attachments/a.png)\n");
+        assert!(document.dirty.notes);
+        state.flush();
+        let Command::Save(save) = commands.try_recv().unwrap() else {
+            panic!("expected save")
+        };
+        assert!(save.notes.unwrap().contains("attachments/a.png"));
+    }
+
+    #[test]
+    fn failed_attachment_import_unblocks_document_and_produces_toast() {
+        let (mut state, commands, _root, path) = fixture();
+        state.attach(vec![crate::attachments::ImageInput::File(
+            path.join("source.png"),
+        )]);
+        let Command::Attach { anchor, .. } = commands.try_recv().unwrap() else {
+            panic!("expected attachment import")
+        };
+        state.apply(Event::Attached {
+            path: path.clone(),
+            anchor,
+            results: vec![Err("Изображение больше 20 МБ".into())],
+        });
+        assert_eq!(state.documents[&path].attachments_pending, 0);
+        assert!(!state.unsaved());
+        assert_eq!(state.warnings, ["Изображение больше 20 МБ"]);
+    }
+
     #[test]
     fn final_progress_does_not_override_navigation_after_initial_transition() {
         let (mut state, _commands, _root, path) = fixture();

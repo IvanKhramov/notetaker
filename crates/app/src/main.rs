@@ -1,5 +1,6 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod attachments;
 mod config;
 #[cfg(windows)]
 mod desktop;
@@ -20,6 +21,7 @@ fn main() -> eframe::Result {
         },
         Box::new(|cc| {
             theme::install(&cc.egui_ctx);
+            egui_extras::install_image_loaders(&cc.egui_ctx);
             Ok(Box::new(ui::NotetakerApp::new()))
         }),
     )
