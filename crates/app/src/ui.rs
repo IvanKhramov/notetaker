@@ -25,6 +25,7 @@ struct Toast {
 
 pub struct NotetakerApp {
     state: AppState,
+    people: crate::people::Panel,
     cache: CommonMarkCache,
     image_viewer: Option<String>,
     notes_preview: bool,
@@ -52,6 +53,7 @@ impl NotetakerApp {
     pub fn new() -> Self {
         Self {
             state: AppState::new(),
+            people: crate::people::Panel::default(),
             cache: CommonMarkCache::default(),
             image_viewer: None,
             notes_preview: false,
@@ -108,9 +110,11 @@ impl NotetakerApp {
             .selectable_label(self.state.tasks_open, "Задачи")
             .clicked()
         {
+            self.people.close();
             self.state.tasks_open = true;
             self.state.refresh_tasks();
         }
+        self.people.sidebar(ui, &mut self.state);
         let search = ui.add(
             egui::TextEdit::singleline(&mut self.state.query)
                 .id_salt("library_search")
@@ -299,6 +303,7 @@ impl NotetakerApp {
                 }
             });
         if let Some(meeting) = select {
+            self.people.close();
             self.state.select(meeting);
         }
     }
@@ -648,6 +653,11 @@ impl NotetakerApp {
             return;
         };
         ui.heading(RichText::new(&document.data.meta.title).strong());
+        let series_action = self.people.header(
+            ui,
+            &document.data.meta,
+            !locked && !document.saving && !document.dirty.any() && can_enhance,
+        );
         if speaker_busy {
             ui.horizontal(|ui| {
                 ui.spinner();
@@ -657,7 +667,16 @@ impl NotetakerApp {
         if let Some(event) = &document.data.meta.calendar_event {
             ui.horizontal_wrapped(|ui| {
                 for attendee in &event.attendees {
-                    theme::chip(ui, attendee.label());
+                    if ui.link(attendee.label()).clicked() {
+                        crate::people::request(
+                            ui,
+                            crate::people::Request {
+                                name: attendee.name.clone(),
+                                email: attendee.email.clone(),
+                                voice: None,
+                            },
+                        );
+                    }
                 }
                 if let Some(url) = &event.call_url {
                     ui.hyperlink_to("Открыть звонок", url);
@@ -758,6 +777,9 @@ impl NotetakerApp {
                     false,
                 );
             });
+            if let Some(crate::people::HeaderAction::Open(meeting)) = series_action {
+                self.state.select(meeting);
+            }
             self.state.attach(images);
             return;
         }
@@ -992,6 +1014,14 @@ impl NotetakerApp {
         if let Some(edit) = speaker_edit {
             self.state.edit_speakers(edit);
         }
+        if let Some(action) = series_action {
+            match action {
+                crate::people::HeaderAction::Open(meeting) => self.state.select(meeting),
+                crate::people::HeaderAction::Insert(previous) => {
+                    self.state.insert_series_context(previous)
+                }
+            }
+        }
         self.state.attach(images);
         if enhance {
             self.state.enhance();
@@ -1152,6 +1182,7 @@ impl NotetakerApp {
                     ui.selectable_value(&mut settings.speakers, None, "авто");
                     for n in 1..=32 { ui.selectable_value(&mut settings.speakers, Some(n), n.to_string()); }
                 });
+                ui.checkbox(&mut settings.digest_reminder, "Напоминать о дайджесте в пятницу в 17:00");
                 ui.checkbox(&mut settings.voice_library, "Голоса: запоминать имена");
                 ui.small("Голосовые отпечатки - биометрические данные; хранятся только локально. Применяется к новым встречам.");
                 ui.label("Словарь (один термин на строку)");
@@ -1572,12 +1603,15 @@ impl eframe::App for NotetakerApp {
                 .frame(egui::Frame::new().fill(p.bg).inner_margin(16))
                 .show(ui, |ui| self.recording_bar(ui));
         }
+        self.people.poll(&ctx, &mut self.state);
         self.draft_panels(ui);
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(p.bg).inner_margin(24))
             .show(ui, |ui| {
                 ui.add_enabled_ui(!self.state.settings_pending, |ui| {
-                    if self.state.tasks_open {
+                    if self.people.active() {
+                        self.people.screen(ui, &mut self.state);
+                    } else if self.state.tasks_open {
                         self.tasks_screen(ui);
                     } else {
                         self.meeting(ui);
@@ -1608,7 +1642,10 @@ impl eframe::App for NotetakerApp {
         if self.state.chat.open {
             match self.state.chat.show(&ctx, can_ask) {
                 Some(crate::chat::Action::Ask) => self.state.ask(),
-                Some(crate::chat::Action::Open(meeting)) => self.state.select(meeting),
+                Some(crate::chat::Action::Open(meeting)) => {
+                    self.people.close();
+                    self.state.select(meeting);
+                }
                 None => {}
             }
         }
@@ -1901,16 +1938,33 @@ fn transcript_view(
                             },
                             |ui| {
                                 ui.horizontal(|ui| {
-                                    if live {
-                                        ui.label(
-                                            egui::RichText::new(
-                                                document
-                                                    .data
-                                                    .transcript
-                                                    .speaker_name(&segment.speaker.0),
+                                    if live || !editable {
+                                        let name = document
+                                            .data
+                                            .transcript
+                                            .speaker_name(&segment.speaker.0);
+                                        if ui
+                                            .link(
+                                                egui::RichText::new(name).color(
+                                                    crate::speakers::color(&segment.speaker.0),
+                                                ),
                                             )
-                                            .color(crate::speakers::color(&segment.speaker.0)),
-                                        );
+                                            .clicked()
+                                        {
+                                            crate::people::request(
+                                                ui,
+                                                crate::people::Request {
+                                                    name: name.into(),
+                                                    email: String::new(),
+                                                    voice: document
+                                                        .data
+                                                        .transcript
+                                                        .speaker_voice_ids
+                                                        .get(&segment.speaker.0)
+                                                        .cloned(),
+                                                },
+                                            );
+                                        }
                                     } else {
                                         ui.add_enabled_ui(editable, |ui| {
                                             if let Some(rename) = crate::speakers::rename_menu(

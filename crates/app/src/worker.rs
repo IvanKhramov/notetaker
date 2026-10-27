@@ -159,6 +159,11 @@ pub struct RecordRequest {
 }
 
 pub enum Command {
+    InsertSeriesContext {
+        meeting: Meeting,
+        previous: uuid::Uuid,
+        revision: Revision,
+    },
     Tasks {
         root: PathBuf,
     },
@@ -245,6 +250,10 @@ pub enum Command {
 // Rare worker-to-UI messages; boxing variants buys nothing measurable.
 #[allow(clippy::large_enum_variant)]
 pub enum Event {
+    SeriesContext {
+        path: PathBuf,
+        result: Result<Box<DocumentData>, String>,
+    },
     Tasks {
         root: PathBuf,
         result: Result<Vec<notetaker_core::Task>, String>,
@@ -362,6 +371,21 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
         });
         for command in rx {
             match command {
+                Command::InsertSeriesContext {
+                    meeting,
+                    previous,
+                    revision,
+                } => {
+                    let path = meeting.path().to_owned();
+                    let result = (|| -> Result<_> {
+                        let library =
+                            Library::open(meeting.path().parent().context("Нет библиотеки")?)?;
+                        library.insert_carry_over(&meeting, previous, revision)?;
+                        Ok(Box::new(DocumentData::read(meeting)?))
+                    })()
+                    .map_err(error_text);
+                    let _ = events.send(Event::SeriesContext { path, result });
+                }
                 Command::Tasks { root } => {
                     let result = (|| -> Result<_> {
                         let library = Library::open(&root)?;

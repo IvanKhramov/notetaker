@@ -15,6 +15,7 @@ pub const MODELS: [&str; 2] = ["gigaam-v3", "parakeet-v3"];
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     pub user_name: String,
+    pub digest_reminder: bool,
     /// Aliases separated by commas, semicolons or newlines.
     pub user_aliases: String,
     pub theme: crate::theme::Theme,
@@ -56,6 +57,7 @@ impl Default for Settings {
             .unwrap_or_else(|| PathBuf::from("."));
         Self {
             user_name: String::new(),
+            digest_reminder: false,
             user_aliases: String::new(),
             theme: crate::theme::Theme::System,
             library: documents.join("notetaker"),

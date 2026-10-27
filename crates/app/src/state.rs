@@ -415,6 +415,25 @@ impl AppState {
             request: self.request,
         });
     }
+    pub fn insert_series_context(&mut self, previous: uuid::Uuid) {
+        let Some(path) = self.selected.clone() else {
+            return;
+        };
+        let Some(doc) = self.documents.get_mut(&path) else {
+            return;
+        };
+        if doc.saving || doc.dirty.any() || self.enhancing.is_some() || self.recording.busy() {
+            return;
+        }
+        doc.saving = true;
+        doc.speaker_ui.busy = true;
+        let command = Command::InsertSeriesContext {
+            meeting: doc.data.meeting.clone(),
+            previous,
+            revision: doc.data.revisions.notes,
+        };
+        self.send(command);
+    }
     pub fn select(&mut self, meeting: Meeting) {
         self.flush();
         let path = meeting.path().to_owned();
@@ -1023,6 +1042,19 @@ impl AppState {
     }
     fn apply(&mut self, event: Event) {
         match event {
+            Event::SeriesContext { path, result } => {
+                if let Some(doc) = self.documents.get_mut(&path) {
+                    doc.saving = false;
+                    doc.speaker_ui.busy = false;
+                }
+                match result {
+                    Ok(data) => {
+                        self.documents.insert(path, Document::new(*data));
+                        self.tab = Tab::Notes;
+                    }
+                    Err(error) => self.error = Some(error),
+                }
+            }
             Event::Tasks { root, result } => {
                 self.tasks_busy = false;
                 if root == self.settings.library {

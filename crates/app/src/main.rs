@@ -9,6 +9,7 @@ mod desktop;
 mod detection;
 mod icon;
 mod maintenance;
+mod people;
 mod quickstart;
 mod speakers;
 mod state;

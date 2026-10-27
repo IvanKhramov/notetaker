@@ -85,7 +85,17 @@ pub fn rename_menu(
         || label(transcript, id).to_owned(),
         |name| format!("{name}?"),
     );
-    ui.menu_button(RichText::new(title).color(color(id)), |ui| {
+    if ui.link(RichText::new(title).color(color(id))).clicked() {
+        crate::people::request(
+            ui,
+            crate::people::Request {
+                name: transcript.speaker_name(id).into(),
+                email: String::new(),
+                voice: transcript.speaker_voice_ids.get(id).cloned(),
+            },
+        );
+    }
+    ui.menu_button("…", |ui| {
         let name_key = ui.make_persistent_id(("speaker-name", meta.id, id));
         let all_key = name_key.with("everywhere");
         let mut name = ui
