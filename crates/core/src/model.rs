@@ -84,9 +84,19 @@ pub struct Segment {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Bookmark {
+    pub id: Uuid,
+    pub at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Transcript {
     pub version: u32,
     pub segments: Vec<Segment>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bookmarks: Vec<Bookmark>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub speaker_names: std::collections::BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -102,6 +112,7 @@ impl Default for Transcript {
         Self {
             version: SCHEMA_VERSION,
             segments: Vec::new(),
+            bookmarks: Vec::new(),
             speaker_names: Default::default(),
             speaker_suggestions: Default::default(),
             self_speaker: None,
@@ -111,6 +122,15 @@ impl Default for Transcript {
 }
 
 impl Transcript {
+    /// Prefer a segment containing the time, otherwise the nearest boundary.
+    pub fn segment_at(&self, at_ms: u64) -> Option<&Segment> {
+        self.segments.iter().min_by_key(|s| {
+            s.start_ms
+                .saturating_sub(at_ms)
+                .max(at_ms.saturating_sub(s.end_ms))
+        })
+    }
+
     pub fn speaker_name<'a>(&'a self, id: &'a str) -> &'a str {
         self.speaker_names.get(id).map(String::as_str).unwrap_or(id)
     }

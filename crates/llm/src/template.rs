@@ -94,7 +94,7 @@ impl Template {
                 instruction.into()
             } else {
                 format!(
-                    "{instruction} Write the notes in the transcript language, Russian by default. Format every action item as `- [ ] Задача - Ответственный - срок` (translate labels into the transcript language). If an owner or deadline is missing, use `не указан` in that field; never invent them."
+                    "{instruction} Если есть пользовательские закладки, добавь раздел «Важные моменты» с метками времени и контекстом. Write the notes in the transcript language, Russian by default. Format every action item as `- [ ] Задача - Ответственный - срок` (translate labels into the transcript language). If an owner or deadline is missing, use `не указан` in that field; never invent them."
                 )
             },
         })

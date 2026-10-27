@@ -105,6 +105,34 @@ impl Transcript {
                 ExportFormat::Json => unreachable!(),
             }
         }
+        if format == ExportFormat::Md && !self.bookmarks.is_empty() {
+            output.push_str("## Важные моменты\n\n");
+            for bookmark in &self.bookmarks {
+                output.push_str(&format!(
+                    "- [{}] {}\n",
+                    format_timestamp(bookmark.at_ms, '.'),
+                    markdown_text(bookmark.label.as_deref().unwrap_or("Важный момент"))
+                ));
+            }
+        }
+        if format == ExportFormat::Vtt {
+            for bookmark in &self.bookmarks {
+                output.push_str(&format!(
+                    "NOTE Закладка {} {}\n\n",
+                    format_timestamp(bookmark.at_ms, '.'),
+                    subtitle_text(bookmark.label.as_deref().unwrap_or("Важный момент"))
+                ));
+            }
+        }
+        if format == ExportFormat::Csv {
+            for bookmark in &self.bookmarks {
+                let at = format_timestamp(bookmark.at_ms, '.');
+                output.push_str(&format!(
+                    "{at},{at},\"Закладка\",{}\r\n",
+                    csv(bookmark.label.as_deref().unwrap_or("Важный момент"))
+                ));
+            }
+        }
         Ok(output)
     }
 }

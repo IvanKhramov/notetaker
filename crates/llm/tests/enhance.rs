@@ -488,3 +488,42 @@ fn confirmed_speaker_names_reach_prompt_but_suggestions_do_not() {
             .contains("Саша: Обсудим план")
     );
 }
+
+#[test]
+fn bookmarks_add_timestamped_context_and_template_section() {
+    let meta = MeetingMeta::new("bookmarks", Utc::now());
+    let mut transcript = transcript("nearby evidence");
+    transcript.segments[0].start_ms = 50_000;
+    transcript.segments[0].end_ms = 55_000;
+    let mut far = transcript.segments[0].clone();
+    far.id = Uuid::now_v7();
+    far.start_ms = 100_000;
+    far.end_ms = 110_000;
+    far.text = "far outside bookmark".into();
+    transcript.segments.push(far);
+    transcript.bookmarks.push(notetaker_core::Bookmark {
+        id: Uuid::now_v7(),
+        at_ms: 60_000,
+        label: Some("Check rollout".into()),
+    });
+    let provider = Fake::new(8192);
+    enhance(
+        &meta,
+        "",
+        &transcript,
+        &Template::builtin("general").unwrap(),
+        &provider,
+        &mut |_| {},
+    )
+    .unwrap();
+    let calls = provider.calls.lock().unwrap();
+    assert!(calls[0].0.contains("Важные моменты"));
+    assert!(
+        calls[0]
+            .1
+            .contains("Важные моменты, отмеченные пользователем: [1:00] Check rollout")
+    );
+    assert!(calls[0].1.contains("[00:50]"));
+    assert_eq!(calls[0].1.matches("nearby evidence").count(), 2);
+    assert_eq!(calls[0].1.matches("far outside bookmark").count(), 1);
+}

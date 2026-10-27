@@ -38,6 +38,8 @@ pub struct SpeakerTimeline {
     pub duration_ms: u64,
     pub speakers: Vec<SpeakerStats>,
     pub segments: Vec<TimelineSegment>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bookmarks: Vec<crate::Bookmark>,
 }
 
 impl Transcript {
@@ -190,7 +192,13 @@ impl Transcript {
             }
         }
         SpeakerTimeline {
-            duration_ms: segments.iter().map(|s| s.end_ms).max().unwrap_or(0),
+            bookmarks: self.bookmarks.clone(),
+            duration_ms: segments
+                .iter()
+                .map(|s| s.end_ms)
+                .chain(self.bookmarks.iter().map(|b| b.at_ms))
+                .max()
+                .unwrap_or(0),
             speakers: stats.into_values().collect(),
             segments: segments
                 .into_iter()

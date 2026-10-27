@@ -379,12 +379,19 @@ fn edits_saved_during_recording_survive_the_real_replacement_path() {
     };
     let mut transcript = meeting.read_transcript().unwrap();
     transcript.segments.push(edited.clone());
+    let bookmark = notetaker_core::Bookmark {
+        id: edited.id,
+        at_ms: 75,
+        label: Some("Important".into()),
+    };
+    transcript.bookmarks.push(bookmark.clone());
     meeting.write_transcript(&transcript).unwrap();
     release.send(()).unwrap();
     drain(&session);
     session.wait().unwrap();
     let transcript = meeting.read_transcript().unwrap();
     assert!(transcript.segments.contains(&edited));
+    assert_eq!(transcript.bookmarks, vec![bookmark]);
     assert!(
         transcript
             .segments

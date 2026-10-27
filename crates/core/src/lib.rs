@@ -30,7 +30,7 @@ pub use voices::{SpeakerEdit, SpeakerEditResult, SpeakerUndo};
 pub use attachments::{attachment_image_path, attachment_references, markdown_images};
 pub use index::Hit;
 pub use model::{
-    CaptureIssue, Channel, MeetingMeta, Mode, SCHEMA_VERSION, Segment, Source, SpeakerId,
+    Bookmark, CaptureIssue, Channel, MeetingMeta, Mode, SCHEMA_VERSION, Segment, Source, SpeakerId,
     SummaryStamp, Transcript, migrate_transcript,
 };
 pub use storage::{Library, Meeting, Revision, Versioned};
