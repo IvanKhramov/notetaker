@@ -99,6 +99,9 @@ impl Library {
                 continue;
             }
             let meeting = Meeting { path: path.clone() };
+            if meeting.validate_source_paths().is_err() {
+                continue;
+            }
             let Ok(meta) = meeting.read_meta() else {
                 continue;
             };
@@ -197,7 +200,7 @@ impl Library {
 fn source_stamp(meeting: &Meeting) -> Result<String> {
     let mut stamps = Vec::new();
     for name in ["meta.yaml", "notes.md", "enhanced.md", "transcript.json"] {
-        let stamp = match fs::metadata(meeting.path.join(name)) {
+        let stamp = match fs::metadata(meeting.source_path(name)?) {
             Ok(metadata) => Some((metadata.modified()?, metadata.len())),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(error.into()),

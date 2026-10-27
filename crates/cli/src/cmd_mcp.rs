@@ -62,6 +62,7 @@ impl Server {
         // No arbitrary paths or symlinks outside the configured library.
         let path = meeting.path().canonicalize()?;
         Ok(path.parent() == Some(self.library.root())
+            && meeting.validate_source_paths().is_ok()
             && (!self.exclude_local || meeting.read_meta()?.mode != Mode::Local))
     }
     fn call(&self, name: &str, args: Value) -> Result<Value> {
@@ -262,6 +263,75 @@ mod tests {
     use super::*;
     use notetaker_core::{Channel, MeetingMeta, Segment, Source, SpeakerId, Transcript};
     use std::io::Cursor;
+    #[cfg(unix)]
+    #[test]
+    fn all_tools_refuse_sources_linked_outside_the_specific_meeting() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open(root.path()).unwrap();
+        let local = library
+            .create_meeting(MeetingMeta::new("SECRET", chrono::Utc::now()))
+            .unwrap();
+        local.write_notes("privateword").unwrap();
+        let mut meta = MeetingMeta::new("Hybrid", chrono::Utc::now());
+        meta.mode = Mode::Hybrid;
+        let public = library.create_meeting(meta).unwrap();
+        public.write_notes("publicword").unwrap();
+        let id = public.read_meta().unwrap().id.to_string();
+        let server = Server {
+            library,
+            exclude_local: true,
+        };
+        // Start with cached content, then replace each source independently.
+        for name in ["notes.md", "enhanced.md", "transcript.json", "meta.yaml"] {
+            server.library.reindex_full().unwrap();
+            let path = public.path().join(name);
+            let original = fs::read(&path).unwrap();
+            fs::remove_file(&path).unwrap();
+            symlink(local.path().join(name), &path).unwrap();
+            assert!(
+                server.call("get_meeting", json!({"id":id})).is_err(),
+                "{name}"
+            );
+            assert_eq!(
+                server.call("list_recent", json!({})).unwrap(),
+                json!([]),
+                "{name}"
+            );
+            assert_eq!(
+                server
+                    .call("search_meetings", json!({"query":"privateword publicword"}))
+                    .unwrap(),
+                json!([]),
+                "{name}"
+            );
+            assert!(
+                server
+                    .library
+                    .retrieve("privateword publicword", 10, true)
+                    .unwrap()
+                    .is_empty()
+            );
+            fs::remove_file(path).unwrap();
+            fs::write(public.path().join(name), original).unwrap();
+        }
+        let secret = root.path().join("voices.json");
+        fs::write(&secret, "privateword").unwrap();
+        fs::remove_file(public.path().join("notes.md")).unwrap();
+        symlink(secret, public.path().join("notes.md")).unwrap();
+        assert!(public.read_notes().is_err());
+        assert!(server.call("get_meeting", json!({"id":id})).is_err());
+        server.library.reindex_full().unwrap();
+        assert!(
+            server
+                .library
+                .search("privateword", 10)
+                .unwrap()
+                .iter()
+                .all(|hit| hit.path == local.path())
+        );
+    }
+
     #[test]
     fn json_rpc_roundtrip_and_privacy_for_all_tools() {
         let root = tempfile::tempdir().unwrap();

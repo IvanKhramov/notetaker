@@ -167,9 +167,36 @@ impl Meeting {
         &self.path
     }
 
+    /// Resolve each existing source inside this meeting, including symlinks and
+    /// Windows reparse points. Return the resolved path so reads use that target.
+    pub(crate) fn source_path(&self, name: &str) -> Result<PathBuf> {
+        let path = self.path.join(name);
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(path),
+            Err(error) => return Err(error.into()),
+            Ok(_) => {}
+        }
+        let resolved = path.canonicalize()?;
+        if !resolved.starts_with(self.path.canonicalize()?) || !resolved.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "meeting source must stay inside its meeting folder",
+            )
+            .into());
+        }
+        Ok(resolved)
+    }
+
+    pub fn validate_source_paths(&self) -> Result<()> {
+        for name in ["meta.yaml", "notes.md", "enhanced.md", "transcript.json"] {
+            self.source_path(name)?;
+        }
+        Ok(())
+    }
+
     pub fn read_meta(&self) -> Result<MeetingMeta> {
         Ok(serde_yaml::from_str(&fs::read_to_string(
-            self.path.join("meta.yaml"),
+            self.source_path("meta.yaml")?,
         )?)?)
     }
 
@@ -181,7 +208,7 @@ impl Meeting {
     }
 
     pub fn read_notes(&self) -> Result<String> {
-        read_optional(&self.path.join("notes.md"))
+        read_optional(&self.source_path("notes.md")?)
     }
     pub fn write_notes(&self, notes: &str) -> Result<()> {
         let lock = meeting_lock(&self.path);
@@ -191,7 +218,7 @@ impl Meeting {
         Ok(())
     }
     pub fn read_enhanced(&self) -> Result<String> {
-        read_optional(&self.path.join("enhanced.md"))
+        read_optional(&self.source_path("enhanced.md")?)
     }
     pub fn write_enhanced(&self, enhanced: &str) -> Result<()> {
         let lock = meeting_lock(&self.path);
@@ -200,7 +227,7 @@ impl Meeting {
     }
 
     pub fn read_transcript(&self) -> Result<Transcript> {
-        match fs::read_to_string(self.path.join("transcript.json")) {
+        match fs::read_to_string(self.source_path("transcript.json")?) {
             Ok(text) => migrate_transcript(serde_json::from_str(&text)?),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Transcript::default()),
             Err(error) => Err(error.into()),
@@ -220,13 +247,13 @@ impl Meeting {
     }
 
     pub fn load_notes(&self) -> Result<Versioned<String>> {
-        load_text(&self.path.join("notes.md"))
+        load_text(&self.source_path("notes.md")?)
     }
     pub fn load_enhanced(&self) -> Result<Versioned<String>> {
-        load_text(&self.path.join("enhanced.md"))
+        load_text(&self.source_path("enhanced.md")?)
     }
     pub fn load_transcript(&self) -> Result<Versioned<Transcript>> {
-        let loaded = load_text(&self.path.join("transcript.json"))?;
+        let loaded = load_text(&self.source_path("transcript.json")?)?;
         Ok(Versioned {
             value: if loaded.revision.0.is_none() {
                 Transcript::default()
