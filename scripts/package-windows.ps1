@@ -32,11 +32,17 @@ try {
         if ($dependencies -match '(?im)^\s*(?:vcruntime[^\s]*|msvcp[^\s]*|ucrtbase|api-ms-win-crt-[^\s]*)\.dll\s*$') {
             throw "$exe imports a dynamic CRT: $($Matches[0].Trim())"
         }
+        if ($dependencies -match '(?im)^\s*(?:onnxruntime[^\s]*|DirectML|sherpa-onnx[^\s]*)\.dll\s*$') {
+            throw "$exe imports an optional ML runtime in the CPU package: $($Matches[0].Trim())"
+        }
         Copy-Item (Join-Path $BinaryDir $exe) $stage.FullName
     }
-    # Default CPU builds use static sherpa/onnxruntime. If a shared build places
-    # runtime DLLs beside the executables, preserve them in both distributions.
-    Get-ChildItem $BinaryDir -Filter '*.dll' -File | Copy-Item -Destination $stage.FullName
+    # Optional GPU runtimes must never leak into the portable CPU payload.
+    $dlls = @(Get-ChildItem $BinaryDir -Filter '*.dll' -File)
+    if ($dlls | Where-Object Name -Match '^(?:onnxruntime.*|DirectML|sherpa-onnx.*)\.dll$') {
+        throw 'Optional ML DLLs found in the CPU binary directory; use a separate addon directory'
+    }
+    $dlls | Copy-Item -Destination $stage.FullName
     Copy-Item README.md, LICENSE-*, THIRD-PARTY-NOTICES.md $stage.FullName
 
     # Run from the staged payload, not target/release, so missing runtime DLLs fail CI.

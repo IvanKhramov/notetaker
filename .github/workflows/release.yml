@@ -34,6 +34,9 @@ jobs:
         run: ./scripts/fetch-sherpa-libs.sh
       - name: Build Windows applications
         run: cargo build --locked --release -p notetaker-cli -p notetaker-asr-worker -p notetaker-app
+      - name: Verify portable ASR providers
+        shell: pwsh
+        run: ./scripts/check-asr-providers.ps1
       - name: Package Windows applications
         id: package
         shell: pwsh

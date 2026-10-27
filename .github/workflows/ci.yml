@@ -45,6 +45,10 @@ jobs:
       - name: Build Windows applications
         if: runner.os == 'Windows'
         run: cargo build --locked --release -p notetaker-cli -p notetaker-asr-worker -p notetaker-app -j 2
+      - name: Verify portable ASR providers
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/check-asr-providers.ps1
       - name: Package Windows applications
         if: runner.os == 'Windows'
         id: package
