@@ -229,6 +229,36 @@ pub fn recording_dot(ui: &mut egui::Ui) {
     ui.painter()
         .circle_filled(rect.center(), 4.0, Palette::of(ui).red);
 }
+#[derive(Clone, Copy)]
+pub enum ToastLevel {
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+impl ToastLevel {
+    pub fn color(self, palette: Palette) -> Color32 {
+        match self {
+            Self::Info => palette.text,
+            Self::Success => {
+                if palette.bg.r() < 128 {
+                    Color32::from_rgb(126, 201, 150)
+                } else {
+                    Color32::from_rgb(38, 116, 64)
+                }
+            }
+            Self::Warning => {
+                if palette.bg.r() < 128 {
+                    Color32::from_rgb(225, 189, 106)
+                } else {
+                    Color32::from_rgb(145, 103, 26)
+                }
+            }
+            Self::Error => palette.red,
+        }
+    }
+}
+
 pub fn bar(p: Palette) -> egui::Frame {
     egui::Frame::new()
         .fill(p.card)

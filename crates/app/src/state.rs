@@ -222,8 +222,8 @@ pub struct AppState {
     pub settings: Settings,
     pub settings_draft: Settings,
     pub llm_draft: LlmSettings,
-    llm: LlmSettings,
-    llm_configured: bool,
+    pub(crate) llm: LlmSettings,
+    pub(crate) llm_configured: bool,
     pub connections: crate::ai::Connections,
     pub chat: crate::chat::Panel,
     pub tasks_open: bool,
@@ -277,10 +277,11 @@ pub struct AppState {
     pub enhancing: Option<PathBuf>,
     pub voices: notetaker_core::VoiceLibrary,
     pub downloading: bool,
-    pub offer_model_download: bool,
+    pub quickstart: crate::quickstart::Runtime,
     pub download_messages: VecDeque<String>,
     pub error: Option<String>,
     pub warnings: Vec<String>,
+    pub notices: Vec<(crate::theme::ToastLevel, String)>,
     pub exported: VecDeque<PathBuf>,
     pub status: String,
     pub exit_requested: bool,
@@ -355,10 +356,11 @@ impl AppState {
             enhancing: None,
             voices: Default::default(),
             downloading: false,
-            offer_model_download: false,
+            quickstart: Default::default(),
             download_messages: VecDeque::new(),
             error: None,
             warnings: Vec::new(),
+            notices: Vec::new(),
             exported: VecDeque::new(),
             status: "Открываем библиотеку…".into(),
             exit_requested: false,
@@ -518,6 +520,7 @@ impl AppState {
         if !self.ready
             || self.recording.busy()
             || self.downloading
+            || self.quickstart.probe_busy
             || self.settings_pending
             || self.draft_busy
             || self.exit_requested
@@ -581,6 +584,7 @@ impl AppState {
         if !self.ready
             || self.recording.busy()
             || self.downloading
+            || self.quickstart.probe_busy
             || self.settings_pending
             || self.exit_requested
         {
@@ -725,6 +729,7 @@ impl AppState {
         if !self.ready
             || self.recording.busy()
             || self.downloading
+            || self.quickstart.probe_busy
             || self.settings_pending
             || self.exit_requested
         {
@@ -805,25 +810,42 @@ impl AppState {
             return;
         }
         self.downloading = true;
+        self.quickstart.download_model = Some(model.clone());
+        self.quickstart.download_error = None;
         self.download_messages.clear();
         self.download_messages
             .push_back(format!("Загрузка {model}…"));
         self.send(Command::Download(model));
     }
+    pub fn can_save_settings(&self) -> bool {
+        self.ready
+            && !self.exit_requested
+            && !self.recording.busy()
+            && self.enhancing.is_none()
+            && !self.chat.busy
+            && !self.draft_busy
+            && !self.unsaved()
+            && !self.settings_pending
+    }
     pub fn save_settings(&mut self) {
-        if self.recording.busy()
-            || self.enhancing.is_some()
-            || self.chat.busy
-            || self.draft_busy
-            || self.unsaved()
-            || self.settings_pending
-        {
+        self.persist_settings(true);
+    }
+    pub fn save_preferences(&mut self) {
+        self.persist_settings(false);
+    }
+    fn persist_settings(&mut self, persist_llm: bool) {
+        if !self.can_save_settings() {
             return;
         }
+        let llm = if persist_llm {
+            &self.llm_draft
+        } else {
+            &self.llm
+        };
         if let Err(error) = self
             .settings_draft
             .validate()
-            .and_then(|_| self.llm_draft.validate().map(|_| ()))
+            .and_then(|_| llm.validate().map(|_| ()))
         {
             self.error = Some(format!("{error:#}"));
             return;
@@ -831,7 +853,8 @@ impl AppState {
         self.settings_pending = true;
         self.send(Command::Settings {
             settings: self.settings_draft.clone(),
-            llm: self.llm_draft.clone(),
+            llm: llm.clone(),
+            persist_llm,
             calendar_secrets: self
                 .calendar_secrets
                 .iter()
@@ -854,6 +877,7 @@ impl AppState {
             && !self.chat.busy
             && !self.draft_busy
             && !self.downloading
+            && !self.quickstart.probe_busy
             && !self.unsaved()
             && !self.settings_pending
     }
@@ -870,6 +894,7 @@ impl AppState {
                 "Разрыв звука / ошибка временной метки (событий: {count})"
             ));
         }
+        crate::quickstart::auto_download(self);
         self.poll_detection();
         let now = chrono::Utc::now();
         if self
@@ -1044,10 +1069,14 @@ impl AppState {
                     self.calendar_busy = false;
                     match result {
                         Ok(events) => {
+                            self.quickstart.calendar_error = None;
                             self.calendar_status = format!("Событий: {}", events.len());
                             self.calendar_events = events;
                         }
-                        Err(error) => self.calendar_status = error,
+                        Err(error) => {
+                            self.quickstart.calendar_error = Some(error.clone());
+                            self.calendar_status = error;
+                        }
                     }
                 }
             }
@@ -1094,8 +1123,10 @@ impl AppState {
                     }
                     if cloud && self.settings_draft.mode == notetaker_core::Mode::Local {
                         self.settings_draft.mode = notetaker_core::Mode::Hybrid;
-                        self.warnings
-                            .push("Для новых встреч включён Hybrid: выбран облачный AI".into());
+                        self.notices.push((
+                            crate::theme::ToastLevel::Info,
+                            "Для новых встреч включён Hybrid: выбран облачный AI".into(),
+                        ));
                     }
                     self.save_settings();
                 }
@@ -1128,11 +1159,11 @@ impl AppState {
                 settings,
                 llm,
                 warnings,
-                needs_model,
+                models,
                 llm_configured,
             } => {
                 self.llm_configured = llm_configured;
-                self.offer_model_download = needs_model;
+                self.quickstart.models = models;
                 self.settings = settings.clone();
                 self.settings_draft = settings.clone();
                 self.connections.load(&llm);
@@ -1435,12 +1466,15 @@ impl AppState {
                 }
                 self.download_messages.push_back(message);
             }
-            Event::Downloaded(result) => {
+            Event::Downloaded(result, models) => {
+                self.quickstart.download_error = result.as_ref().err().cloned();
                 self.downloading = false;
+                self.quickstart.models = models;
                 match result {
                     Ok(()) => {
-                        self.offer_model_download = false;
                         self.download_messages.push_back("Модель готова".into());
+                        self.notices
+                            .push((crate::theme::ToastLevel::Success, "Модель готова".into()));
                     }
                     Err(error) => {
                         self.error = Some(error);
@@ -1448,19 +1482,25 @@ impl AppState {
                     }
                 }
             }
-            Event::SettingsSaved(result) => {
+            Event::SettingsSaved(result, persist_llm) => {
                 self.settings_pending = false;
                 match result {
                     Ok((settings, llm)) => {
-                        self.llm_configured = true;
+                        self.llm_configured |= persist_llm;
                         let changed_library = self.settings.library != settings.library;
+                        let calendar_changed = self.settings.calendars != settings.calendars
+                            || self.settings.calendar_timezone != settings.calendar_timezone
+                            || !self.calendar_secrets.is_empty();
                         self.calendar_secrets.clear();
-                        self.calendar_events.clear();
-                        self.calendar_reminder = None;
-                        self.reminded_events.clear();
-                        self.calendar_busy = false;
-                        self.calendar_generation += 1;
-                        self.calendar_checked = None;
+                        if calendar_changed {
+                            self.quickstart.calendar_error = None;
+                            self.calendar_events.clear();
+                            self.calendar_reminder = None;
+                            self.reminded_events.clear();
+                            self.calendar_busy = false;
+                            self.calendar_generation += 1;
+                            self.calendar_checked = None;
+                        }
                         if self.settings.detect_calls != settings.detect_calls
                             || self.settings.detect_browsers != settings.detect_browsers
                             || self.settings.detect_any_microphone != settings.detect_any_microphone
@@ -1489,7 +1529,12 @@ impl AppState {
                         self.status = "Настройки сохранены".into();
                         self.refresh();
                     }
-                    Err(error) => self.error = Some(error),
+                    Err(error) => {
+                        if !self.calendar_secrets.is_empty() {
+                            self.quickstart.calendar_error = Some(error.clone());
+                        }
+                        self.error = Some(error);
+                    }
                 }
             }
         }
@@ -1537,6 +1582,96 @@ pub fn edit_segment(transcript: &mut Transcript, id: Uuid, text: String) -> bool
 mod tests {
     use super::*;
     use notetaker_core::{Segment, Source, SpeakerId};
+    #[test]
+    fn quickstart_preferences_do_not_create_a_configured_ai_provider() {
+        let (mut state, commands, _root, _) = fixture();
+        state.ready = true;
+        state.settings_draft.user_name = "Иван".into();
+        state.settings_draft.hide_quickstart = true;
+        state.save_preferences();
+        let Command::Settings {
+            settings,
+            llm,
+            persist_llm,
+            ..
+        } = commands.try_recv().unwrap()
+        else {
+            panic!("settings expected")
+        };
+        assert!(!persist_llm);
+        state.apply(Event::SettingsSaved(Ok((settings, llm)), persist_llm));
+        assert!(!state.llm_configured);
+        assert_eq!(state.settings.user_name, "Иван");
+        assert!(state.settings.hide_quickstart);
+    }
+    #[test]
+    fn automatic_diarization_download_waits_for_saved_attempt_and_does_not_retry() {
+        let (mut state, commands, _root, _) = fixture();
+        state.ready = true;
+        state.quickstart.models.gigaam = crate::quickstart::Status::Ready;
+        crate::quickstart::auto_download(&mut state);
+        let Command::Settings {
+            settings,
+            llm,
+            persist_llm,
+            ..
+        } = commands.try_recv().unwrap()
+        else {
+            panic!("settings expected")
+        };
+        assert!(settings.auto_diarization_attempted);
+        assert!(!persist_llm);
+        crate::quickstart::auto_download(&mut state);
+        assert!(commands.try_recv().is_err());
+        state.apply(Event::SettingsSaved(Ok((settings, llm)), persist_llm));
+        let _ = commands.try_recv(); // Library refresh from the save.
+        state.downloading = true; // A manual download started while saving.
+        crate::quickstart::auto_download(&mut state);
+        assert!(commands.try_recv().is_err());
+        state.downloading = false;
+        crate::quickstart::auto_download(&mut state);
+        assert!(
+            matches!(commands.try_recv().unwrap(), Command::Download(model) if model == "diarization")
+        );
+        state.apply(Event::Downloaded(
+            Err("network".into()),
+            state.quickstart.models.clone(),
+        ));
+        crate::quickstart::auto_download(&mut state);
+        assert!(commands.try_recv().is_err());
+        assert_eq!(state.quickstart.download_error.as_deref(), Some("network"));
+    }
+    #[test]
+    fn quickstart_starts_once_per_session_and_can_reopen_after_opt_out() {
+        let (mut state, _commands, _root, _) = fixture();
+        let mut panel = crate::quickstart::Panel::default();
+        panel.tick(&mut state);
+        assert!(!panel.open);
+        state.ready = true;
+        panel.tick(&mut state);
+        assert!(panel.open);
+        panel.open = false;
+        panel.tick(&mut state);
+        assert!(!panel.open);
+        let mut next_session = crate::quickstart::Panel::default();
+        state.settings.hide_quickstart = true;
+        next_session.tick(&mut state);
+        assert!(!next_session.open);
+        next_session.open = true;
+        next_session.tick(&mut state);
+        assert!(next_session.open);
+    }
+    #[test]
+    fn capture_probe_blocks_recording_until_finished() {
+        let (mut state, commands, _root, _) = fixture();
+        state.ready = true;
+        state.quickstart.probe_busy = true;
+        state.start_recording();
+        assert!(commands.try_recv().is_err());
+        state.quickstart.probe_busy = false;
+        state.start_recording();
+        assert!(matches!(commands.try_recv().unwrap(), Command::Record(_)));
+    }
     #[test]
     fn task_result_preserves_concurrent_notes_edit() {
         let (mut state, _, _root, path) = fixture();
@@ -2119,6 +2254,7 @@ mod tests {
     #[test]
     fn choosing_cloud_ai_switches_only_the_new_meeting_default() {
         let (mut state, commands, _root, path) = fixture();
+        state.ready = true;
         state.settings_draft.library = path.parent().unwrap().to_owned();
         let provider = crate::config::ProviderSettings {
             id: "claude-subscription".into(),
@@ -2139,7 +2275,12 @@ mod tests {
             notetaker_core::Mode::Local
         );
         assert_eq!(state.llm_draft.defaults.hybrid, "claude-subscription");
-        assert!(!state.warnings.is_empty());
+        assert!(
+            state
+                .notices
+                .iter()
+                .any(|(level, _)| matches!(level, crate::theme::ToastLevel::Info))
+        );
         assert!(matches!(
             commands.try_recv().unwrap(),
             Command::Settings { .. }

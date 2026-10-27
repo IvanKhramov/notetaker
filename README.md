@@ -30,8 +30,13 @@ Windows 10 builds fall back to all system audio (see the diagnostics guide).
 
 ## Quick start
 
-1. On first launch, accept the GigaAM v3 download (~171 MB including Silero VAD),
-   or choose Parakeet v3 in Settings for English and other supported languages.
+1. At startup, **Быстрый старт** shows installed speech/speaker models, AI
+   connections, your name, calendar, call preferences, and a 5-second audio check.
+   Download GigaAM v3 for Russian or Parakeet v3 for English inline, then connect
+   AI and an optional ICS calendar without opening Settings. Speaker models
+   download automatically once an ASR model is installed (can be disabled).
+   Select **Больше не показывать при запуске** to hide the window; reopen it from
+   the sidebar or Settings. A dismissible sidebar reminder shows missing ASR/AI.
 2. Start a recording, select the call's audio session, and write notes. Windows
    also offers to record detected calls; accepting uses that process and your
    default model/mode. Enable browser detection in Settings for Meet, Толк, or
@@ -39,7 +44,7 @@ Windows 10 builds fall back to all system audio (see the diagnostics guide).
 3. Stop the recording and wait for the final transcript. A detected call ending
    offers to stop; silence stops recording after 15 minutes by default
    (Settings: minutes, 0 disables it).
-4. Configure an LLM provider and generate a summary when ready.
+4. Generate a summary with the AI provider connected in Quick start or Settings.
 
 See [audio capture diagnostics](docs/probe.md) and [LLM setup](docs/llm.md).
 Models download separately. Audio stays on your computer; Hybrid mode can send

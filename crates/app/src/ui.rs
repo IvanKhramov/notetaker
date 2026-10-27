@@ -12,9 +12,16 @@ use crate::{
     config::{MODELS, ProviderSettings},
     detection::CallPrompt,
     state::{AppState, Document, Phase, Tab, edit_segment, speaker, timestamp},
-    theme::{self, ButtonStyle, Palette},
+    theme::{self, ButtonStyle, Palette, ToastLevel},
     worker::Command,
 };
+
+struct Toast {
+    at: Instant,
+    text: String,
+    path: Option<std::path::PathBuf>,
+    level: ToastLevel,
+}
 
 pub struct NotetakerApp {
     state: AppState,
@@ -26,11 +33,12 @@ pub struct NotetakerApp {
     show_import: bool,
     import_path: String,
     show_settings: bool,
+    quickstart: crate::quickstart::Panel,
     tasks_all: bool,
     tasks_mine: bool,
     tasks_person: String,
     tasks_by_meeting: bool,
-    toasts: VecDeque<(Instant, String, Option<std::path::PathBuf>)>,
+    toasts: VecDeque<Toast>,
     main_rect: Option<egui::Rect>,
     maintenance: crate::maintenance::Maintenance,
     #[cfg(windows)]
@@ -52,6 +60,7 @@ impl NotetakerApp {
             show_import: false,
             import_path: String::new(),
             show_settings: false,
+            quickstart: Default::default(),
             tasks_all: false,
             tasks_mine: false,
             tasks_person: String::new(),
@@ -70,12 +79,14 @@ impl NotetakerApp {
     fn meetings(&mut self, ui: &mut egui::Ui) {
         let p = Palette::of(ui);
         ui.heading(RichText::new("notetaker").size(20.0).strong());
+        self.quickstart.sidebar(ui, &self.state);
         ui.add_space(12.0);
         ui.add_enabled_ui(
             self.state.ready
                 && !self.state.recording.busy()
                 && !self.state.settings_pending
-                && !self.state.downloading,
+                && !self.state.downloading
+                && !self.state.quickstart.probe_busy,
             |ui| {
                 if theme::button(ui, "+ Новая заметка", ButtonStyle::Primary).clicked()
                 {
@@ -177,6 +188,7 @@ impl NotetakerApp {
                                                 && !self.state.recording.busy()
                                                 && !self.state.settings_pending
                                                 && !self.state.downloading
+                                                && !self.state.quickstart.probe_busy
                                                 && !self.state.draft_busy,
                                             egui::Button::new("Начать запись"),
                                         )
@@ -989,28 +1001,38 @@ impl NotetakerApp {
         }
     }
     fn notifications(&mut self, ctx: &egui::Context) {
-        for text in self
+        for (level, text) in self
             .state
             .warnings
             .drain(..)
             .chain(self.state.recording.messages.drain(..))
+            .map(|text| (ToastLevel::Warning, text))
+            .chain(self.state.notices.drain(..))
         {
             if self.toasts.len() == 5 {
                 self.toasts.pop_front();
             }
-            self.toasts
-                .push_back((Instant::now(), notetaker_core::display_text(&text), None));
+            self.toasts.push_back(Toast {
+                at: Instant::now(),
+                text: notetaker_core::display_text(&text),
+                path: None,
+                level,
+            });
         }
         for path in self.state.exported.drain(..) {
             if self.toasts.len() == 5 {
                 self.toasts.pop_front();
             }
             let name = path.file_name().unwrap_or_default().to_string_lossy();
-            self.toasts
-                .push_back((Instant::now(), format!("Файл обновлён: {name}"), Some(path)));
+            self.toasts.push_back(Toast {
+                at: Instant::now(),
+                text: format!("Файл обновлён: {name}"),
+                path: Some(path),
+                level: ToastLevel::Success,
+            });
         }
         self.toasts
-            .retain(|(at, _, _)| at.elapsed() < Duration::from_secs(6));
+            .retain(|toast| toast.at.elapsed() < Duration::from_secs(6));
         if self.toasts.is_empty() && self.state.error.is_none() {
             return;
         }
@@ -1020,10 +1042,10 @@ impl NotetakerApp {
             .show(ctx, |ui| {
                 ui.set_width(340.0);
                 let mut reveal = None;
-                for (_, text, path) in &self.toasts {
+                for toast in &self.toasts {
                     theme::bar(Palette::of(ui)).show(ui, |ui| {
-                        ui.label(text);
-                        if let Some(path) = path
+                        ui.colored_label(toast.level.color(Palette::of(ui)), &toast.text);
+                        if let Some(path) = &toast.path
                             && ui.button("Показать в папке").clicked()
                         {
                             reveal = Some(path.clone());
@@ -1035,7 +1057,10 @@ impl NotetakerApp {
                 }
                 if let Some(error) = self.state.error.clone() {
                     theme::bar(Palette::of(ui)).show(ui, |ui| {
-                        ui.colored_label(Palette::of(ui).red, notetaker_core::display_text(&error));
+                        ui.colored_label(
+                            ToastLevel::Error.color(Palette::of(ui)),
+                            notetaker_core::display_text(&error),
+                        );
                         ui.horizontal(|ui| {
                             if ui.button("Настройки").clicked() {
                                 self.show_settings = true;
@@ -1102,8 +1127,10 @@ impl NotetakerApp {
 
     fn settings_dialog(&mut self, ctx: &egui::Context) {
         let mut open = self.show_settings;
+        let mut quickstart = false;
         egui::Window::new("Настройки").open(&mut open).default_width(640.0).default_height(600.0).resizable(true).show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
+                if ui.button("Быстрый старт").clicked() { self.quickstart.open = true; quickstart = true; }
                 let settings = &mut self.state.settings_draft;
                 self.maintenance.settings(ui, settings);
                 ui.horizontal(|ui| {
@@ -1115,10 +1142,7 @@ impl NotetakerApp {
                     });
                 });
                 ui.label("Как вас зовут");
-                ui.text_edit_singleline(&mut settings.user_name);
-                ui.label("Алиасы (через запятую)");
-                ui.text_edit_singleline(&mut settings.user_aliases);
-                ui.small("Для фильтра «Мои» и имени собственного спикера по умолчанию.");
+                crate::quickstart::identity_control(ui, settings);
                 ui.label("Библиотека (полный путь)");
                 let mut library = notetaker_core::display_path(&settings.library);
                 if ui.text_edit_singleline(&mut library).changed() { settings.library = library.into(); }
@@ -1158,15 +1182,11 @@ impl NotetakerApp {
                 });
                 ui.small("0 - выключено. Завершение звонка само по себе не останавливает запись.");
                 ui.separator(); ui.heading("Модели ASR");
-                ui.label("Загрузка выполняется отдельно через notetaker-asr. Прогресс показывает этапы загрузки и установки модели и Silero VAD.");
-                ui.horizontal(|ui| {
-                    for model in MODELS {
-                        if ui.add_enabled(!self.state.downloading && !self.state.recording.busy(), egui::Button::new(format!("Скачать {model}"))).clicked() { self.state.download(model.into()); }
-                    }
-                    if self.state.downloading { ui.spinner(); }
-                });
-                if ui.add_enabled(!self.state.downloading && !self.state.recording.busy(), egui::Button::new("Скачать модели разделения собеседников (47 МБ)")).clicked() { self.state.download("diarization".into()); }
-                for line in &self.state.download_messages { ui.small(line); }
+                crate::quickstart::model_control(ui, &mut self.state, "gigaam-v3", "GigaAM v3 · русский");
+                crate::quickstart::model_control(ui, &mut self.state, "parakeet-v3", "Parakeet v3 · английский");
+                crate::quickstart::model_control(ui, &mut self.state, "diarization", "Модели разделения собеседников (47 МБ)");
+                ui.checkbox(&mut self.state.settings_draft.auto_download_models, "Скачивать модели автоматически");
+                ui.checkbox(&mut self.state.settings_draft.hide_quickstart, "Больше не показывать быстрый старт при запуске");
                 ui.collapsing("Голоса", |ui| {
                     if self.state.voices.voices.is_empty() { ui.small("Голосов пока нет. Назовите участника в транскрипте или нажмите «Это я»."); }
                     let mut delete = None;
@@ -1264,44 +1284,7 @@ impl NotetakerApp {
                 ui.small("Трей и глобальная клавиша включены только на Windows; GTK/AppIndicator не нужны для сборки Linux.");
             });
         });
-        self.show_settings = open;
-    }
-    fn first_run(&mut self, ctx: &egui::Context) {
-        if !self.state.offer_model_download {
-            return;
-        }
-        let mut open = true;
-        egui::Window::new("Локальное распознавание речи")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .show(ctx, |ui| {
-                ui.label("Модели ещё не установлены. Скачать GigaAM v3 для русского языка?");
-                ui.small("Около 171 МБ вместе с Silero VAD. Аудио обрабатывается локально.");
-                if ui
-                    .add_enabled(
-                        !self.state.downloading && !self.state.recording.busy(),
-                        egui::Button::new("Скачать GigaAM v3"),
-                    )
-                    .clicked()
-                {
-                    self.state.download("gigaam-v3".into());
-                }
-                if self.state.downloading {
-                    ui.spinner();
-                }
-                for line in &self.state.download_messages {
-                    ui.small(line);
-                }
-                if ui
-                    .button("Позже / выбрать другую модель в настройках")
-                    .clicked()
-                {
-                    self.state.offer_model_download = false;
-                    self.show_settings = true;
-                }
-            });
-        self.state.offer_model_download &= open;
+        self.show_settings = open && !quickstart;
     }
     fn call_notification(&mut self, ctx: &egui::Context) {
         let Some(prompt) = self.state.call_prompt.clone() else {
@@ -1352,6 +1335,7 @@ impl NotetakerApp {
                             ui.add_enabled_ui(
                                 self.state.ready
                                     && !self.state.downloading
+                                    && !self.state.quickstart.probe_busy
                                     && !self.state.settings_pending,
                                 |ui| {
                                     accept =
@@ -1498,12 +1482,14 @@ impl eframe::App for NotetakerApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // eframe calls this even when the root window is hidden in the tray.
         self.state.poll();
+        self.quickstart.tick(&mut self.state);
         if self.maintenance.tick(
             ctx,
             self.state.ready && self.state.settings.check_updates,
             !self.state.ready
                 || self.state.recording.busy()
                 || self.state.downloading
+                || self.state.quickstart.probe_busy
                 || self.state.settings_pending
                 || self.state.enhancing.is_some()
                 || self.state.chat.busy
@@ -1555,6 +1541,7 @@ impl eframe::App for NotetakerApp {
             !self.state.ready
                 || self.state.recording.busy()
                 || self.state.downloading
+                || self.state.quickstart.probe_busy
                 || self.state.settings_pending
                 || self.state.enhancing.is_some()
                 || self.state.chat.busy
@@ -1637,7 +1624,12 @@ impl eframe::App for NotetakerApp {
         }
         self.indicator(&ctx);
         self.call_notification(&ctx);
-        self.first_run(&ctx);
+        if self
+            .quickstart
+            .show(&ctx, &mut self.state, &mut self.maintenance)
+        {
+            self.show_settings = true;
+        }
     }
 }
 fn mode_label(mode: Mode) -> &'static str {

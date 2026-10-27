@@ -42,6 +42,9 @@ pub struct Settings {
     pub calendar_timezone: String,
     pub mcp_exclude_local: bool,
     pub check_updates: bool,
+    pub hide_quickstart: bool,
+    pub auto_download_models: bool,
+    pub auto_diarization_attempted: bool,
 }
 
 impl Default for Settings {
@@ -74,6 +77,9 @@ impl Default for Settings {
             calendar_timezone: "Europe/Moscow".into(),
             mcp_exclude_local: true,
             check_updates: true,
+            hide_quickstart: false,
+            auto_download_models: true,
+            auto_diarization_attempted: false,
         }
     }
 }
@@ -298,6 +304,19 @@ pub fn validate_hotkey(value: &str) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn quickstart_preferences_roundtrip() {
+        let settings = Settings {
+            hide_quickstart: true,
+            auto_download_models: false,
+            auto_diarization_attempted: true,
+            ..Settings::default()
+        };
+        let restored: Settings = toml::from_str(&toml::to_string(&settings).unwrap()).unwrap();
+        assert!(restored.hide_quickstart);
+        assert!(!restored.auto_download_models);
+        assert!(restored.auto_diarization_attempted);
+    }
+    #[test]
     fn existing_settings_get_detection_and_silence_defaults() {
         let settings: Settings = toml::from_str("hotkey = 'Ctrl+Alt+R'").unwrap();
         assert_eq!(settings.theme, crate::theme::Theme::System);
@@ -306,6 +325,9 @@ mod tests {
         assert_eq!(settings.speakers, None);
         assert!(settings.detect_calls);
         assert!(settings.check_updates);
+        assert!(!settings.hide_quickstart);
+        assert!(settings.auto_download_models);
+        assert!(!settings.auto_diarization_attempted);
         assert!(settings.detect_browsers);
         assert!(settings.detect_any_microphone);
         assert!(settings.call_apps.is_empty());

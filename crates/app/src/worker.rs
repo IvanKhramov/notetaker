@@ -239,6 +239,7 @@ pub enum Command {
         settings: Settings,
         llm: LlmSettings,
         calendar_secrets: Vec<(String, String)>,
+        persist_llm: bool,
     },
 }
 // Rare worker-to-UI messages; boxing variants buys nothing measurable.
@@ -275,7 +276,7 @@ pub enum Event {
         settings: Settings,
         llm: LlmSettings,
         warnings: Vec<String>,
-        needs_model: bool,
+        models: crate::quickstart::Models,
         llm_configured: bool,
     },
     Listed {
@@ -322,8 +323,8 @@ pub enum Event {
     },
     Voices(Result<notetaker_core::VoiceLibrary, String>),
     DownloadProgress(String),
-    Downloaded(Result<(), String>),
-    SettingsSaved(Result<(Settings, LlmSettings), String>),
+    Downloaded(Result<(), String>, crate::quickstart::Models),
+    SettingsSaved(Result<(Settings, LlmSettings), String>, bool),
 }
 
 pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
@@ -344,30 +345,7 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
         {
             warnings.push(format!("Не удалось очистить старые файлы: {error:#}"));
         }
-        // Reuse the worker's model manifest and path resolution; do not load
-        // hundreds of MB of weights just to check first-run readiness.
-        let needs_model = !crate::config::MODELS.iter().any(|model| {
-            asr_binary().is_ok_and(|binary| {
-                background_process(&binary)
-                    .args(["check-model", model])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .is_ok_and(|status| status.success())
-            })
-        });
-        if settings.diarize
-            && !asr_binary().is_ok_and(|binary| {
-                background_process(&binary)
-                    .args(["check-model", "diarization"])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .is_ok_and(|s| s.success())
-            })
-        {
-            warnings.push("Для разделения собеседников скачайте модели в настройках. Транскрипт работает и без них.".into());
-        }
+        let models = crate::quickstart::check_models();
         let mut voice_library_enabled = settings.voice_library;
         let _ = events.send(Event::Voices(
             Library::open(&settings.library)
@@ -379,7 +357,7 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
             settings,
             llm,
             warnings,
-            needs_model,
+            models,
             llm_configured,
         });
         for command in rx {
@@ -686,13 +664,15 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                     let events = events.clone();
                     thread::spawn(move || {
                         let result = download(&model, &events).map_err(error_text);
-                        let _ = events.send(Event::Downloaded(result));
+                        let _ = events
+                            .send(Event::Downloaded(result, crate::quickstart::check_models()));
                     });
                 }
                 Command::Settings {
                     settings,
                     llm,
                     calendar_secrets,
+                    persist_llm,
                 } => {
                     let result = (|| {
                         settings.validate()?;
@@ -712,7 +692,9 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                                 .context("Укажите приватный URL календаря")?;
                         }
                         Library::open(&settings.library)?;
-                        atomic_write(&notetaker_llm::Config::path()?, &llm_text)?;
+                        if persist_llm {
+                            atomic_write(&notetaker_llm::Config::path()?, &llm_text)?;
+                        }
                         atomic_write(&Settings::path()?, &toml::to_string_pretty(&settings)?)?;
                         for subscription in &previous.calendars {
                             if !settings.calendars.iter().any(|s| s.id == subscription.id) {
@@ -728,7 +710,7 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                         Ok((settings, llm))
                     })()
                     .map_err(error_text);
-                    let _ = events.send(Event::SettingsSaved(result));
+                    let _ = events.send(Event::SettingsSaved(result, persist_llm));
                 }
             }
         }
@@ -896,7 +878,7 @@ impl Asr for AppAsr {
         Ok(segments)
     }
 }
-fn background_process(binary: &Path) -> Process {
+pub(crate) fn background_process(binary: &Path) -> Process {
     let mut command = Process::new(binary);
     command.stdin(Stdio::null());
     #[cfg(windows)]

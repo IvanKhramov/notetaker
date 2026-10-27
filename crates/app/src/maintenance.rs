@@ -162,7 +162,7 @@ impl Maintenance {
             }
         }
     }
-    fn windows_settings(&mut self, ui: &mut egui::Ui) {
+    pub fn windows_settings(&mut self, ui: &mut egui::Ui) {
         #[cfg(windows)]
         {
             if ui
@@ -175,7 +175,13 @@ impl Maintenance {
             }
         }
         #[cfg(not(windows))]
-        let _ = ui;
+        {
+            let mut disabled = false;
+            ui.add_enabled(
+                false,
+                egui::Checkbox::new(&mut disabled, "Запускать при входе в Windows"),
+            );
+        }
     }
 }
 

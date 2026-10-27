@@ -106,6 +106,9 @@ impl Connections {
         for card in &mut self.cards {
             if let Some(provider) = settings.providers.iter().find(|p| p.id == card.provider.id) {
                 card.provider = provider.clone();
+                if card.status == "Не подключено" {
+                    card.status = "Настроено · нажмите Проверить".into();
+                }
             }
         }
     }
@@ -136,12 +139,59 @@ impl Connections {
             }
         }
     }
+    pub fn provider_title<'a>(&'a self, id: &'a str) -> &'a str {
+        self.cards
+            .iter()
+            .find(|card| card.provider.id == id)
+            .map_or(id, |card| card.title)
+    }
+    pub fn provider_index(&self, id: &str) -> Option<usize> {
+        self.cards.iter().position(|card| card.provider.id == id)
+    }
+    pub fn provider_error(&self, id: &str) -> Option<&str> {
+        self.cards
+            .iter()
+            .find(|card| card.provider.id == id)
+            .and_then(|card| {
+                card.status
+                    .starts_with("Ошибка:")
+                    .then_some(card.status.as_str())
+            })
+    }
+    pub fn quickstart_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        default: &str,
+        can_default: bool,
+        selected: &mut usize,
+    ) -> Vec<Action> {
+        ui.horizontal_wrapped(|ui| {
+            for (index, card) in self.cards.iter().enumerate() {
+                ui.selectable_value(selected, index, card.title);
+            }
+        });
+        self.cards_ui(ui, default, can_default, Some(*selected))
+    }
     pub fn ui(&mut self, ui: &mut egui::Ui, default: &str, can_default: bool) -> Vec<Action> {
+        self.cards_ui(ui, default, can_default, None)
+    }
+    fn cards_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        default: &str,
+        can_default: bool,
+        selected: Option<usize>,
+    ) -> Vec<Action> {
         let mut actions = Vec::new();
         for (index, card) in self.cards.iter_mut().enumerate() {
+            if selected.is_some_and(|selected| selected != index) {
+                continue;
+            }
             ui.push_id(index, |ui| { ui.group(|ui| {
                 ui.heading(card.title);
-                ui.label(&card.status);
+                if card.status.starts_with("Ошибка:") {
+                    ui.colored_label(crate::theme::Palette::of(ui).red, &card.status);
+                } else { ui.label(&card.status); }
                 let mut operation = None;
                 ui.add_enabled_ui(!card.busy, |ui| {
                     if let Some(kind) = card.cli {
@@ -185,11 +235,11 @@ impl Connections {
                                 for model in &card.models { ui.selectable_value(&mut card.provider.model, model.clone(), model); }
                             });
                         }
-                        if ui.button("Загрузить список моделей").clicked() { operation = Some(Operation::Models); }
+                        if selected.is_none() && ui.button("Загрузить список моделей").clicked() { operation = Some(Operation::Models); }
                     }
                     ui.horizontal(|ui| {
                         if ui.button("Проверить").clicked() { operation = Some(Operation::Check); }
-                        if ui.add_enabled(can_default, egui::Button::new("Использовать по умолчанию")).clicked() { operation = Some(Operation::Default); }
+                        if ui.add_enabled(can_default, egui::Button::new(if selected.is_some() { "Подключить" } else { "Использовать по умолчанию" })).clicked() { operation = Some(Operation::Default); }
                         if default == card.provider.id { ui.small("По умолчанию"); }
                     });
                 });
