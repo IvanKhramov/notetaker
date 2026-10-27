@@ -81,6 +81,8 @@ pub fn enhance(
     provider: &dyn Provider,
     on_text: &mut dyn FnMut(&str),
 ) -> Result<String> {
+    let notes = notes_without_images(notes);
+    let notes = notes.as_str();
     let config = provider.config();
     config.validate(meta.mode)?;
     let output_tokens = (config.context_tokens / 4).clamp(1, 2048);
@@ -131,6 +133,29 @@ pub fn enhance(
         &prompt(meta, notes, template, &evidence, FINAL, output_tokens),
         on_text,
     )
+}
+
+fn notes_without_images(notes: &str) -> String {
+    let images = notetaker_core::markdown_images(notes);
+    let parser = pulldown_cmark::Parser::new(notes);
+    let mut ranges: Vec<_> = parser
+        .reference_definitions()
+        .iter()
+        .filter(|(_, definition)| {
+            images
+                .iter()
+                .any(|(_, destination)| destination == definition.dest.as_ref())
+        })
+        .map(|(_, definition)| definition.span.clone())
+        .chain(images.iter().map(|(range, _)| range.clone()))
+        .collect();
+    ranges.sort_by_key(|range| range.start);
+    ranges.dedup();
+    let mut text = notes.to_owned();
+    for range in ranges.into_iter().rev() {
+        text.replace_range(range, "[изображение]");
+    }
+    text
 }
 
 fn complete(
@@ -229,6 +254,19 @@ fn split_text(text: &str, max_chars: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_markdown_never_reaches_prompts() {
+        let notes = "До ![](attachments/a.png) и ![private](data:image/png;base64,SECRET) после";
+        assert_eq!(
+            notes_without_images(notes),
+            "До [изображение] и [изображение] после"
+        );
+        assert_eq!(
+            notes_without_images("![ref][p]\n\n[p]: attachments/a.png"),
+            "[изображение]\n\n[изображение]"
+        );
+    }
 
     #[test]
     fn splitting_preserves_unicode_and_all_input() {
