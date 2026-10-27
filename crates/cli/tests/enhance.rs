@@ -13,8 +13,14 @@ use std::{
 
 use serde_json::{Value, json};
 
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[test]
 fn enhance_cli_roundtrip_with_both_providers_and_map_reduce() {
+    let _serial = serial();
     for kind in ["openai", "anthropic"] {
         let directory = tempfile::tempdir().unwrap();
         let meeting = directory.path().join("library/meeting");
@@ -150,5 +156,85 @@ fn enhance_cli_roundtrip_with_both_providers_and_map_reduce() {
             expected
         );
         assert!(server.join().unwrap() > 2);
+    }
+}
+
+#[test]
+fn ctrl_c_cancels_cli_provider_and_terminates_its_process_group() {
+    use std::os::unix::{fs::PermissionsExt, process::CommandExt};
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let library = notetaker_core::Library::open(dir.path().join("library")).unwrap();
+    let mut meta = notetaker_core::MeetingMeta::new("Cancel", chrono::Utc::now());
+    meta.mode = notetaker_core::Mode::Hybrid;
+    let meeting = library.create_meeting(meta).unwrap();
+    meeting.write_notes("notes").unwrap();
+    meeting.write_enhanced("keep summary").unwrap();
+    let config_dir = dir.path().join("config/notetaker");
+    fs::create_dir_all(&config_dir).unwrap();
+    let script = dir.path().join("claude");
+    fs::write(&script, "#!/bin/sh\ncat >/dev/null\nsleep 30 &\necho $! > \"$(dirname \"$0\")/descendant\"\necho $$ > \"$(dirname \"$0\")/ready\"\nwait\n").unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        "[defaults]\nlocal='cli'\nhybrid='cli'\n[[providers]]\nid='cli'\nkind='claude-cli'\n",
+    )
+    .unwrap();
+    let mut paths = vec![dir.path().to_owned()];
+    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_notetaker"))
+        .arg("enhance")
+        .arg(meeting.path())
+        .env("XDG_CONFIG_HOME", dir.path().join("config"))
+        .env("PATH", std::env::join_paths(paths).unwrap())
+        .process_group(0)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !fs::read_to_string(dir.path().join("ready"))
+        .is_ok_and(|pid| pid.trim().parse::<u32>().is_ok())
+    {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "enhance exited before provider started"
+        );
+        assert!(Instant::now() < deadline, "provider startup timed out");
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        Command::new("kill")
+            .args(["-INT", &child.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "enhance did not stop on Ctrl+C");
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert!(!status.success());
+    assert_eq!(
+        fs::read_to_string(meeting.path().join("enhanced.md")).unwrap(),
+        "keep summary"
+    );
+    for name in ["ready", "descendant"] {
+        let pid = fs::read_to_string(dir.path().join(name)).unwrap();
+        // An orphaned grandchild can briefly be a zombie until init reaps it.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match fs::read_to_string(format!("/proc/{}/stat", pid.trim())) {
+                Ok(stat) if !stat.split_once(") ").unwrap().1.starts_with('Z') => {
+                    assert!(Instant::now() < deadline, "provider process still running");
+                    thread::sleep(Duration::from_millis(10));
+                }
+                _ => break,
+            }
+        }
     }
 }

@@ -36,6 +36,9 @@ pub fn run(args: Args) -> Result<()> {
         .unwrap_or("general");
     let template = Template::load(library.root(), template_id)?;
     let config = Config::load()?;
+    let cancel = Cancellation::default();
+    let signal = cancel.clone();
+    ctrlc::set_handler(move || signal.cancel()).context("install Ctrl+C handler")?;
     let provider = create_provider(
         config.select_scenario(
             meta.mode,
@@ -43,7 +46,7 @@ pub fn run(args: Args) -> Result<()> {
             args.provider.as_deref(),
         )?,
         meta.mode,
-        Cancellation::default(),
+        cancel,
     )?;
     let result = enhance_meeting(
         &meeting,

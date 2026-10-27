@@ -88,7 +88,13 @@ pub fn run(args: Args) -> Result<()> {
         },
     )?;
     let stop = session.stop_handle();
-    ctrlc::set_handler(move || stop.stop()).context("install Ctrl+C handler")?;
+    let cancel = Cancellation::default();
+    let signal = cancel.clone();
+    ctrlc::set_handler(move || {
+        signal.cancel();
+        stop.stop();
+    })
+    .context("install Ctrl+C handler")?;
     eprintln!("Импорт: {}", session.meeting().path().display());
     for event in session.events() {
         match event {
@@ -104,14 +110,14 @@ pub fn run(args: Args) -> Result<()> {
     let meeting = session.wait()?;
     library.reindex_incremental()?;
     println!("{}", meeting.path().display());
-    if settings.auto_summary && !args.no_summary {
+    if settings.auto_summary && !args.no_summary && !cancel.is_cancelled() {
         let summary = (|| -> Result<()> {
             let template = Template::load(library.root(), "general")?;
             let config = Config::load()?;
             let provider = create_provider(
                 config.select_scenario(mode, notetaker_llm::Scenario::Summary, None)?,
                 mode,
-                Cancellation::default(),
+                cancel,
             )?;
             let result = enhance_meeting_if_unedited(
                 &meeting,
