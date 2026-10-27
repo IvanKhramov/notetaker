@@ -319,7 +319,6 @@ mod tests {
     use super::*;
     use notetaker_core::{Channel, MeetingMeta, Segment, Source, SpeakerId, Transcript};
     use std::io::Cursor;
-    #[cfg(unix)]
     #[test]
     fn tasks_recheck_source_privacy() {
         let root = tempfile::tempdir().unwrap();
@@ -367,6 +366,7 @@ mod tests {
                 .is_err()
         );
     }
+    #[cfg(unix)]
     #[test]
     fn all_tools_refuse_sources_linked_outside_the_specific_meeting() {
         use std::os::unix::fs::symlink;
