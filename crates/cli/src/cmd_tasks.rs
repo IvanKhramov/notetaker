@@ -59,7 +59,7 @@ pub fn run(args: Args) -> Result<()> {
             task.owner,
             task.due.map_or(task.due_text, |date| date.to_string()),
             task.meeting_title,
-            task.path.join("enhanced.md").display(),
+            notetaker_core::display_path(task.path.join("enhanced.md")),
             task.line
         );
     }

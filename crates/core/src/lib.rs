@@ -7,6 +7,8 @@ mod identity;
 mod index;
 pub use identity::configured_user_name;
 mod model;
+mod paths;
+pub use paths::{display_path, display_text};
 mod speakers;
 mod storage;
 mod tasks;

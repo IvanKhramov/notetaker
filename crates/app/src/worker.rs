@@ -742,7 +742,7 @@ pub fn summary_can_overwrite(data: &DocumentData) -> bool {
 }
 
 fn error_text(error: anyhow::Error) -> String {
-    format!("{error:#}")
+    notetaker_core::display_text(&format!("{error:#}"))
 }
 fn list(root: &Path, query: &str) -> Result<Vec<MeetingRow>> {
     let library = Library::open(root)?;
@@ -1018,7 +1018,7 @@ fn reveal_file(path: &Path) -> Result<()> {
     #[cfg(windows)]
     let mut command = {
         let mut command = Process::new("explorer.exe");
-        command.arg(format!("/select,{}", path.display()));
+        command.arg(format!("/select,{}", notetaker_core::display_path(path)));
         command
     };
     #[cfg(not(windows))]
@@ -1062,7 +1062,7 @@ pub fn asr_binary() -> Result<PathBuf> {
     ensure!(
         path.is_file(),
         "Не найден {}. Поместите notetaker-asr рядом с приложением (соберите notetaker-asr-worker).",
-        path.display()
+        notetaker_core::display_path(path)
     );
     Ok(path)
 }

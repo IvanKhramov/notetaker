@@ -956,7 +956,8 @@ impl NotetakerApp {
             if self.toasts.len() == 5 {
                 self.toasts.pop_front();
             }
-            self.toasts.push_back((Instant::now(), text, None));
+            self.toasts
+                .push_back((Instant::now(), notetaker_core::display_text(&text), None));
         }
         for path in self.state.exported.drain(..) {
             if self.toasts.len() == 5 {
@@ -992,7 +993,7 @@ impl NotetakerApp {
                 }
                 if let Some(error) = self.state.error.clone() {
                     theme::bar(Palette::of(ui)).show(ui, |ui| {
-                        ui.colored_label(Palette::of(ui).red, error);
+                        ui.colored_label(Palette::of(ui).red, notetaker_core::display_text(&error));
                         ui.horizontal(|ui| {
                             if ui.button("Настройки").clicked() {
                                 self.show_settings = true;
@@ -1076,7 +1077,7 @@ impl NotetakerApp {
                 ui.text_edit_singleline(&mut settings.user_aliases);
                 ui.small("Для фильтра «Мои» и имени собственного спикера по умолчанию.");
                 ui.label("Библиотека (полный путь)");
-                let mut library = settings.library.to_string_lossy().into_owned();
+                let mut library = notetaker_core::display_path(&settings.library);
                 if ui.text_edit_singleline(&mut library).changed() { settings.library = library.into(); }
                 model_selector(ui, "default_model", &mut settings.model);
                 ui.checkbox(&mut settings.diarize, "Разделять собеседников");
@@ -1490,7 +1491,7 @@ impl eframe::App for NotetakerApp {
         let dropped = ctx.input_mut(|input| std::mem::take(&mut input.raw.dropped_files));
         if self.show_import {
             if let Some(file) = dropped.first() {
-                self.import_path = file.path().to_string_lossy().into_owned();
+                self.import_path = notetaker_core::display_path(file.path());
             }
         } else {
             self.state.attach(
@@ -1611,14 +1612,11 @@ fn duration_label(seconds: Option<i64>) -> String {
 }
 // Pure string conversion keeps Windows canonical paths testable on every OS.
 fn file_uri(path: &str) -> Option<String> {
+    let path = notetaker_core::display_path(path);
     let path = if path.starts_with('/') {
-        path.to_owned()
-    } else if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
-        format!("//{}", unc.replace('\\', "/"))
+        path
     } else {
-        path.strip_prefix(r"\\?\")
-            .unwrap_or(path)
-            .replace('\\', "/")
+        path.replace('\\', "/")
     };
     let prefix = if path.starts_with("//") {
         "file:"
