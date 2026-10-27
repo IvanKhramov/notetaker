@@ -24,6 +24,7 @@ fn transcript() -> Transcript {
             text: content.into(),
             source: Source::Final,
             edited: false,
+            lang: None,
         });
     }
     text.rename_speaker("s1", "Иван");

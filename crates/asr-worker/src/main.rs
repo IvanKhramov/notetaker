@@ -1,7 +1,9 @@
 //! Isolated speech recognition process. stdout is exclusively JSON lines.
+mod bench;
 mod diarization;
 mod models;
 mod recognizer;
+mod tuning;
 
 use anyhow::{Context, Result, bail};
 use notetaker_asr_proto::{
@@ -23,9 +25,19 @@ fn run() -> Result<()> {
         [] => serve(&mut io::stdin().lock(), &mut io::stdout().lock()),
         [command, id] if command == "download" => models::download(id),
         [command, id] if command == "check-model" => models::check(id),
+        [command, rest @ ..] if command == "bench" => bench::run(rest),
+        [command, provider] if command == "check-provider" => {
+            let provider = match provider.as_str() {
+                "cpu" => Provider::Cpu,
+                "directml" => Provider::Directml,
+                _ => bail!("provider must be cpu or directml"),
+            };
+            println!("{}", recognizer::provider_name(provider)?);
+            Ok(())
+        }
         [flag] if flag == "--help" || flag == "-h" => {
             eprintln!(
-                "Usage: notetaker-asr [download <gigaam-v3|parakeet-v3|silero-vad|diarization> | check-model <model_id>]\nWithout arguments: JSON-lines worker on stdin/stdout."
+                "Usage: notetaker-asr [download <auto|gigaam-v3|parakeet-v3|whisper-tiny|silero-vad|diarization> | check-model <model_id> | check-provider <cpu|directml>]\nbench <wav> [--model auto|gigaam-v3|parakeet-v3] [--provider cpu|directml] [--threads 0..8] [--runs 1..10]\nWithout arguments: JSON-lines worker on stdin/stdout."
             );
             Ok(())
         }
@@ -41,6 +53,7 @@ fn serve(input: &mut impl BufRead, output: &mut impl Write) -> Result<()> {
         },
     )?;
     let mut recognizer = None;
+    let mut threads = tuning::num_threads(0)?;
     loop {
         let request: Request = match read_message(input) {
             Ok(Some(request)) => request,
@@ -69,19 +82,25 @@ fn serve(input: &mut impl BufRead, output: &mut impl Write) -> Result<()> {
                 model_id,
                 provider,
                 hotwords,
+                num_threads,
             } => {
                 // Free the old model first: two recognizers can exceed the memory budget.
                 recognizer = None;
-                Recognizer::load(&model_id, provider, &hotwords).map(|loaded| {
-                    recognizer = Some(loaded);
-                    Response::ModelLoaded {
-                        model_id,
-                        provider: match provider {
-                            Provider::Auto => Provider::Cpu,
-                            p => p,
-                        },
-                    }
-                })
+                tuning::num_threads(num_threads)
+                    .and_then(|n| {
+                        threads = n;
+                        Recognizer::load(&model_id, provider, &hotwords, threads)
+                    })
+                    .map(|loaded| {
+                        recognizer = Some(loaded);
+                        Response::ModelLoaded {
+                            model_id,
+                            provider: match provider {
+                                Provider::Auto => Provider::Cpu,
+                                p => p,
+                            },
+                        }
+                    })
             }
             Request::Diarize {
                 id,
@@ -91,7 +110,7 @@ fn serve(input: &mut impl BufRead, output: &mut impl Write) -> Result<()> {
                 embeddings,
             } => {
                 recognizer = None;
-                diarization::diarize(&wav_path, speakers, embeddings)
+                diarization::diarize(&wav_path, speakers, embeddings, threads)
                     .map(|result| Response::Diarized { id, result })
             }
             Request::Embed {
@@ -100,7 +119,7 @@ fn serve(input: &mut impl BufRead, output: &mut impl Write) -> Result<()> {
                 ranges,
             } => {
                 recognizer = None;
-                diarization::embed(&wav_path, &ranges)
+                diarization::embed(&wav_path, &ranges, threads)
                     .map(|embedding| Response::Embedded { id, embedding })
             }
             Request::Transcribe {

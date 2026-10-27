@@ -341,7 +341,8 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
     let (events, messages) = mpsc::channel();
     thread::spawn(move || {
         let mut warnings = Vec::new();
-        let settings = Settings::load().unwrap_or_else(|error| {
+        let new_install = Settings::path().is_ok_and(|path| !path.exists());
+        let mut settings = Settings::load().unwrap_or_else(|error| {
             warnings.push(format!("{error:#}"));
             Settings::default()
         });
@@ -355,6 +356,12 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
             warnings.push(format!("Не удалось очистить старые файлы: {error:#}"));
         }
         let models = crate::quickstart::check_models();
+        if new_install
+            && models.gigaam == crate::quickstart::Status::Ready
+            && models.parakeet == crate::quickstart::Status::Ready
+        {
+            settings.model = "auto".into();
+        }
         let mut voice_library_enabled = settings.voice_library;
         let _ = events.send(Event::Voices(
             Library::open(&settings.library)
@@ -811,8 +818,12 @@ struct AppAsr {
     client: Option<notetaker_asr_proto::AsrClient>,
     preloaded: bool,
     request: u64,
+    notice: Option<String>,
 }
 impl Asr for AppAsr {
+    fn take_notice(&mut self) -> Option<String> {
+        self.notice.take()
+    }
     fn set_timeout(&mut self, timeout: Duration) {
         self.config.timeout = self.config.timeout.max(timeout);
         if let Some(client) = &mut self.client {
@@ -830,15 +841,8 @@ impl Asr for AppAsr {
             return Ok(());
         }
         self.client.take();
-        let mut client = notetaker_asr_proto::AsrClient::spawn_command(
-            background_process(&self.config.binary),
-            self.config.timeout,
-        )?;
-        client.load_model_with_hotwords(
-            &self.config.model,
-            self.config.provider,
-            &self.config.vocabulary.hotwords(),
-        )?;
+        let (client, notice) = self.config.start_client(background_process)?;
+        self.notice = notice;
         self.client = Some(client);
         Ok(())
     }
@@ -919,6 +923,8 @@ fn record(request: RecordRequest, import_file: Option<PathBuf>, events: &Sender<
         let binary = asr_binary()?;
         let mut config = AsrConfig::new(&request.settings.model)?;
         config.binary = binary;
+        config.provider = request.settings.asr_acceleration;
+        config.num_threads = request.settings.asr_threads;
         config.vocabulary = notetaker_core::Vocabulary::with_library(
             &request.settings.vocabulary,
             &request.settings.library,
@@ -928,6 +934,7 @@ fn record(request: RecordRequest, import_file: Option<PathBuf>, events: &Sender<
             client: None,
             preloaded: false,
             request: 0,
+            notice: None,
         };
         asr.start()
             .context("Модель ASR недоступна. Откройте настройки и нажмите «Скачать»")?;

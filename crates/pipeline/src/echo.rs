@@ -93,6 +93,7 @@ mod tests {
             text: text.into(),
             source: Source::Final,
             edited: false,
+            lang: None,
         }
     }
 

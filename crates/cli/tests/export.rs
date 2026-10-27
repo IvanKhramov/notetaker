@@ -23,6 +23,7 @@ fn export_cli_matches_all_core_formats_and_rejects_unknown_format() {
         text: "Текст, с \"кавычками\"".into(),
         source: Source::Final,
         edited: false,
+        lang: None,
     });
     meeting.write_transcript(&transcript).unwrap();
     for format in ExportFormat::ALL {

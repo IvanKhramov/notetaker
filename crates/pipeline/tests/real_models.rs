@@ -83,3 +83,95 @@ fn record_from_files_with_real_models() {
         }
     }
 }
+
+#[test]
+#[ignore = "requires both ASR models, Whisper tiny, Silero VAD and built worker"]
+fn auto_import_persists_languages_and_vocabulary_corrections() {
+    use notetaker_pipeline::{DiarizationConfig, RecordingConfig, RecordingSession};
+    let root =
+        PathBuf::from(std::env::var_os("NOTETAKER_MODELS_DIR").expect("set NOTETAKER_MODELS_DIR"));
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("ru-en.wav");
+    // Both fixture rates divide 48 kHz exactly. Repetition avoids linking the
+    // native ASR runtime into this frontend crate; import resamples to 16 kHz.
+    let mut output = hound::WavWriter::create(
+        &path,
+        hound::WavSpec {
+            channels: 1,
+            sample_rate: 48000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        },
+    )
+    .unwrap();
+    for (model, wav) in [("gigaam-v3", "example.wav"), ("parakeet-v3", "en.wav")] {
+        let mut input =
+            hound::WavReader::open(root.join(model).join("test_wavs").join(wav)).unwrap();
+        assert_eq!(48000 % input.spec().sample_rate, 0);
+        let repeat = 48000 / input.spec().sample_rate;
+        for sample in input.samples::<i16>() {
+            let sample = sample.unwrap();
+            for _ in 0..repeat {
+                output.write_sample(sample).unwrap();
+            }
+        }
+        for _ in 0..48000 {
+            output.write_sample(0i16).unwrap();
+        }
+    }
+    output.finalize().unwrap();
+    let library = Library::open(directory.path().join("library")).unwrap();
+    let mut config = AsrConfig::new("auto").unwrap();
+    config.num_threads = 2;
+    config.vocabulary =
+        notetaker_core::Vocabulary::parse("Lukomorye = лукоморья\nCountry = country");
+    let session = RecordingSession::import(
+        library,
+        &path,
+        notetaker_core::Mode::Local,
+        config,
+        RecordingConfig {
+            diarization: DiarizationConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let meeting = session.wait().unwrap();
+    let transcript = meeting.read_transcript().unwrap();
+    assert!(
+        transcript
+            .segments
+            .iter()
+            .any(|s| s.lang.as_deref() == Some("ru") && s.text.contains("Lukomorye"))
+    );
+    assert!(
+        transcript
+            .segments
+            .iter()
+            .any(|s| s.lang.as_deref() == Some("en") && s.text.contains("Country"))
+    );
+    assert!(
+        transcript
+            .segments
+            .iter()
+            .all(|s| s.source == Source::Final && s.end_ms > s.start_ms)
+    );
+    assert!(
+        transcript
+            .segments
+            .windows(2)
+            .all(|s| s[0].start_ms <= s[1].start_ms)
+    );
+    // Editing and saving in a frontend must retain optional ASR metadata.
+    meeting
+        .update_transcript(|t| t.segments[0].edited = true)
+        .unwrap();
+    assert_eq!(
+        meeting.read_transcript().unwrap().segments[0].lang,
+        transcript.segments[0].lang
+    );
+    println!("Auto import: {:?}", transcript.segments);
+}

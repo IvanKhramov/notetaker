@@ -191,10 +191,21 @@ impl AsrClient {
         provider: Provider,
         hotwords: &[String],
     ) -> Result<Provider, ClientError> {
+        self.load_model_with_options(model_id, provider, hotwords, 0)
+    }
+
+    pub fn load_model_with_options(
+        &mut self,
+        model_id: &str,
+        provider: Provider,
+        hotwords: &[String],
+        num_threads: u32,
+    ) -> Result<Provider, ClientError> {
         self.send(&Request::LoadModel {
             model_id: model_id.into(),
             provider,
             hotwords: hotwords.to_vec(),
+            num_threads,
         })?;
         match self.receive()? {
             Response::ModelLoaded {

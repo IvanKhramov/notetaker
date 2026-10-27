@@ -3,7 +3,8 @@ use anyhow::{Context, Result, ensure};
 use notetaker_asr_proto::{AudioInput, Provider, Segment};
 use sherpa_onnx::{
     LinearResampler, OfflineRecognizer, OfflineRecognizerConfig, OfflineTransducerModelConfig,
-    SileroVadModelConfig, VadModelConfig, VoiceActivityDetector,
+    SileroVadModelConfig, SpokenLanguageIdentification, SpokenLanguageIdentificationConfig,
+    SpokenLanguageIdentificationWhisperConfig, VadModelConfig, VoiceActivityDetector,
 };
 use std::{io::Write, path::Path};
 
@@ -11,6 +12,9 @@ const SAMPLE_RATE: u64 = 16_000;
 
 pub struct Recognizer {
     asr: OfflineRecognizer,
+    english: Option<OfflineRecognizer>,
+    language_id: Option<SpokenLanguageIdentification>,
+    language: Option<&'static str>,
     vad: VoiceActivityDetector,
 }
 
@@ -18,6 +22,7 @@ pub fn provider_name(provider: Provider) -> Result<&'static str> {
     match provider {
         // Auto deliberately favors portable CPU; explicit CUDA opts into GPU.
         Provider::Cpu | Provider::Auto => Ok("cpu"),
+        Provider::Directml => anyhow::bail!("GPU (DirectML): недоступно в этой сборке"),
         Provider::Cuda => {
             ensure!(
                 cfg!(feature = "cuda"),
@@ -35,30 +40,34 @@ fn native_path(path: &Path) -> Result<String> {
 }
 
 impl Recognizer {
-    pub fn load(id: &str, provider: Provider, hotwords: &[String]) -> Result<Self> {
+    pub fn load(id: &str, provider: Provider, hotwords: &[String], threads: i32) -> Result<Self> {
         let provider = provider_name(provider)?;
-        let model = models::manifest(id)?;
-        ensure!(
-            id != models::SILERO.id,
-            "silero-vad is a detector, not an ASR model"
-        );
+        models::check(id)?;
         let root = models::models_dir()?
             .canonicalize()
             .context("model directory missing; run notetaker-asr download <model_id>")?;
-        let directory = models::installed(&root, model)?;
         let vad_directory = models::installed(&root, &models::SILERO)?;
-        let mut config = OfflineRecognizerConfig::default();
-        config.model_config.transducer = transducer_config(&directory, model)?;
-        config.model_config.tokens = Some(native_path(&directory.join("tokens.txt"))?);
-        config.model_config.num_threads = 2;
-        config.model_config.provider = Some(provider.into());
-        config.model_config.model_type = Some("nemo_transducer".into());
-        config.decoding_method = Some("greedy_search".into());
-        // NeMo RNNT and TDT support contextual biasing in sherpa 2.0.0.
-        // Derive equal-score BPE pieces as in upstream's Parakeet example.
-        let _hotword_files = configure_hotwords(&mut config, &directory, hotwords)?;
-        let asr = OfflineRecognizer::create(&config)
-            .context("cannot create recognizer; see stderr for sherpa diagnostics")?;
+        let auto = id == "auto";
+        let primary = if auto { models::GIGAAM.id } else { id };
+        let asr = load_asr(&root, primary, provider, hotwords, threads)?;
+        let (english, language_id) = if auto {
+            let english = load_asr(&root, models::PARAKEET.id, provider, hotwords, threads)?;
+            let directory = models::installed(&root, &models::WHISPER_TINY)?;
+            let config = SpokenLanguageIdentificationConfig {
+                whisper: SpokenLanguageIdentificationWhisperConfig {
+                    encoder: Some(native_path(&directory.join("tiny-encoder.int8.onnx"))?),
+                    decoder: Some(native_path(&directory.join("tiny-decoder.int8.onnx"))?),
+                    ..Default::default()
+                },
+                num_threads: threads,
+                ..Default::default()
+            };
+            let language_id = SpokenLanguageIdentification::create(&config)
+                .context("cannot create Whisper tiny language identifier")?;
+            (Some(english), Some(language_id))
+        } else {
+            (None, None)
+        };
         let vad_config = VadModelConfig {
             silero_vad: SileroVadModelConfig {
                 model: Some(native_path(&vad_directory.join("silero_vad.onnx"))?),
@@ -69,13 +78,19 @@ impl Recognizer {
                 max_speech_duration: 29.0,
             },
             sample_rate: SAMPLE_RATE as i32,
-            num_threads: 1,
+            num_threads: threads,
             provider: Some("cpu".into()),
             ..Default::default()
         };
         let vad =
             VoiceActivityDetector::create(&vad_config, 30.0).context("cannot create Silero VAD")?;
-        Ok(Self { asr, vad })
+        Ok(Self {
+            asr,
+            english,
+            language_id,
+            vad,
+            language: (id == models::GIGAAM.id).then_some("ru"),
+        })
     }
 
     pub fn transcribe(
@@ -132,9 +147,28 @@ impl Recognizer {
             let start = usize::try_from(speech.start()).context("negative VAD start")?;
             let end = (start + speech.samples().len()).min(input_len);
             if start < end {
-                let stream = self.asr.create_stream();
-                stream.accept_waveform(SAMPLE_RATE as i32, &speech.samples()[..end - start]);
-                self.asr.decode(&stream);
+                let samples = &speech.samples()[..end - start];
+                let lang = if let Some(identifier) = &self.language_id {
+                    let stream = identifier.create_stream();
+                    stream.accept_waveform(SAMPLE_RATE as i32, samples);
+                    let result = identifier
+                        .compute(&stream)
+                        .context("language identifier returned no result")?;
+                    ensure!(!result.lang.is_empty(), "language identification failed");
+                    Some(result.lang)
+                } else {
+                    self.language.map(str::to_owned)
+                };
+                // All non-Russian languages go to multilingual Parakeet. Keep
+                // the actual detected language rather than labelling them English.
+                let asr = if lang.as_deref().is_some_and(|lang| lang != "ru") {
+                    self.english.as_ref().unwrap_or(&self.asr)
+                } else {
+                    &self.asr
+                };
+                let stream = asr.create_stream();
+                stream.accept_waveform(SAMPLE_RATE as i32, samples);
+                asr.decode(&stream);
                 let result = stream
                     .get_result()
                     .context("recognizer returned no result")?;
@@ -144,6 +178,7 @@ impl Recognizer {
                         start_ms: offset_ms + start as u64 * 1000 / SAMPLE_RATE,
                         end_ms: offset_ms + end as u64 * 1000 / SAMPLE_RATE,
                         text: text.into(),
+                        lang,
                     });
                 }
             }
@@ -151,6 +186,31 @@ impl Recognizer {
         }
         Ok(())
     }
+}
+
+fn load_asr(
+    root: &Path,
+    id: &str,
+    provider: &str,
+    hotwords: &[String],
+    threads: i32,
+) -> Result<OfflineRecognizer> {
+    ensure!(
+        id == models::GIGAAM.id || id == models::PARAKEET.id,
+        "not an ASR model: {id}"
+    );
+    let model = models::manifest(id)?;
+    let directory = models::installed(root, model)?;
+    let mut config = OfflineRecognizerConfig::default();
+    config.model_config.transducer = transducer_config(&directory, model)?;
+    config.model_config.tokens = Some(native_path(&directory.join("tokens.txt"))?);
+    config.model_config.num_threads = threads;
+    config.model_config.provider = Some(provider.into());
+    config.model_config.model_type = Some("nemo_transducer".into());
+    config.decoding_method = Some("greedy_search".into());
+    let _hotword_files = configure_hotwords(&mut config, &directory, hotwords)?;
+    OfflineRecognizer::create(&config)
+        .context("cannot create recognizer; see stderr for sherpa diagnostics")
 }
 
 fn transducer_config(
@@ -336,10 +396,91 @@ mod tests {
         assert!(blocks > 1);
     }
 
+    /// A reproducible CPU comparison, with no speed thresholds. Both routes
+    /// reuse the same VAD chunks and native sessions; no model load is timed.
+    #[test]
+    #[ignore = "requires GigaAM, Parakeet, Whisper tiny and Silero; prints routing cost study"]
+    fn routing_costs_on_real_russian_english_and_mixed_audio() {
+        use std::time::Instant;
+        let root = models::models_dir().unwrap();
+        let ru = read_wav(&root.join("gigaam-v3/test_wavs/example.wav")).unwrap();
+        let en = read_wav(&root.join("parakeet-v3/test_wavs/en.wav")).unwrap();
+        let mut mixed = ru.clone();
+        mixed.extend(vec![0.0; 16000]);
+        mixed.extend(&en);
+        mixed.extend(vec![0.0; 16000]);
+        let recognizer = Recognizer::load("auto", Provider::Cpu, &[], 2).unwrap();
+        let decode = |asr: &OfflineRecognizer, samples: &[f32]| {
+            let start = Instant::now();
+            let stream = asr.create_stream();
+            stream.accept_waveform(16000, samples);
+            asr.decode(&stream);
+            (
+                stream.get_result().unwrap().text,
+                start.elapsed().as_secs_f64(),
+            )
+        };
+        for (case, samples) in [("ru", ru), ("en", en), ("ru+en", mixed)] {
+            recognizer.vad.reset();
+            let mut chunks = Vec::new();
+            let mut drain = || {
+                while let Some(speech) = recognizer.vad.front() {
+                    chunks.push(speech.samples().to_vec());
+                    recognizer.vad.pop();
+                }
+            };
+            for block in samples.chunks(512) {
+                recognizer.vad.accept_waveform(block);
+                drain();
+            }
+            recognizer.vad.flush();
+            drain();
+            // Three runs report cold/warm variation without asserting a speed.
+            for run in 1..=3 {
+                let mut gigaam_s = 0.0;
+                let mut parakeet_s = 0.0;
+                let mut lid_s = 0.0;
+                let mut routed_s = 0.0;
+                let mut heuristic_s = 0.0;
+                let mut languages = Vec::new();
+                for chunk in &chunks {
+                    let (ru, g) = decode(&recognizer.asr, chunk);
+                    let (multi, p) = decode(recognizer.english.as_ref().unwrap(), chunk);
+                    let identifier = recognizer.language_id.as_ref().unwrap();
+                    let start = Instant::now();
+                    let stream = identifier.create_stream();
+                    stream.accept_waveform(16000, chunk);
+                    let lang = identifier.compute(&stream).unwrap().lang;
+                    let l = start.elapsed().as_secs_f64();
+                    let letters = multi.chars().filter(|c| c.is_alphabetic()).count();
+                    let cyrillic = multi
+                        .chars()
+                        .filter(|c| ('\u{0400}'..='\u{04ff}').contains(c))
+                        .count();
+                    let heuristic_ru = cyrillic * 2 > letters;
+                    println!(
+                        "case={case} run={run} lid={lang} heuristic_ru={heuristic_ru} gigaam={ru:?} parakeet={multi:?}"
+                    );
+                    gigaam_s += g;
+                    parakeet_s += p;
+                    lid_s += l;
+                    routed_s += l + if lang == "ru" { g } else { p };
+                    heuristic_s += p + if heuristic_ru { g } else { 0.0 };
+                    languages.push(lang);
+                }
+                println!(
+                    "ROUTING case={case} run={run} audio_s={:.3} gigaam_s={gigaam_s:.3} parakeet_s={parakeet_s:.3} lid_s={lid_s:.3} routed_s={routed_s:.3} heuristic_s={heuristic_s:.3} languages={languages:?}",
+                    samples.len() as f64 / 16000.0
+                );
+            }
+        }
+    }
+
     #[test]
     fn provider_defaults() {
         assert_eq!(provider_name(Provider::Auto).unwrap(), "cpu");
         assert_eq!(provider_name(Provider::Cpu).unwrap(), "cpu");
+        assert!(provider_name(Provider::Directml).is_err());
         assert_eq!(
             provider_name(Provider::Cuda).is_ok(),
             cfg!(feature = "cuda")

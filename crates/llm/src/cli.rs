@@ -562,6 +562,7 @@ fn cli_provider_uses_the_shared_map_reduce_for_long_transcripts() {
             text: "Evidence with details. ".repeat(2000),
             source: notetaker_core::Source::Final,
             edited: false,
+            lang: None,
         }],
         ..Default::default()
     };

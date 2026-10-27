@@ -75,11 +75,13 @@ impl Asr for Fake {
                 start_ms: offset + duration / 2,
                 end_ms: offset + duration,
                 text: format!("{channel:?} second"),
+                lang: Some("en".into()),
             },
             AsrSegment {
                 start_ms: offset,
                 end_ms: offset + duration / 2,
                 text: format!("{channel:?} first"),
+                lang: Some("en".into()),
             },
         ])
     }
@@ -175,6 +177,12 @@ fn two_tracks_are_padded_chunks_are_contiguous_and_live_and_final_are_sorted() {
     assert!(!events.iter().any(|e| matches!(e, PipelineEvent::Error(_))));
     let meeting = session.wait().unwrap();
     let transcript = meeting.read_transcript().unwrap();
+    assert!(
+        transcript
+            .segments
+            .iter()
+            .all(|s| s.lang.as_deref() == Some("en"))
+    );
     assert!(
         transcript
             .segments
@@ -367,6 +375,7 @@ fn edits_saved_during_recording_survive_the_real_replacement_path() {
         text: "User correction".into(),
         source: Source::Live,
         edited: true,
+        lang: None,
     };
     let mut transcript = meeting.read_transcript().unwrap();
     transcript.segments.push(edited.clone());

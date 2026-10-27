@@ -9,7 +9,16 @@ use directories::{ProjectDirs, UserDirs};
 use notetaker_core::Mode;
 use serde::{Deserialize, Serialize};
 
-pub const MODELS: [&str; 2] = ["gigaam-v3", "parakeet-v3"];
+pub const MODELS: [&str; 3] = ["gigaam-v3", "parakeet-v3", "auto"];
+
+pub fn model_label(id: &str) -> &str {
+    match id {
+        "auto" => "Авто (рус/англ)",
+        "gigaam-v3" => "GigaAM v3 · русский",
+        "parakeet-v3" => "Parakeet v3 · многоязычный",
+        other => other,
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -21,6 +30,9 @@ pub struct Settings {
     pub theme: crate::theme::Theme,
     pub library: PathBuf,
     pub model: String,
+    pub asr_acceleration: notetaker_asr_proto::Provider,
+    /// Zero means min(physical cores, 8).
+    pub asr_threads: u32,
     pub mode: Mode,
     /// None means forever, zero means after the successful final pass.
     #[serde(default)]
@@ -62,6 +74,8 @@ impl Default for Settings {
             theme: crate::theme::Theme::System,
             library: documents.join("notetaker"),
             model: MODELS[0].into(),
+            asr_acceleration: notetaker_asr_proto::Provider::Auto,
+            asr_threads: 0,
             mode: Mode::Local,
             retention_days: Some(7),
             hotkey: "Ctrl+Alt+R".into(),
@@ -113,6 +127,16 @@ impl Settings {
         ensure!(
             MODELS.contains(&self.model.as_str()),
             "Неизвестная модель ASR"
+        );
+        ensure!(self.asr_threads <= 8, "Потоков ASR: авто или 1–8");
+        ensure!(
+            matches!(
+                self.asr_acceleration,
+                notetaker_asr_proto::Provider::Auto
+                    | notetaker_asr_proto::Provider::Cpu
+                    | notetaker_asr_proto::Provider::Directml
+            ),
+            "Ускорение ASR: Авто, Только CPU или GPU (DirectML)"
         );
         ensure!(
             self.retention_days.is_none_or(|days| days <= 36_500),
@@ -318,6 +342,29 @@ mod tests {
         assert!(!restored.auto_download_models);
         assert!(restored.auto_diarization_attempted);
     }
+    #[test]
+    fn asr_options_validate_and_preserve_legacy_defaults() {
+        let old: Settings = toml::from_str("model = 'gigaam-v3'").unwrap();
+        assert_eq!(old.asr_acceleration, notetaker_asr_proto::Provider::Auto);
+        assert_eq!(old.asr_threads, 0);
+        let mut settings = Settings {
+            model: "auto".into(),
+            asr_threads: 8,
+            asr_acceleration: notetaker_asr_proto::Provider::Cpu,
+            ..Settings::default()
+        };
+        settings.validate().unwrap();
+        let restored: Settings = toml::from_str(&toml::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(restored.model, "auto");
+        assert_eq!(restored.asr_threads, 8);
+        assert_eq!(
+            restored.asr_acceleration,
+            notetaker_asr_proto::Provider::Cpu
+        );
+        settings.asr_threads = 9;
+        assert!(settings.validate().is_err());
+    }
+
     #[test]
     fn existing_settings_get_detection_and_silence_defaults() {
         let settings: Settings = toml::from_str("hotkey = 'Ctrl+Alt+R'").unwrap();

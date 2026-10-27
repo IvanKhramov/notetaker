@@ -1177,6 +1177,23 @@ impl NotetakerApp {
                 let mut library = notetaker_core::display_path(&settings.library);
                 if ui.text_edit_singleline(&mut library).changed() { settings.library = library.into(); }
                 model_selector(ui, "default_model", &mut settings.model);
+                egui::ComboBox::from_id_salt("asr_acceleration").selected_text(match settings.asr_acceleration {
+                    notetaker_asr_proto::Provider::Auto => "Ускорение: Авто",
+                    notetaker_asr_proto::Provider::Cpu => "Ускорение: Только CPU",
+                    _ => "Ускорение: GPU (DirectML)",
+                }).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut settings.asr_acceleration, notetaker_asr_proto::Provider::Auto, "Авто");
+                    ui.selectable_value(&mut settings.asr_acceleration, notetaker_asr_proto::Provider::Cpu, "Только CPU");
+                    ui.add_enabled_ui(false, |ui| {
+                        ui.selectable_value(&mut settings.asr_acceleration, notetaker_asr_proto::Provider::Directml, "GPU (DirectML) - недоступно в этой сборке");
+                    });
+                });
+                ui.small("GPU (DirectML): недоступно в этой сборке. Авто использует CPU без дополнительной загрузки.");
+                ui.horizontal(|ui| {
+                    ui.label("Потоков ASR (0 - авто)");
+                    ui.add(egui::DragValue::new(&mut settings.asr_threads).range(0..=8));
+                });
+                ui.small("Авто: до 8 физических ядер. Применяется также к VAD и разделению собеседников.");
                 ui.checkbox(&mut settings.diarize, "Разделять собеседников");
                 egui::ComboBox::from_id_salt("speakers").selected_text(format!("Участников: {}", settings.speakers.map_or("авто".into(), |n| n.to_string()))).show_ui(ui, |ui| {
                     ui.selectable_value(&mut settings.speakers, None, "авто");
@@ -1214,7 +1231,8 @@ impl NotetakerApp {
                 ui.small("0 - выключено. Завершение звонка само по себе не останавливает запись.");
                 ui.separator(); ui.heading("Модели ASR");
                 crate::quickstart::model_control(ui, &mut self.state, "gigaam-v3", "GigaAM v3 · русский");
-                crate::quickstart::model_control(ui, &mut self.state, "parakeet-v3", "Parakeet v3 · английский");
+                crate::quickstart::model_control(ui, &mut self.state, "parakeet-v3", "Parakeet v3 · многоязычный");
+                crate::quickstart::model_control(ui, &mut self.state, "auto", "Авто (рус/англ) · обе ASR-модели + Whisper tiny");
                 crate::quickstart::model_control(ui, &mut self.state, "diarization", "Модели разделения собеседников (47 МБ)");
                 ui.checkbox(&mut self.state.settings_draft.auto_download_models, "Скачивать модели автоматически");
                 ui.checkbox(&mut self.state.settings_draft.hide_quickstart, "Больше не показывать быстрый старт при запуске");
@@ -1685,10 +1703,10 @@ fn mode_selector(ui: &mut egui::Ui, mode: &mut Mode) {
 }
 fn model_selector(ui: &mut egui::Ui, id: &str, model: &mut String) {
     egui::ComboBox::from_id_salt(id)
-        .selected_text(model.as_str())
+        .selected_text(crate::config::model_label(model))
         .show_ui(ui, |ui| {
             for name in MODELS {
-                ui.selectable_value(model, name.into(), name);
+                ui.selectable_value(model, name.into(), crate::config::model_label(name));
             }
         });
 }

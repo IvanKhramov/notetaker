@@ -577,6 +577,9 @@ impl<A: Asr> Recognizer<A> {
             let result = (|| {
                 if !self.ready {
                     self.asr.start()?;
+                    if let Some(notice) = self.asr.take_notice() {
+                        let _ = queue.events.send(PipelineEvent::Warning(notice));
+                    }
                     self.ready = true;
                 }
                 if let AudioInput::WavPath(path) = &input {
@@ -715,6 +718,7 @@ pub(crate) fn convert(
             text: s.text,
             source,
             edited: false,
+            lang: s.lang,
         })
         .collect();
     sort(&mut segments);
@@ -804,6 +808,7 @@ mod tests {
                     start_ms: start,
                     end_ms: end,
                     text: "text".into(),
+                    lang: None,
                 }],
                 Channel::Mic,
                 source,
@@ -847,6 +852,7 @@ mod tests {
                 start_ms: 0,
                 end_ms: 100,
                 text: "final".into(),
+                lang: None,
             }],
             Channel::Mic,
             Source::Final,

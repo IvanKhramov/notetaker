@@ -36,12 +36,12 @@ fn waveform(path: &Path) -> Result<Vec<f32>> {
     Ok(samples)
 }
 
-fn extractor_config() -> Result<SpeakerEmbeddingExtractorConfig> {
+fn extractor_config(threads: i32) -> Result<SpeakerEmbeddingExtractorConfig> {
     let root = models::models_dir()?;
     let path = models::installed(&root, &models::ERES2NET)?.join(models::ERES2NET.files[0]);
     Ok(SpeakerEmbeddingExtractorConfig {
         model: Some(path.to_string_lossy().into()),
-        num_threads: 2,
+        num_threads: threads,
         ..Default::default()
     })
 }
@@ -97,14 +97,19 @@ fn mean_embedding(
     normalize(sum).context("invalid mean embedding")
 }
 
-pub fn embed(path: &Path, ranges: &[TimeRange]) -> Result<Vec<f32>> {
+pub fn embed(path: &Path, ranges: &[TimeRange], threads: i32) -> Result<Vec<f32>> {
     let samples = waveform(path)?;
-    let extractor = SpeakerEmbeddingExtractor::create(&extractor_config()?)
+    let extractor = SpeakerEmbeddingExtractor::create(&extractor_config(threads)?)
         .context("load embedding extractor")?;
     mean_embedding(&extractor, &samples, ranges)
 }
 
-pub fn diarize(path: &Path, speakers: Option<u32>, embeddings: bool) -> Result<Diarization> {
+pub fn diarize(
+    path: &Path,
+    speakers: Option<u32>,
+    embeddings: bool,
+    threads: i32,
+) -> Result<Diarization> {
     ensure!(
         speakers.is_none_or(|n| (1..=32).contains(&n)),
         "speakers must be 1..32 or null"
@@ -113,8 +118,8 @@ pub fn diarize(path: &Path, speakers: Option<u32>, embeddings: bool) -> Result<D
     let segmentation = models::installed(&root, &models::PYANNOTE)?.join("model.int8.onnx");
     let mut config = OfflineSpeakerDiarizationConfig::default();
     config.segmentation.pyannote.model = Some(segmentation.to_string_lossy().into());
-    config.segmentation.num_threads = 2;
-    config.embedding = extractor_config()?;
+    config.segmentation.num_threads = threads;
+    config.embedding = extractor_config(threads)?;
     config.clustering.num_clusters = speakers.map_or(-1, |n| n as i32);
     config.clustering.threshold = 0.5;
     let samples = waveform(path)?;

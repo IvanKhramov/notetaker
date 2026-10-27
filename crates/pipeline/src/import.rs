@@ -71,6 +71,9 @@ pub(crate) fn run(
             .saturating_add(Duration::from_millis(count / 16).saturating_mul(4)),
     );
     asr.start()?;
+    if let Some(notice) = asr.take_notice() {
+        let _ = events.send(PipelineEvent::Warning(notice));
+    }
     let cancel = asr.cancellation_handle();
     let segments = asr.transcribe_with_progress(
         AudioInput::WavPath(wav.clone()),

@@ -22,6 +22,7 @@ pub enum Provider {
     #[default]
     Cpu,
     Cuda,
+    Directml,
     Auto,
 }
 
@@ -63,6 +64,9 @@ pub enum Request {
         provider: Provider,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         hotwords: Vec<String>,
+        /// Zero selects min(physical cores, 8) in the worker.
+        #[serde(default)]
+        num_threads: u32,
     },
     Transcribe {
         id: String,
@@ -103,6 +107,8 @@ pub struct Segment {
     pub start_ms: u64,
     pub end_ms: u64,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,6 +214,7 @@ mod tests {
                 model_id: "gigaam-v3".into(),
                 provider: Provider::Auto,
                 hotwords: Vec::new(),
+                num_threads: 0,
             },
             Request::Transcribe {
                 id: "a".into(),
@@ -264,6 +271,7 @@ mod tests {
                     start_ms: 123,
                     end_ms: 456,
                     text: "Привет!".into(),
+                    lang: None,
                 }],
             },
             Response::Diarized {
@@ -312,9 +320,27 @@ mod tests {
             model_id: "gigaam-v3".into(),
             provider: Provider::Cpu,
             hotwords: vec!["Deckhouse".into()],
+            num_threads: 0,
         };
         let text = serde_json::to_string(&request).unwrap();
         assert_eq!(serde_json::from_str::<Request>(&text).unwrap(), request);
+    }
+
+    #[test]
+    fn legacy_segments_and_load_requests_remain_compatible() {
+        let segment: Segment =
+            serde_json::from_str(r#"{"start_ms":1,"end_ms":2,"text":"hi"}"#).unwrap();
+        assert_eq!(segment.lang, None);
+        assert!(!serde_json::to_string(&segment).unwrap().contains("lang"));
+        let mut localized = segment;
+        localized.lang = Some("en".into());
+        assert_eq!(
+            serde_json::from_str::<Segment>(&serde_json::to_string(&localized).unwrap()).unwrap(),
+            localized
+        );
+        let request: Request =
+            serde_json::from_str(r#"{"type":"load_model","model_id":"auto"}"#).unwrap();
+        assert!(matches!(request, Request::LoadModel { num_threads: 0, .. }));
     }
 
     #[test]

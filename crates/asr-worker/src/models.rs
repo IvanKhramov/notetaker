@@ -53,6 +53,16 @@ pub const SILERO: ModelManifest = ModelManifest {
     files: &["silero_vad.onnx"],
 };
 
+/// Multilingual tiny, not tiny.en. Only int8 weights are retained after download.
+pub const WHISPER_TINY: ModelManifest = ModelManifest {
+    id: "whisper-tiny",
+    url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-tiny.tar.bz2",
+    sha256: "c46116994e539aa165266d96b325252728429c12535eb9d8b6a2b10f129e66b1",
+    size: 116_204_861,
+    directory: "sherpa-onnx-whisper-tiny",
+    files: &["tiny-encoder.int8.onnx", "tiny-decoder.int8.onnx"],
+};
+
 pub const PYANNOTE: ModelManifest = ModelManifest {
     id: "pyannote-3.0",
     url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2",
@@ -72,7 +82,11 @@ pub const ERES2NET: ModelManifest = ModelManifest {
 
 pub fn check(id: &str) -> Result<()> {
     let root = models_dir()?;
-    if id == "diarization" {
+    if id == "auto" {
+        check(GIGAAM.id)?;
+        check(PARAKEET.id)?;
+        installed(&root, &WHISPER_TINY)?;
+    } else if id == "diarization" {
         installed(&root, &PYANNOTE)?;
         installed(&root, &ERES2NET)?;
     } else {
@@ -87,12 +101,13 @@ pub fn check(id: &str) -> Result<()> {
 pub fn manifest(id: &str) -> Result<&'static ModelManifest> {
     match id {
         "gigaam-v3" => Ok(&GIGAAM),
+        "whisper-tiny" => Ok(&WHISPER_TINY),
         "parakeet-v3" => Ok(&PARAKEET),
         "silero-vad" => Ok(&SILERO),
         "pyannote-3.0" => Ok(&PYANNOTE),
         "eres2net-base" => Ok(&ERES2NET),
         _ => bail!(
-            "unknown model {id:?}; choose gigaam-v3, parakeet-v3, silero-vad, pyannote-3.0 or eres2net-base"
+            "unknown model {id:?}; choose gigaam-v3, parakeet-v3, whisper-tiny, silero-vad, pyannote-3.0 or eres2net-base"
         ),
     }
 }
@@ -147,6 +162,35 @@ fn verify(mut reader: impl Read, model: &ModelManifest) -> Result<()> {
     Ok(())
 }
 
+fn unpack_archive(archive: impl Read, extracted: &Path, model: &ModelManifest) -> Result<()> {
+    let mut tar = tar::Archive::new(BzDecoder::new(archive));
+    for entry in tar.entries()? {
+        let mut entry = entry?;
+        ensure!(
+            entry.header().entry_type().is_file() || entry.header().entry_type().is_dir(),
+            "unsupported archive entry"
+        );
+        ensure!(
+            entry.path()?.starts_with(model.directory),
+            "unexpected archive root"
+        );
+        // The tiny archive also contains float weights. Keep just the
+        // files used for language ID, without deleting installed artifacts.
+        if model.id == WHISPER_TINY.id {
+            let path = entry.path()?;
+            if !model
+                .files
+                .iter()
+                .any(|name| path == Path::new(model.directory).join(name))
+            {
+                continue;
+            }
+        }
+        ensure!(entry.unpack_in(extracted)?, "unsafe archive path");
+    }
+    Ok(())
+}
+
 fn download_one(root: &Path, model: &ModelManifest) -> Result<()> {
     if installed(root, model).is_ok() {
         return Ok(());
@@ -174,19 +218,7 @@ fn download_one(root: &Path, model: &ModelManifest) -> Result<()> {
     if model.directory.is_empty() {
         fs::rename(&archive, extracted.join(model.files[0]))?;
     } else {
-        let mut tar = tar::Archive::new(BzDecoder::new(File::open(&archive)?));
-        for entry in tar.entries()? {
-            let mut entry = entry?;
-            ensure!(
-                entry.header().entry_type().is_file() || entry.header().entry_type().is_dir(),
-                "unsupported archive entry"
-            );
-            ensure!(
-                entry.path()?.starts_with(model.directory),
-                "unexpected archive root"
-            );
-            ensure!(entry.unpack_in(&extracted)?, "unsafe archive path");
-        }
+        unpack_archive(File::open(&archive)?, &extracted, model)?;
     }
     let source = extracted.join(model.directory);
     for name in model.files {
@@ -205,6 +237,12 @@ fn download_one(root: &Path, model: &ModelManifest) -> Result<()> {
 pub fn download(id: &str) -> Result<()> {
     let root = models_dir()?;
     fs::create_dir_all(&root)?;
+    if id == "auto" {
+        download_one(&root, &GIGAAM)?;
+        download_one(&root, &PARAKEET)?;
+        download_one(&root, &SILERO)?;
+        return download_one(&root, &WHISPER_TINY);
+    }
     if id == "diarization" {
         download_one(&root, &PYANNOTE)?;
         return download_one(&root, &ERES2NET);
@@ -220,6 +258,39 @@ pub fn download(id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn tiny_install_keeps_only_int8_weights_and_creates_parent_directory() {
+        let encoder = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::fast());
+        let mut archive = tar::Builder::new(encoder);
+        for name in [
+            "tiny-encoder.int8.onnx",
+            "tiny-decoder.int8.onnx",
+            "tiny-encoder.onnx",
+            "tiny-decoder.onnx",
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(3);
+            header.set_mode(0o644);
+            header.set_cksum();
+            archive
+                .append_data(
+                    &mut header,
+                    format!("{}/{name}", WHISPER_TINY.directory),
+                    &b"abc"[..],
+                )
+                .unwrap();
+        }
+        let compressed = archive.into_inner().unwrap().finish().unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        unpack_archive(compressed.as_slice(), temporary.path(), &WHISPER_TINY).unwrap();
+        let installed = temporary.path().join(WHISPER_TINY.directory);
+        for name in WHISPER_TINY.files {
+            assert_eq!(fs::read(installed.join(name)).unwrap(), b"abc");
+        }
+        assert!(!installed.join("tiny-encoder.onnx").exists());
+        assert!(!installed.join("tiny-decoder.onnx").exists());
+    }
+
     #[test]
     fn checksum_rejects_corruption() {
         let model = ModelManifest {

@@ -79,6 +79,8 @@ pub struct Segment {
     pub text: String,
     pub source: Source,
     pub edited: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,6 +204,7 @@ mod summary_tests {
             text: "edited".into(),
             source: Source::Final,
             edited: true,
+            lang: None,
         });
         assert!(stamp.stale("notes", &changed, "general"));
         assert!(!stamp.edited("summary"));

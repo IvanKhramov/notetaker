@@ -715,6 +715,7 @@ mod tests {
             text: "Готово".into(),
             source: Source::Final,
             edited: false,
+            lang: None,
         });
         public.write_transcript(&transcript).unwrap();
         let id = public.read_meta().unwrap().id;

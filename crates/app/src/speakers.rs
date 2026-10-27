@@ -358,6 +358,7 @@ mod tests {
                 text: String::new(),
                 source: Source::Final,
                 edited: false,
+                lang: None,
             });
         }
         let ids: Vec<_> = transcript.segments.iter().map(|s| s.id).collect();

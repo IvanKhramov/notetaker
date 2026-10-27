@@ -338,6 +338,7 @@ fn chat_streams_with_citations_attendees_and_local_fallback() {
         text: "готово".into(),
         source: notetaker_core::Source::Final,
         edited: false,
+        lang: None,
     });
     meeting.write_transcript(&transcript).unwrap();
     let config = crate::Config::parse(&format!("[defaults]\nlocal='local'\nhybrid='cloud'\n[[providers]]\nid='local'\nkind='openai'\nbase_url='{}'\nmodel='local-chat'\ncontext_tokens=4096\n[[providers]]\nid='cloud'\nkind='openai'\nbase_url='https://example.invalid/v1'\nmodel='cloud'\n[scenarios.chat]\nprovider='cloud'\nmodel='never-send-local'", server.base)).unwrap();

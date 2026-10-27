@@ -153,3 +153,98 @@ fn nemo_models_accept_hotwords_and_preserve_offsets() {
         client.shutdown().unwrap();
     }
 }
+
+#[test]
+#[ignore = "requires GigaAM, Parakeet, Whisper tiny and Silero VAD"]
+fn auto_routes_russian_and_english_chunks_with_hotwords_and_offsets() {
+    let _guard = MODEL_TEST.lock().unwrap();
+    let root =
+        PathBuf::from(std::env::var_os("NOTETAKER_MODELS_DIR").expect("set NOTETAKER_MODELS_DIR"));
+    let mut samples = Vec::new();
+    let mut boundary = 0;
+    for (model, file) in [("gigaam-v3", "example.wav"), ("parakeet-v3", "en.wav")] {
+        let mut wav =
+            hound::WavReader::open(root.join(model).join("test_wavs").join(file)).unwrap();
+        let rate = wav.spec().sample_rate;
+        let pcm: Vec<f32> = wav
+            .samples::<i16>()
+            .map(|v| f32::from(v.unwrap()) / 32768.0)
+            .collect();
+        let pcm = if rate == 16000 {
+            pcm
+        } else {
+            sherpa_onnx::LinearResampler::create(rate as i32, 16000)
+                .unwrap()
+                .resample(&pcm, true)
+        };
+        if !samples.is_empty() {
+            boundary = samples.len() as u64 / 16;
+        }
+        samples.extend(pcm);
+        samples.extend(vec![0.0; 16000]);
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ru-en.wav");
+    let mut wav = hound::WavWriter::create(
+        &path,
+        hound::WavSpec {
+            channels: 1,
+            sample_rate: 16000,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        },
+    )
+    .unwrap();
+    for &sample in &samples {
+        wav.write_sample(sample).unwrap();
+    }
+    wav.finalize().unwrap();
+    let mut client = AsrClient::spawn(env!("CARGO_BIN_EXE_notetaker-asr")).unwrap();
+    client
+        .load_model_with_options(
+            "auto",
+            Provider::Cpu,
+            &["Лукоморья".into(), "country".into()],
+            2,
+        )
+        .unwrap();
+    let original = client
+        .transcribe("mixed", AudioInput::WavPath(path), "system", 0)
+        .unwrap();
+    println!("Auto: {original:?}");
+    assert!(original.iter().any(|s| s.lang.as_deref() == Some("ru") && s.text.to_lowercase().contains("лукоморья")));
+    assert!(
+        original
+            .iter()
+            .any(|s| s.lang.as_deref() == Some("en")
+                && s.text.to_lowercase().contains("your country"))
+    );
+    assert!(
+        original
+            .iter()
+            .all(|s| s.end_ms > s.start_ms && s.end_ms <= samples.len() as u64 / 16)
+    );
+    assert!(
+        original
+            .iter()
+            .filter(|s| s.start_ms < boundary)
+            .all(|s| s.lang.as_deref() == Some("ru"))
+    );
+    assert!(
+        original
+            .iter()
+            .filter(|s| s.start_ms >= boundary)
+            .all(|s| s.lang.as_deref() == Some("en"))
+    );
+    let shifted = client
+        .transcribe("shifted", AudioInput::pcm(&samples), "mic", 12345)
+        .unwrap();
+    assert_eq!(original.len(), shifted.len());
+    for (a, b) in original.iter().zip(shifted) {
+        assert_eq!(a.text, b.text);
+        assert_eq!(a.lang, b.lang);
+        assert_eq!(a.start_ms + 12345, b.start_ms);
+        assert_eq!(a.end_ms + 12345, b.end_ms);
+    }
+    client.shutdown().unwrap();
+}

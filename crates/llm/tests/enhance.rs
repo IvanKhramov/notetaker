@@ -89,6 +89,7 @@ fn transcript(text: &str) -> Transcript {
             text: text.into(),
             source: Source::Final,
             edited: false,
+            lang: None,
         }],
         ..Transcript::default()
     }

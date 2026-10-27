@@ -1383,6 +1383,10 @@ impl AppState {
             Event::Pipeline(event) => {
                 let previous = self.recording.phase;
                 self.recording.apply(&event);
+                if let PipelineEvent::Warning(message) = &event {
+                    self.notices
+                        .push((crate::theme::ToastLevel::Info, message.clone()));
+                }
                 if let PipelineEvent::Error(message)
                 | PipelineEvent::CaptureEvent(CaptureEvent::Error { message, .. }) = &event
                 {
@@ -1777,6 +1781,7 @@ mod tests {
                 text: "ошпбка".into(),
                 source: Source::Final,
                 edited: false,
+                lang: None,
             }],
             ..Transcript::default()
         };
@@ -2156,6 +2161,7 @@ mod tests {
             text: "final".into(),
             source: Source::Final,
             edited: false,
+            lang: None,
         });
         state.recording.phase = Phase::Finalizing;
         state.apply(Event::RecordDone {

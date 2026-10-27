@@ -21,6 +21,7 @@ anyhow = "1"
 bzip2 = "0.6"
 directories = "6"
 hound = "3.5"
+num_cpus = "1.17"
 notetaker-asr-proto = { path = "../asr-proto" }
 sha2 = "0.10"
 sherpa-onnx = { version = "=2.0.0", default-features = false }

@@ -175,6 +175,7 @@ mod tests {
                 text: "text".into(),
                 source: Source::Final,
                 edited: false,
+                lang: Some("ru".into()),
             });
         }
         assign(
@@ -199,6 +200,12 @@ mod tests {
                 ],
                 ..Default::default()
             },
+        );
+        assert!(
+            transcript
+                .segments
+                .iter()
+                .all(|s| s.lang.as_deref() == Some("ru"))
         );
         assert_eq!(
             transcript
@@ -262,6 +269,7 @@ mod tests {
             text: "Evidence".into(),
             source: Source::Final,
             edited: true,
+            lang: None,
         });
         meeting.write_transcript(&transcript).unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -309,6 +317,7 @@ mod tests {
             text: "Evidence".into(),
             source: Source::Final,
             edited: false,
+            lang: None,
         });
         meeting.write_transcript(&transcript).unwrap();
         library

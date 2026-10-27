@@ -36,6 +36,7 @@ impl Status {
 pub struct Models {
     pub gigaam: Status,
     pub parakeet: Status,
+    pub auto: Status,
     pub diarization: Status,
 }
 impl Models {
@@ -52,6 +53,7 @@ impl Models {
         match model {
             "gigaam-v3" => &self.gigaam,
             "parakeet-v3" => &self.parakeet,
+            "auto" => &self.auto,
             _ => &self.diarization,
         }
     }
@@ -72,7 +74,11 @@ pub fn step_states(
             .iter()
             .any(|p| p.id == llm.defaults.hybrid && p.config().is_ok());
     [
-        models.asr(),
+        if settings.model == "auto" {
+            models.auto.clone()
+        } else {
+            models.asr()
+        },
         models.diarization.clone(),
         if let Some(error) = provider_error {
             Status::Error(error.into())
@@ -176,6 +182,7 @@ pub fn check_models() -> Models {
     Models {
         gigaam: check("gigaam-v3"),
         parakeet: check("parakeet-v3"),
+        auto: check("auto"),
         diarization: check("diarization"),
     }
 }
@@ -352,9 +359,10 @@ impl Panel {
                 ui.heading(format!("Настроено {} из 6", steps.iter().filter(|s| **s == Status::Ready).count()));
                 ui.small("Настройте запись и конспекты здесь. Календарь и проверку звука можно пропустить.");
                 egui::ScrollArea::vertical().id_salt("quickstart_steps").max_height((ctx.content_rect().height() - 220.0).max(140.0)).show(ui, |ui| {
-                    row(ui, &steps[0], "Распознавание речи", "Модели работают локально. Достаточно одной модели.");
+                    row(ui, &steps[0], "Распознавание речи", "Модели работают локально. Для Авто нужны обе модели и Whisper tiny (~103 МБ).");
                     model_control(ui, state, "gigaam-v3", "GigaAM v3 · русский");
-                    model_control(ui, state, "parakeet-v3", "Parakeet v3 · английский");
+                    model_control(ui, state, "parakeet-v3", "Parakeet v3 · многоязычный");
+                    model_control(ui, state, "auto", "Авто (рус/англ)");
                     row(ui, &steps[1], "Разделение собеседников", "Отмечает, кто говорил. Модели занимают около 47 МБ.");
                     model_control(ui, state, "diarization", "Модели собеседников");
                     ui.add_enabled_ui(state.can_save_settings(), |ui| {
@@ -563,6 +571,32 @@ fn probe(sender: &Sender<ProbeEvent>) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_readiness_requires_language_identifier_as_well_as_both_asr_models() {
+        let models = Models {
+            gigaam: Status::Ready,
+            parakeet: Status::Ready,
+            ..Default::default()
+        };
+        let settings = Settings {
+            model: "auto".into(),
+            ..Settings::default()
+        };
+        let llm = LlmSettings::default();
+        assert_eq!(
+            step_states(&models, &settings, &llm, false, None, None)[0],
+            Status::Missing
+        );
+        let models = Models {
+            auto: Status::Ready,
+            ..models
+        };
+        assert_eq!(
+            step_states(&models, &settings, &llm, false, None, None)[0],
+            Status::Ready
+        );
+    }
 
     #[test]
     fn checklist_distinguishes_models_provider_identity_and_optional_calendar() {

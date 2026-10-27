@@ -41,6 +41,7 @@ fn transcript(text: &str) -> Transcript {
                 text: text.into(),
                 source: Source::Final,
                 edited: true,
+                lang: None,
             },
             Segment {
                 id: Uuid::now_v7(),
@@ -51,6 +52,7 @@ fn transcript(text: &str) -> Transcript {
                 text: "live segment".into(),
                 source: Source::Live,
                 edited: false,
+                lang: None,
             },
         ],
     }
