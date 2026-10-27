@@ -138,6 +138,7 @@ fn denied_exe(exe: &str) -> bool {
         "notetaker-app.exe",
         "notetaker-asr-worker.exe",
         "SoundRecorder.exe",
+        "SoundRec.exe",
         "VoiceRecorder.exe",
         "WindowsSoundRecorder.exe",
         "svchost.exe",

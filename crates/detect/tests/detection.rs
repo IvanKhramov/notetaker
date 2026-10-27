@@ -344,6 +344,7 @@ fn system_recorders_and_our_own_capture_are_denied_even_as_custom_rules() {
         ("notetaker.exe", false),
         ("NOTETAKER-APP.EXE", false),
         ("SoundRecorder.exe", false),
+        ("SoundRec.exe", false),
         ("VoiceRecorder.exe", false),
         ("svchost.exe", false),
         ("OtherWindowsComponent.exe", true),
