@@ -18,6 +18,18 @@ use symphonia::core::{
     probe::Hint,
 };
 
+// 12 h of mono f32 at 16 kHz stays below the RIFF/hound u32 size limit.
+const MAX_IMPORT_SAMPLES: u64 = 12 * 60 * 60 * 16000;
+
+#[derive(Debug)]
+struct ImportTooLong;
+impl std::fmt::Display for ImportTooLong {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Запись длиннее 12 часов. Разделите файл перед импортом.")
+    }
+}
+impl std::error::Error for ImportTooLong {}
+
 pub(crate) fn decode(
     path: &Path,
     wav: &Path,
@@ -26,6 +38,7 @@ pub(crate) fn decode(
     let native = decode_native(path, wav, &mut progress);
     match native {
         Ok(count) => Ok(count),
+        Err(error) if error.is::<ImportTooLong>() => Err(error),
         Err(error) => {
             // A failed native attempt never leaves partial audio in the result.
             progress(0.0)?;
@@ -58,6 +71,9 @@ impl<F: FnMut(f32) -> Result<()>> Output<F> {
     }
     fn write(&mut self, samples: &[f32], fraction: f32) -> Result<()> {
         (self.progress)(fraction)?;
+        if samples.len() as u64 > MAX_IMPORT_SAMPLES.saturating_sub(self.count) {
+            return Err(ImportTooLong.into());
+        }
         for &sample in samples {
             ensure!(sample.is_finite(), "Некорректные аудиосэмплы");
             self.writer.write_sample(sample.clamp(-1.0, 1.0))?;
@@ -325,6 +341,20 @@ fn decode_ffmpeg(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn import_limit_is_checked_before_writing_the_next_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut output = Output::new(&dir.path().join("out.wav"), |_| Ok(())).unwrap();
+        output.count = MAX_IMPORT_SAMPLES - 2;
+        output.write(&[0.0, 0.0], 0.0).unwrap();
+        let error = output.write(&[0.0], 0.0).unwrap_err();
+        assert!(error.is::<ImportTooLong>());
+        assert!(error.to_string().contains("12 часов"));
+        assert_eq!(output.count, MAX_IMPORT_SAMPLES);
+        assert_eq!(output.writer.duration(), 2);
+        assert!(MAX_IMPORT_SAMPLES * 4 + 68 < u64::from(u32::MAX));
+    }
+
     #[test]
     fn native_formats_need_no_external_decoder() {
         let dir = tempfile::tempdir().unwrap();
