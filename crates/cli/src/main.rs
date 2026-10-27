@@ -6,8 +6,8 @@ mod cmd_import;
 mod cmd_mcp;
 mod cmd_probe;
 mod cmd_record;
-mod cmd_tasks;
 mod cmd_self_update;
+mod cmd_tasks;
 mod cmd_transcribe;
 mod cmd_watch;
 
