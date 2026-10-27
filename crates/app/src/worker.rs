@@ -173,6 +173,10 @@ pub enum Command {
     Save(Box<Save>),
     Inventory,
     Record(RecordRequest),
+    Import {
+        settings: Settings,
+        file: PathBuf,
+    },
     Enhance {
         meeting: Meeting,
         template: String,
@@ -217,6 +221,7 @@ pub enum Event {
     },
     Inventory(Result<Inventory, String>),
     Started {
+        importing: bool,
         document: Box<DocumentData>,
         stop: StopHandle,
     },
@@ -349,7 +354,22 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                 }
                 Command::Record(request) => {
                     let events = events.clone();
-                    thread::spawn(move || record(request, &events));
+                    thread::spawn(move || record(request, None, &events));
+                }
+                Command::Import { settings, file } => {
+                    let events = events.clone();
+                    thread::spawn(move || {
+                        record(
+                            RecordRequest {
+                                settings,
+                                title: String::new(),
+                                process_id: None,
+                                app: None,
+                            },
+                            Some(file),
+                            &events,
+                        )
+                    });
                 }
                 Command::Enhance {
                     meeting,
@@ -502,6 +522,17 @@ struct AppAsr {
     request: u64,
 }
 impl Asr for AppAsr {
+    fn set_timeout(&mut self, timeout: Duration) {
+        self.config.timeout = self.config.timeout.max(timeout);
+        if let Some(client) = &mut self.client {
+            client.set_timeout(self.config.timeout);
+        }
+    }
+    fn cancellation_handle(&self) -> Option<notetaker_asr_proto::CancellationHandle> {
+        self.client
+            .as_ref()
+            .map(notetaker_asr_proto::AsrClient::cancellation_handle)
+    }
     fn start(&mut self) -> Result<()> {
         if self.preloaded {
             self.preloaded = false;
@@ -512,7 +543,11 @@ impl Asr for AppAsr {
             background_process(&self.config.binary),
             self.config.timeout,
         )?;
-        client.load_model(&self.config.model, self.config.provider)?;
+        client.load_model_with_hotwords(
+            &self.config.model,
+            self.config.provider,
+            &self.config.vocabulary.hotwords(),
+        )?;
         self.client = Some(client);
         Ok(())
     }
@@ -522,17 +557,35 @@ impl Asr for AppAsr {
         channel: notetaker_capture::Channel,
         offset_ms: u64,
     ) -> Result<Vec<notetaker_asr_proto::Segment>> {
+        self.transcribe_with_progress(input, channel, offset_ms, &mut |_| {})
+    }
+    fn transcribe_with_progress(
+        &mut self,
+        input: notetaker_asr_proto::AudioInput,
+        channel: notetaker_capture::Channel,
+        offset_ms: u64,
+        progress: &mut dyn FnMut(f32),
+    ) -> Result<Vec<notetaker_asr_proto::Segment>> {
         self.request += 1;
         let channel = match channel {
             notetaker_capture::Channel::Mic => "mic",
             notetaker_capture::Channel::System => "system",
         };
-        Ok(self.client.as_mut().context("ASR не запущен")?.transcribe(
-            &self.request.to_string(),
-            input,
-            channel,
-            offset_ms,
-        )?)
+        let mut segments = self
+            .client
+            .as_mut()
+            .context("ASR не запущен")?
+            .transcribe_with_progress(
+                &self.request.to_string(),
+                input,
+                channel,
+                offset_ms,
+                progress,
+            )?;
+        for segment in &mut segments {
+            segment.text = self.config.vocabulary.correct(&segment.text);
+        }
+        Ok(segments)
     }
 }
 fn background_process(binary: &Path) -> Process {
@@ -545,13 +598,17 @@ fn background_process(binary: &Path) -> Process {
     }
     command
 }
-fn record(request: RecordRequest, events: &Sender<Event>) {
+fn record(request: RecordRequest, import_file: Option<PathBuf>, events: &Sender<Event>) {
     let mut path = None;
     let mut meeting_for_reload = None;
     let result: Result<()> = (|| {
         let binary = asr_binary()?;
         let mut config = AsrConfig::new(&request.settings.model)?;
         config.binary = binary;
+        config.vocabulary = notetaker_core::Vocabulary::with_library(
+            &request.settings.vocabulary,
+            &request.settings.library,
+        )?;
         let mut asr = AppAsr {
             config,
             client: None,
@@ -561,37 +618,42 @@ fn record(request: RecordRequest, events: &Sender<Event>) {
         asr.start()
             .context("Модель ASR недоступна. Откройте настройки и нажмите «Скачать»")?;
         asr.preloaded = true;
-        let [mic, system] = live_sources(LiveOptions {
-            process_id: request.process_id,
-            ..LiveOptions::default()
-        })?;
-        let sources: [Box<dyn AudioSource + Send>; 2] = [Box::new(mic), Box::new(system)];
         let library = Library::open(&request.settings.library)?;
-        let mut meta = MeetingMeta::new(request.title, Utc::now());
-        meta.mode = request.settings.mode;
-        meta.app = request.app;
-        let session = RecordingSession::start_with_asr(
-            library.clone(),
-            meta,
-            sources,
-            asr,
-            RecordingConfig {
-                retention: request
-                    .settings
-                    .retention_days
-                    .map(|days| Duration::from_secs(u64::from(days) * 86400)),
-                auto_stop_after_silence: (request.settings.auto_stop_minutes > 0).then(|| {
-                    Duration::from_secs(u64::from(request.settings.auto_stop_minutes) * 60)
-                }),
-                ..RecordingConfig::default()
-            },
-        )?;
+        let config = RecordingConfig {
+            retention: request
+                .settings
+                .retention_days
+                .map(|days| Duration::from_secs(u64::from(days) * 86400)),
+            auto_stop_after_silence: (request.settings.auto_stop_minutes > 0)
+                .then(|| Duration::from_secs(u64::from(request.settings.auto_stop_minutes) * 60)),
+            ..RecordingConfig::default()
+        };
+        let session = if let Some(file) = &import_file {
+            RecordingSession::import_with_asr(
+                library.clone(),
+                file,
+                request.settings.mode,
+                asr,
+                config,
+            )?
+        } else {
+            let [mic, system] = live_sources(LiveOptions {
+                process_id: request.process_id,
+                ..LiveOptions::default()
+            })?;
+            let sources: [Box<dyn AudioSource + Send>; 2] = [Box::new(mic), Box::new(system)];
+            let mut meta = MeetingMeta::new(request.title, Utc::now());
+            meta.mode = request.settings.mode;
+            meta.app = request.app;
+            RecordingSession::start_with_asr(library.clone(), meta, sources, asr, config)?
+        };
         let meeting = session.meeting().clone();
         path = Some(meeting.path().to_owned());
         meeting_for_reload = Some(meeting.clone());
         let document = DocumentData::read(meeting)?;
         if events
             .send(Event::Started {
+                importing: import_file.is_some(),
                 document: Box::new(document),
                 stop: session.stop_handle(),
             })

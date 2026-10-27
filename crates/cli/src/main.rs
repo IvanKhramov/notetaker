@@ -1,6 +1,7 @@
 //! Command-line entry point for notetaker.
 
 mod cmd_enhance;
+mod cmd_import;
 mod cmd_probe;
 mod cmd_record;
 mod cmd_transcribe;
@@ -17,6 +18,8 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Import audio or video and create a meeting with a final transcript.
+    Import(cmd_import::Args),
     /// Watch microphone usage and print call hints on Windows.
     Watch(cmd_watch::Args),
     /// Diagnose microphone and system audio capture on Windows.
@@ -31,6 +34,7 @@ enum Command {
 
 fn main() -> anyhow::Result<()> {
     match Args::parse().command {
+        Command::Import(args) => cmd_import::run(args),
         Command::Watch(args) => cmd_watch::run(args),
         Command::Probe(args) => cmd_probe::run(args),
         Command::Enhance(args) => cmd_enhance::run(args),

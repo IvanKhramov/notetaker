@@ -12,6 +12,8 @@ name = "notetaker"
 path = "src/main.rs"
 
 [dependencies]
+directories = "6"
+toml = "1"
 clap = { version = "4.5", features = ["derive"] }
 anyhow = "1"
 notetaker-asr-proto = { path = "../asr-proto" }

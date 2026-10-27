@@ -35,6 +35,7 @@ pub enum Phase {
 #[derive(Default)]
 pub struct Recording {
     pub phase: Phase,
+    pub importing: bool,
     pub process_id: Option<u32>,
     pub path: Option<PathBuf>,
     pub started: Option<Instant>,
@@ -443,6 +444,26 @@ impl AppState {
             app,
         }));
     }
+    pub fn import_recording(&mut self, file: PathBuf) {
+        if !self.ready
+            || self.recording.busy()
+            || self.downloading
+            || self.settings_pending
+            || self.exit_requested
+        {
+            return;
+        }
+        self.flush();
+        let mut settings = self.settings.clone();
+        settings.model = self.record_model.clone();
+        settings.mode = self.record_mode;
+        self.recording = Recording {
+            phase: Phase::Starting,
+            importing: true,
+            ..Recording::default()
+        };
+        self.send(Command::Import { settings, file });
+    }
     pub fn toggle_recording(&mut self) {
         if self.recording.busy() {
             self.recording.request_stop();
@@ -808,14 +829,23 @@ impl AppState {
                     Err(error) => self.inventory_error = Some(error),
                 }
             }
-            Event::Started { document, stop } => {
+            Event::Started {
+                document,
+                stop,
+                importing,
+            } => {
                 let path = document.meeting.path().to_owned();
                 self.selected = Some(path.clone());
                 self.tab = Tab::Notes;
                 self.recording.path = Some(path.clone());
                 self.recording.stop = Some(stop);
                 self.recording.started = Some(Instant::now());
-                self.recording.phase = Phase::Recording;
+                self.recording.importing = importing;
+                self.recording.phase = if importing {
+                    Phase::Finalizing
+                } else {
+                    Phase::Recording
+                };
                 if self.recording.stop_requested {
                     self.recording.request_stop();
                     self.tab = Tab::Enhanced;
@@ -865,6 +895,7 @@ impl AppState {
                         }
                     }
                     doc.data.transcript.segments.sort_by_key(|s| s.start_ms);
+                    notetaker_pipeline::suppress_echo(&mut doc.data.transcript.segments);
                 }
             }
             Event::RecordDone {
@@ -1019,6 +1050,30 @@ pub fn edit_segment(transcript: &mut Transcript, id: Uuid, text: String) -> bool
 mod tests {
     use super::*;
     use notetaker_core::{Segment, Source, SpeakerId};
+    #[test]
+    fn import_locks_recording_and_reuses_final_summary_flow() {
+        let (mut state, commands, _root, path) = fixture();
+        state.ready = true;
+        state.import_recording("recording.mp4".into());
+        assert!(state.recording.busy());
+        assert!(state.recording.importing);
+        assert!(matches!(
+            commands.try_recv().unwrap(),
+            Command::Import { .. }
+        ));
+        state.import_recording("other.wav".into());
+        assert!(commands.try_recv().is_err());
+        state.apply(Event::RecordDone {
+            path: Some(path.clone()),
+            document: Some(Box::new(
+                DocumentData::read(state.documents[&path].data.meeting.clone()).unwrap(),
+            )),
+            error: None,
+        });
+        assert!(!state.recording.busy());
+        assert_eq!(state.pending_summary.as_ref(), Some(&path));
+    }
+
     #[test]
     fn audio_warnings_are_counted_and_flushed_at_most_every_thirty_seconds() {
         let start = Instant::now();

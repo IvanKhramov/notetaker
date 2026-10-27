@@ -32,7 +32,7 @@ fn duplicate(mic: &[String], system: &[String]) -> bool {
 
 /// Drop only unedited mic evidence supported by overlapping system text.
 /// The 300 ms tolerance covers speaker-to-microphone acoustic/ASR lag.
-pub(crate) fn suppress_echo(segments: &mut Vec<Segment>) {
+pub fn suppress_echo(segments: &mut Vec<Segment>) {
     let mut system: Vec<_> = segments
         .iter()
         .filter(|s| s.channel == Channel::System && !s.text.trim().is_empty())

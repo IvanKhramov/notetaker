@@ -58,7 +58,7 @@ impl Asr for Fake {
             AudioInput::WavPath(path) => {
                 let wav = hound::WavReader::open(path)?;
                 assert_eq!(wav.spec().sample_rate, 16000);
-                assert_eq!(wav.spec().bits_per_sample, 16);
+                assert!(matches!(wav.spec().bits_per_sample, 16 | 32));
                 (wav.duration() as usize, true)
             }
         };
@@ -712,4 +712,93 @@ fn recording_start_sweeps_expired_audio_for_every_frontend() {
     let (session, _) = start(dir.path(), config(), vec![], None);
     session.wait().unwrap();
     assert!(!expired.mic_audio_path().exists());
+}
+
+#[test]
+fn import_uses_file_metadata_final_system_channel_and_retention() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("Обсуждение релиза.wav");
+    wav(&input, 32000);
+    let mtime: chrono::DateTime<Utc> = std::fs::metadata(&input)
+        .unwrap()
+        .modified()
+        .unwrap()
+        .into();
+    let library = Library::open(directory.path().join("library")).unwrap();
+    let stats = Arc::new(Mutex::new(Stats::default()));
+    let session = RecordingSession::import_with_asr(
+        library,
+        &input,
+        notetaker_core::Mode::Local,
+        Fake {
+            stats: Arc::clone(&stats),
+            crashes: vec![],
+            gate: None,
+        },
+        RecordingConfig {
+            retention: Some(Duration::ZERO),
+            ..RecordingConfig::default()
+        },
+    )
+    .unwrap();
+    let meeting = session.meeting().clone();
+    let mut progress = Vec::new();
+    for event in session.events() {
+        match event {
+            PipelineEvent::FinalPassProgress { completed, total } => {
+                progress.push((completed, total))
+            }
+            PipelineEvent::Finished { .. } => break,
+            PipelineEvent::Error(error) => panic!("{error}"),
+            _ => {}
+        }
+    }
+    session.wait().unwrap();
+    let meta = meeting.read_meta().unwrap();
+    assert_eq!(meta.title, "Обсуждение релиза");
+    assert_eq!(meta.started_at, mtime);
+    assert_eq!((meta.ended_at.unwrap() - mtime).num_milliseconds(), 2000);
+    assert!(!meeting.system_audio_path().exists());
+    assert!(!meeting.mic_audio_path().exists());
+    assert!(
+        std::fs::read_dir(meeting.path().join("audio"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
+    let transcript = meeting.read_transcript().unwrap();
+    assert!(!transcript.segments.is_empty());
+    assert!(transcript.segments.iter().all(|s| s.source == Source::Final
+        && s.channel == notetaker_core::Channel::System
+        && s.speaker.0 == "them"));
+    assert_eq!(progress.first(), Some(&(0, 200)));
+    assert_eq!(progress.last(), Some(&(200, 200)));
+    assert_eq!(stats.lock().unwrap().starts, 1);
+}
+
+#[test]
+fn failed_import_does_not_publish_a_final_transcript_and_keeps_audio() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input.wav");
+    wav(&input, 1600);
+    let library = Library::open(directory.path().join("library")).unwrap();
+    let session = RecordingSession::import_with_asr(
+        library,
+        &input,
+        notetaker_core::Mode::Local,
+        Fake {
+            stats: Arc::new(Mutex::new(Stats::default())),
+            crashes: vec![1],
+            gate: None,
+        },
+        RecordingConfig {
+            retention: Some(Duration::ZERO),
+            ..RecordingConfig::default()
+        },
+    )
+    .unwrap();
+    let meeting = session.meeting().clone();
+    assert!(session.wait().is_err());
+    assert!(meeting.read_transcript().unwrap().segments.is_empty());
+    assert!(meeting.system_audio_path().is_file());
 }

@@ -23,6 +23,8 @@ pub struct NotetakerApp {
     notes_preview: bool,
     enhanced_preview: bool,
     show_record: bool,
+    show_import: bool,
+    import_path: String,
     show_settings: bool,
     toasts: VecDeque<(Instant, String)>,
     main_rect: Option<egui::Rect>,
@@ -42,6 +44,8 @@ impl NotetakerApp {
             notes_preview: false,
             enhanced_preview: true,
             show_record: false,
+            show_import: false,
+            import_path: String::new(),
             show_settings: false,
             toasts: VecDeque::new(),
             main_rect: None,
@@ -68,6 +72,10 @@ impl NotetakerApp {
                     self.show_record = true;
                     self.state.inventory_pending = true;
                     self.state.send(Command::Inventory);
+                }
+                if theme::button(ui, "Импорт записи", ButtonStyle::Secondary).clicked()
+                {
+                    self.show_import = true;
                 }
             },
         );
@@ -196,6 +204,7 @@ impl NotetakerApp {
                 }
                 ui.label(RichText::new(timestamp(r.elapsed().as_millis() as u64)).strong());
                 ui.weak(match r.phase {
+                    _ if r.importing => "Импорт записи: декодирование и распознавание…",
                     Phase::Starting => "Загружаю модель и открываю аудио…",
                     Phase::Finalizing => "Чистовой транскрипт…",
                     _ if r.live_disabled => "Запись идёт, текст появится после остановки",
@@ -208,7 +217,8 @@ impl NotetakerApp {
                             .desired_width(100.0),
                     );
                 }
-                let can_stop = matches!(r.phase, Phase::Starting | Phase::Recording);
+                let can_stop =
+                    !r.importing && matches!(r.phase, Phase::Starting | Phase::Recording);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if can_stop && theme::button(ui, "Стоп", ButtonStyle::Danger).clicked() {
                         self.state.toggle_recording();
@@ -532,6 +542,30 @@ impl NotetakerApp {
         });
         self.show_record &= open;
     }
+    fn import_dialog(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_import;
+        egui::Window::new("Импорт записи")
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label("Путь к файлу аудио или видео (можно перетащить файл в это окно)");
+                ui.add(egui::TextEdit::singleline(&mut self.import_path).desired_width(480.0));
+                ui.small("wav, mp3, m4a, ogg, opus, flac, mp4, webm, mkv");
+                model_selector(ui, "import_model", &mut self.state.record_model);
+                mode_selector(ui, &mut self.state.record_mode);
+                if ui
+                    .add_enabled(
+                        !self.state.recording.busy() && !self.import_path.trim().is_empty(),
+                        egui::Button::new("Импортировать"),
+                    )
+                    .clicked()
+                {
+                    self.state.import_recording(self.import_path.trim().into());
+                    self.show_import = false;
+                }
+            });
+        self.show_import &= open;
+    }
+
     fn settings_dialog(&mut self, ctx: &egui::Context) {
         let mut open = self.show_settings;
         egui::Window::new("Настройки").open(&mut open).default_width(640.0).default_height(600.0).resizable(true).show(ctx, |ui| {
@@ -549,6 +583,9 @@ impl NotetakerApp {
                 let mut library = settings.library.to_string_lossy().into_owned();
                 if ui.text_edit_singleline(&mut library).changed() { settings.library = library.into(); }
                 model_selector(ui, "default_model", &mut settings.model);
+                ui.label("Словарь (один термин на строку)");
+                ui.add(egui::TextEdit::multiline(&mut settings.vocabulary).desired_rows(4));
+                ui.small("Алиасы: werf = верф, вёрф. Дополнения библиотеки: .notetaker/vocabulary.txt");
                 mode_selector(ui, &mut settings.mode);
                 ui.horizontal(|ui| {
                     let mut forever = settings.retention_days.is_none();
@@ -888,12 +925,18 @@ impl eframe::App for NotetakerApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let dropped = ctx.input_mut(|input| std::mem::take(&mut input.raw.dropped_files));
-        self.state.attach(
-            dropped
-                .into_iter()
-                .map(|file| ImageInput::File(file.path().to_owned()))
-                .collect(),
-        );
+        if self.show_import {
+            if let Some(file) = dropped.first() {
+                self.import_path = file.path().to_string_lossy().into_owned();
+            }
+        } else {
+            self.state.attach(
+                dropped
+                    .into_iter()
+                    .map(|file| ImageInput::File(file.path().to_owned()))
+                    .collect(),
+            );
+        }
         let p = Palette::of(ui);
         egui::Panel::left("library")
             .resizable(true)
@@ -931,6 +974,9 @@ impl eframe::App for NotetakerApp {
         self.notifications(&ctx);
         if self.show_record {
             self.recording_dialog(&ctx);
+        }
+        if self.show_import {
+            self.import_dialog(&ctx);
         }
         if self.show_settings {
             self.settings_dialog(&ctx);

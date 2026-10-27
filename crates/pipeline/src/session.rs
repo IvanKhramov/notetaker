@@ -1,6 +1,6 @@
 use std::{
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -72,6 +72,9 @@ pub enum PipelineEvent {
 pub struct StopHandle(Arc<AtomicBool>);
 impl StopHandle {
     /// Non-blocking; wait for Finished (or call RecordingSession::wait) to join.
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
     pub fn stop(&self) {
         self.0.store(true, Ordering::Release);
     }
@@ -85,6 +88,66 @@ pub struct RecordingSession {
 }
 
 impl RecordingSession {
+    /// Import into the existing system/them channel, preserving the file mtime.
+    pub fn import(
+        library: Library,
+        file: &Path,
+        mode: notetaker_core::Mode,
+        asr: AsrConfig,
+        config: RecordingConfig,
+    ) -> Result<Self> {
+        Self::import_with_asr(library, file, mode, WorkerAsr::new(asr), config)
+    }
+
+    pub fn import_with_asr(
+        library: Library,
+        file: &Path,
+        mode: notetaker_core::Mode,
+        asr: impl Asr,
+        config: RecordingConfig,
+    ) -> Result<Self> {
+        let file = file.canonicalize().context("Не удалось открыть запись")?;
+        let metadata = fs::metadata(&file)?;
+        anyhow::ensure!(metadata.is_file(), "Ожидается файл записи");
+        let mut meta = MeetingMeta::new(
+            file.file_stem()
+                .context("Нет имени файла")?
+                .to_string_lossy(),
+            metadata
+                .modified()
+                .context("Не удалось прочитать дату файла")?
+                .into(),
+        );
+        meta.mode = mode;
+        let meeting = library.create_meeting(meta)?;
+        let (events_tx, events) = mpsc::channel();
+        let stop = StopHandle(Arc::new(AtomicBool::new(false)));
+        let worker_stop = stop.clone();
+        let worker_meeting = meeting.clone();
+        let handle = thread::Builder::new()
+            .name("import".into())
+            .spawn(move || {
+                let result = crate::import::run(
+                    &worker_meeting,
+                    &file,
+                    asr,
+                    config,
+                    worker_stop,
+                    &events_tx,
+                );
+                if let Err(error) = &result {
+                    let _ = events_tx.send(PipelineEvent::Error(format!("{error:#}")));
+                }
+                result
+            })?;
+        Ok(Self {
+            meeting,
+            stop,
+            events,
+            handle: Some(handle),
+        })
+    }
+
     pub fn start(
         library: Library,
         meta: MeetingMeta,
@@ -512,6 +575,15 @@ impl<A: Asr> Recognizer<A> {
                     self.asr.start()?;
                     self.ready = true;
                 }
+                if let AudioInput::WavPath(path) = &input {
+                    let wav = hound::WavReader::open(path)?;
+                    let duration = Duration::from_secs_f64(
+                        f64::from(wav.duration()) / f64::from(wav.spec().sample_rate),
+                    );
+                    self.asr.set_timeout(
+                        Duration::from_secs(300).saturating_add(duration.saturating_mul(4)),
+                    );
+                }
                 self.asr.transcribe(input.clone(), channel, offset)
             })();
             match result {
@@ -550,11 +622,17 @@ fn run_asr(asr: impl Asr, meeting: &Meeting, jobs: Receiver<Job>, queue: &Queue)
                         queue,
                     ) {
                         Ok(segments) if queue.enabled.load(Ordering::Acquire) => {
-                            let segments = convert(segments, chunk.channel, Source::Live);
+                            let mut segments = convert(segments, chunk.channel, Source::Live);
                             meeting.update_transcript(|transcript| {
                                 transcript.segments.extend(segments.clone());
                                 sort(&mut transcript.segments);
                                 crate::echo::suppress_echo(&mut transcript.segments);
+                                segments.retain(|segment| {
+                                    transcript
+                                        .segments
+                                        .iter()
+                                        .any(|retained| retained.id == segment.id)
+                                });
                             })?;
                             let _ = queue.events.send(PipelineEvent::LiveSegments(segments));
                         }
@@ -601,7 +679,7 @@ fn run_asr(asr: impl Asr, meeting: &Meeting, jobs: Receiver<Job>, queue: &Queue)
     Ok(())
 }
 
-fn convert(
+pub(crate) fn convert(
     segments: Vec<notetaker_asr_proto::Segment>,
     channel: Channel,
     source: Source,
