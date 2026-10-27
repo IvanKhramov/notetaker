@@ -242,7 +242,7 @@ impl Panel {
                 "Пора подготовить недельный дайджест. Откройте «Дайджест» в боковой панели.".into(),
             ));
         }
-        if self.selected != state.selected && self.receiver.is_none() {
+        if self.selected != state.selected {
             if self.selected.is_some() {
                 self.close();
             }
@@ -273,6 +273,7 @@ impl Panel {
         self.view = Some(View::Person(person.id.clone()));
         self.person = None;
         self.brief.clear();
+        self.merge_into.clear();
         let root = self.root.clone();
         self.launch(ctx, move || {
             Ok(Response::Person(Box::new(
