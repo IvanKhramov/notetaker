@@ -1207,14 +1207,29 @@ fn duration_label(seconds: Option<i64>) -> String {
         |s| format!("{} мин", s.max(0) / 60),
     )
 }
-fn image_uri(path: &std::path::Path, relative: &str) -> String {
-    if relative.contains("://") {
-        return relative.to_owned();
-    }
-    format!(
+fn image_uri(path: &std::path::Path, relative: &str) -> Option<String> {
+    let image = notetaker_core::attachment_image_path(path, relative)?;
+    Some(format!(
         "file://{}",
-        path.join(relative).to_string_lossy().replace('\\', "/")
-    )
+        image.to_string_lossy().replace('\\', "/")
+    ))
+}
+
+fn preview_markdown(text: &str, path: &std::path::Path) -> (String, Vec<Option<String>>) {
+    let images = notetaker_core::markdown_images(text);
+    let uris = images
+        .iter()
+        .map(|(_, destination)| image_uri(path, destination))
+        .collect();
+    let mut markdown = text.to_owned();
+    // Replace inline images too: CommonMark must never load an unchecked URI.
+    for (index, (range, _)) in images.iter().enumerate().rev() {
+        markdown.replace_range(
+            range.clone(),
+            &format!("\n\n<div data-notetaker-image=\"{index}\"></div>\n\n"),
+        );
+    }
+    (markdown, uris)
 }
 
 fn attachment_strip(
@@ -1229,7 +1244,9 @@ fn attachment_strip(
     }
     ui.horizontal_wrapped(|ui| {
         for relative in images {
-            let uri = image_uri(path, &relative);
+            let Some(uri) = image_uri(path, &relative) else {
+                continue;
+            };
             if ui
                 .add(
                     egui::Image::from_uri(&uri)
@@ -1252,28 +1269,12 @@ fn markdown_preview(
     path: &std::path::Path,
     viewer: &mut Option<String>,
 ) {
-    // CommonMark's image widget has no click handler. Render standalone images
-    // through its HTML callback, preserving the surrounding Markdown structure.
-    let images = notetaker_core::markdown_images(text);
-    let mut markdown = text.to_owned();
-    let uris: Vec<_> = images
-        .iter()
-        .map(|(_, destination)| image_uri(path, destination))
+    // CommonMark's image widget has no click handler; use a checked HTML callback.
+    let image_text: Vec<_> = notetaker_core::markdown_images(text)
+        .into_iter()
+        .map(|(range, _)| text[range].to_owned())
         .collect();
-    for (index, (range, _)) in images.iter().enumerate().rev() {
-        let line_start = text[..range.start].rfind('\n').map_or(0, |i| i + 1);
-        let line_end = text[range.end..]
-            .find('\n')
-            .map_or(text.len(), |i| range.end + i);
-        if text[line_start..range.start].trim().is_empty()
-            && text[range.end..line_end].trim().is_empty()
-        {
-            markdown.replace_range(
-                range.clone(),
-                &format!("\n\n<div data-notetaker-image=\"{index}\"></div>\n\n"),
-            );
-        }
-    }
+    let (markdown, uris) = preview_markdown(text, path);
     let clicked = std::rc::Rc::new(std::cell::Cell::new(None));
     let selected = clicked.clone();
     let image_uris = uris.clone();
@@ -1285,9 +1286,13 @@ fn markdown_preview(
             .and_then(|text| text.parse::<usize>().ok())
             .filter(|index| *index < image_uris.len())
         {
+            let Some(uri) = &image_uris[index] else {
+                ui.label(&image_text[index]);
+                return;
+            };
             if ui
                 .add(
-                    egui::Image::from_uri(&image_uris[index])
+                    egui::Image::from_uri(uri)
                         .max_width(ui.available_width())
                         .sense(egui::Sense::click()),
                 )
@@ -1301,11 +1306,10 @@ fn markdown_preview(
         }
     };
     CommonMarkViewer::new()
-        .default_implicit_uri_scheme(format!("{}/", image_uri(path, "").trim_end_matches('/')))
         .render_html_fn(Some(&render))
         .show(ui, cache, &markdown);
     if let Some(index) = clicked.get() {
-        *viewer = Some(uris[index].clone());
+        *viewer = uris[index].clone();
     }
 }
 
@@ -1511,6 +1515,19 @@ fn transcript_view(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn preview_checks_standalone_inline_and_reference_images() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("attachments")).unwrap();
+        std::fs::write(dir.path().join("attachments/a.png"), b"image").unwrap();
+        let text = "![](attachments/a.png)\n\ninline ![](file://attacker/share/i.png) and ![](../../x.png)\n\n![remote][r]\n\n[r]: https://example.org/i.png\n\n![outer ![inner](attachments/a.png)](file://attacker/share/i.png)\n";
+        let (markdown, uris) = super::preview_markdown(text, dir.path());
+        assert_eq!(uris.len(), 5);
+        assert!(uris[0].is_some());
+        assert!(uris[1..].iter().all(Option::is_none));
+        assert!(notetaker_core::markdown_images(&markdown).is_empty());
+    }
+
     use super::*;
     #[test]
     fn editor_preserves_text_paste_and_only_captures_images_while_focused() {

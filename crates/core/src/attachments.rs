@@ -12,13 +12,20 @@ use crate::{
 pub fn markdown_images(text: &str) -> Vec<(Range<usize>, String)> {
     let mut images = Vec::new();
     let mut image = None;
+    let mut depth = 0;
     for (event, range) in Parser::new(text).into_offset_iter() {
         match event {
             Event::Start(Tag::Image { dest_url, .. }) => {
-                image = Some((range.start, dest_url.into_string()));
+                if depth == 0 {
+                    image = Some((range.start, dest_url.into_string()));
+                }
+                depth += 1;
             }
             Event::End(TagEnd::Image) => {
-                if let Some((start, destination)) = image.take() {
+                depth -= 1;
+                if depth == 0
+                    && let Some((start, destination)) = image.take()
+                {
                     images.push((start..range.end, destination));
                 }
             }
@@ -48,6 +55,26 @@ pub fn attachment_references(notes: &str) -> BTreeSet<String> {
             Some(format!("attachments/{name}"))
         })
         .collect()
+}
+
+/// Only local attachments can be loaded as images, never arbitrary paths/URIs.
+pub fn attachment_image_path(meeting: &std::path::Path, destination: &str) -> Option<PathBuf> {
+    let destination = destination.split(['#', '?']).next()?;
+    let decoded = percent_encoding::percent_decode_str(destination)
+        .decode_utf8()
+        .ok()?;
+    let relative = decoded.strip_prefix("./").unwrap_or(&decoded);
+    let name = relative.strip_prefix("attachments/")?;
+    if name.is_empty() || name.starts_with('.') || name.contains(['/', '\\', ':']) {
+        return None;
+    }
+    let meeting = meeting.canonicalize().ok()?;
+    let folder = meeting.join("attachments").canonicalize().ok()?;
+    if folder.parent() != Some(meeting.as_path()) {
+        return None;
+    }
+    let image = folder.join(name).canonicalize().ok()?;
+    (image.starts_with(&folder) && image.is_file()).then_some(image)
 }
 
 fn directory(path: &std::path::Path) -> std::io::Result<bool> {
@@ -186,6 +213,48 @@ impl Meeting {
 mod tests {
     use super::*;
     use crate::{Library, MeetingMeta};
+
+    #[test]
+    fn nested_image_alt_text_does_not_hide_the_outer_destination() {
+        let text = "![outer ![inner](attachments/a.png)](file://attacker/share/i.png)";
+        let images = markdown_images(text);
+        assert_eq!(
+            images,
+            vec![(0..text.len(), "file://attacker/share/i.png".into())]
+        );
+    }
+
+    #[test]
+    fn image_paths_allow_only_existing_contained_attachments() {
+        let temp = tempfile::tempdir().unwrap();
+        let folder = temp.path().join("attachments");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("a b.png"), b"image").unwrap();
+        assert!(attachment_image_path(temp.path(), "./attachments/a%20b.png").is_some());
+        for destination in [
+            "../../x.png",
+            "file://attacker/share/i.png",
+            "//attacker/share/i.png",
+            r"\\attacker\share\i.png",
+            "https://example.org/i.png",
+            "http://example.org/i.png",
+            "attachments/missing.png",
+            "attachments/../notes.md",
+            "attachments/%2e%2e%2fx.png",
+        ] {
+            assert!(
+                attachment_image_path(temp.path(), destination).is_none(),
+                "{destination}"
+            );
+        }
+        #[cfg(unix)]
+        {
+            fs::write(temp.path().join("outside.png"), b"secret").unwrap();
+            std::os::unix::fs::symlink(temp.path().join("outside.png"), folder.join("linked.png"))
+                .unwrap();
+            assert!(attachment_image_path(temp.path(), "attachments/linked.png").is_none());
+        }
+    }
 
     #[test]
     fn references_follow_markdown_and_ignore_code_and_unsafe_paths() {
