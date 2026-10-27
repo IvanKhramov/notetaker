@@ -1,13 +1,17 @@
-use std::time::{Duration, Instant};
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
 
-use eframe::egui::{self, Color32, RichText};
+use eframe::egui::{self, RichText};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use notetaker_core::Mode;
 
 use crate::{
     config::{MODELS, ProviderSettings},
     detection::CallPrompt,
-    state::{AppState, Phase, Tab, edit_segment, speaker, timestamp},
+    state::{AppState, Document, Phase, Tab, edit_segment, speaker, timestamp},
+    theme::{self, ButtonStyle, Palette},
     worker::Command,
 };
 
@@ -18,7 +22,7 @@ pub struct NotetakerApp {
     enhanced_preview: bool,
     show_record: bool,
     show_settings: bool,
-    last_error: Option<String>,
+    toasts: VecDeque<(Instant, String)>,
     #[cfg(windows)]
     desktop: Option<crate::desktop::Desktop>,
     #[cfg(windows)]
@@ -32,10 +36,10 @@ impl NotetakerApp {
             state: AppState::new(),
             cache: CommonMarkCache::default(),
             notes_preview: false,
-            enhanced_preview: false,
+            enhanced_preview: true,
             show_record: false,
             show_settings: false,
-            last_error: None,
+            toasts: VecDeque::new(),
             #[cfg(windows)]
             desktop: None,
             #[cfg(windows)]
@@ -44,291 +48,402 @@ impl NotetakerApp {
             applied_hotkey: String::new(),
         }
     }
-    fn toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.heading("notetaker");
-            if self.state.recording.busy() {
-                let label = if self.state.recording.phase == Phase::Finalizing {
-                    "Чистовой проход…"
-                } else {
-                    "Стоп"
-                };
-                if ui
-                    .add_enabled(
-                        self.state.recording.phase != Phase::Finalizing,
-                        egui::Button::new(label).fill(Color32::from_rgb(150, 45, 45)),
-                    )
-                    .clicked()
-                {
-                    self.state.recording.request_stop();
-                }
-                ui.label(timestamp(self.state.recording.elapsed().as_millis() as u64));
-            } else if ui
-                .add_enabled(
-                    self.state.ready && !self.state.settings_pending && !self.state.downloading,
-                    egui::Button::new("Начать запись"),
-                )
-                .clicked()
-            {
-                self.show_record = true;
-                self.state.inventory_pending = true;
-                self.state.send(Command::Inventory);
-            }
-            if ui.button("Настройки").clicked() {
-                self.show_settings = true;
-            }
-            if ui
-                .add_enabled(
-                    self.state.ready && !self.state.listing,
-                    egui::Button::new("Обновить"),
-                )
-                .clicked()
-            {
-                self.state.flush();
-                self.state.refresh();
-            }
-            if self.state.unsaved() {
-                ui.small("Сохранение…");
-            }
-            if self.state.exit_requested {
-                ui.spinner();
-                ui.label("Завершаем задачи перед выходом…");
-            }
-        });
-        if let Some(prompt) = &self.state.call_prompt {
-            let message = match prompt {
-                CallPrompt::Start { app, .. } => format!("Похоже, идёт звонок в {app}. Записать?"),
-                CallPrompt::Stop { .. } => "Звонок закончился. Остановить запись?".into(),
-            };
-            ui.horizontal_wrapped(|ui| {
-                ui.label(message);
-                if ui.button("Да").clicked() {
-                    self.state.accept_call();
-                }
-                if ui.button("Не сейчас").clicked() {
-                    self.state.dismiss_call();
-                }
-            });
-        }
-        if !self.state.warnings.is_empty() {
-            for warning in &self.state.warnings {
-                ui.colored_label(Color32::YELLOW, warning);
-            }
-            if ui.small_button("Закрыть предупреждения").clicked() {
-                self.state.warnings.clear();
-            }
-        }
-        let recording = &self.state.recording;
-        if recording.busy() {
-            ui.horizontal_wrapped(|ui| {
-                if recording.phase == Phase::Starting {
-                    ui.spinner();
-                    ui.label("Загружаем модель и открываем аудио…");
-                }
-                ui.label(format!("Отставание: {:.1} с", recording.lag));
-                if recording.live_disabled {
-                    ui.colored_label(
-                        Color32::YELLOW,
-                        "LiveDisabled: текст появится после чистового прохода",
-                    );
-                }
-                if recording.fallback {
-                    ui.label("Захват: весь системный звук (откат loopback)");
-                }
-            });
-            if let Some((completed, total)) = recording.progress {
-                ui.add(
-                    egui::ProgressBar::new(completed as f32 / total.max(1) as f32)
-                        .text(format!("Чистовой проход: {completed}/{total}")),
-                );
-            }
-            for message in &recording.messages {
-                ui.colored_label(Color32::YELLOW, message);
-            }
-        }
-    }
     fn meetings(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Встречи");
-        if ui
-            .add(
-                egui::TextEdit::singleline(&mut self.state.query)
-                    .hint_text("Поиск по всем текстам…")
-                    .desired_width(f32::INFINITY),
-            )
-            .changed()
-        {
+        let p = Palette::of(ui);
+        ui.heading(RichText::new("notetaker").size(20.0).strong());
+        ui.add_space(12.0);
+        ui.add_enabled_ui(
+            self.state.ready
+                && !self.state.recording.busy()
+                && !self.state.settings_pending
+                && !self.state.downloading,
+            |ui| {
+                if theme::button(ui, "+ Новая заметка", ButtonStyle::Primary).clicked()
+                {
+                    self.show_record = true;
+                    self.state.inventory_pending = true;
+                    self.state.send(Command::Inventory);
+                }
+            },
+        );
+        let search = ui.add(
+            egui::TextEdit::singleline(&mut self.state.query)
+                .id_salt("library_search")
+                .hint_text("Поиск…  Ctrl+K")
+                .desired_width(f32::INFINITY),
+        );
+        if ui.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::K)) {
+            search.request_focus();
+        }
+        if search.changed() {
             self.state.query_changed = Some(Instant::now());
         }
-        if self.state.listing {
-            ui.spinner();
-        }
-        ui.small(&self.state.status);
-        ui.separator();
+        egui::Panel::bottom("library_actions")
+            .frame(egui::Frame::new().inner_margin(4))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if theme::button(ui, "Настройки", ButtonStyle::Secondary).clicked() {
+                        self.show_settings = true;
+                    }
+                    if ui.small_button("Обновить").clicked() {
+                        self.state.flush();
+                        self.state.refresh();
+                    }
+                });
+                ui.small(if self.state.unsaved() {
+                    "Сохранение…"
+                } else {
+                    &self.state.status
+                });
+                if self.state.exit_requested {
+                    ui.small("Завершаем задачи перед выходом…");
+                }
+            });
         let mut select = None;
-        egui::ScrollArea::vertical().id_salt("meetings").show(ui, |ui| {
-            for row in &self.state.rows {
-                let selected = self.state.selected.as_deref() == Some(row.meeting.path());
-                let title = format!("{}\n{}", row.meta.started_at.with_timezone(&chrono::Local).format("%d.%m.%Y %H:%M"), row.meta.title);
-                if ui.selectable_label(selected, title).on_hover_text(&row.snippet).clicked() { select = Some(row.meeting.clone()); }
-                ui.separator();
-            }
-            if self.state.rows.is_empty() && !self.state.listing { ui.label("Пока нет встреч. Начните запись или выберите другую библиотеку в настройках."); }
-        });
+        let today = chrono::Local::now().date_naive();
+        egui::ScrollArea::vertical()
+            .id_salt("meetings")
+            .show(ui, |ui| {
+                let mut previous = None;
+                for row in &self.state.rows {
+                    let start = row.meta.started_at.with_timezone(&chrono::Local);
+                    let date = start.date_naive();
+                    if previous != Some(date) {
+                        ui.add_space(12.0);
+                        ui.label(
+                            RichText::new(day_label(date, today))
+                                .size(12.0)
+                                .color(p.muted),
+                        );
+                        previous = Some(date);
+                    }
+                    let selected = self.state.selected.as_deref() == Some(row.meeting.path());
+                    let recording = self.state.recording.phase == Phase::Recording
+                        && self.state.recording.path.as_deref() == Some(row.meeting.path());
+                    let response = egui::Frame::new()
+                        .fill(if selected {
+                            p.card
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        })
+                        .corner_radius(8)
+                        .inner_margin(10)
+                        .show(ui, |ui| {
+                            ui.set_width((ui.available_width() - 2.0).max(1.0));
+                            ui.add(
+                                egui::Label::new(RichText::new(&row.meta.title).strong())
+                                    .truncate(),
+                            );
+                            ui.horizontal(|ui| {
+                                if recording {
+                                    theme::recording_dot(ui);
+                                }
+                                let detail = if recording {
+                                    "идёт запись".into()
+                                } else {
+                                    duration_label(
+                                        row.meta
+                                            .ended_at
+                                            .map(|end| (end - row.meta.started_at).num_seconds()),
+                                    )
+                                };
+                                ui.label(
+                                    RichText::new(format!("{} · {detail}", start.format("%H:%M")))
+                                        .size(12.0)
+                                        .color(p.muted),
+                                );
+                            });
+                        })
+                        .response;
+                    if ui
+                        .interact(
+                            response.rect,
+                            response.id.with("select"),
+                            egui::Sense::click(),
+                        )
+                        .on_hover_text(&row.snippet)
+                        .clicked()
+                    {
+                        select = Some(row.meeting.clone());
+                    }
+                }
+                if self.state.rows.is_empty() && !self.state.listing {
+                    ui.weak("Здесь будут ваши встречи");
+                }
+                if self.state.listing {
+                    ui.spinner();
+                }
+            });
         if let Some(meeting) = select {
             self.state.select(meeting);
         }
     }
+    fn recording_bar(&mut self, ui: &mut egui::Ui) {
+        let p = Palette::of(ui);
+        theme::bar(p).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                let r = &self.state.recording;
+                if r.phase == Phase::Recording {
+                    theme::recording_dot(ui);
+                } else {
+                    ui.spinner();
+                }
+                ui.label(RichText::new(timestamp(r.elapsed().as_millis() as u64)).strong());
+                ui.weak(match r.phase {
+                    Phase::Starting => "Загружаю модель и открываю аудио…",
+                    Phase::Finalizing => "Чистовой транскрипт…",
+                    _ if r.live_disabled => "Запись идёт, текст появится после остановки",
+                    _ if r.fallback => "Микрофон и весь системный звук пишутся",
+                    _ => "Микрофон и звук звонка пишутся",
+                });
+                if let Some((done, total)) = r.progress {
+                    ui.add(
+                        egui::ProgressBar::new(done as f32 / total.max(1) as f32)
+                            .desired_width(100.0),
+                    );
+                }
+                let can_stop = matches!(r.phase, Phase::Starting | Phase::Recording);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if can_stop && theme::button(ui, "Стоп", ButtonStyle::Danger).clicked() {
+                        self.state.recording.request_stop();
+                    }
+                });
+            });
+        });
+    }
     fn meeting(&mut self, ui: &mut egui::Ui) {
         let Some(path) = self.state.selected.clone() else {
-            ui.heading("Заметки во время звонка");
-            ui.label("Начните запись и пишите важное здесь. После звонка создайте конспект по заметкам и транскрипту.");
+            ui.add_space(60.0);
+            ui.heading("Место для важных мыслей");
+            ui.weak("Начните встречу, пишите заметки. Транскрипт и конспект будут рядом.");
             return;
         };
         let can_enhance = self.state.enhancing.is_none()
             && !self.state.recording.busy()
             && !self.state.unsaved()
             && !self.state.settings_pending;
-        let locked_transcript =
+        let locked =
             self.state.recording.busy() && self.state.recording.path.as_ref() == Some(&path);
+        let live = locked && self.state.recording.phase == Phase::Recording;
         let Some(document) = self.state.documents.get_mut(&path) else {
             ui.spinner();
-            ui.label("Читаем встречу…");
             return;
         };
-        ui.heading(&document.data.meta.title);
-        for issue in &document.data.meta.capture_issues {
-            ui.colored_label(
-                Color32::YELLOW,
-                format!(
-                    "Неполный захват {} с {}: {}",
-                    speaker(issue.channel),
-                    timestamp(issue.from_ms),
-                    issue.reason
+        ui.heading(RichText::new(&document.data.meta.title).strong());
+        ui.horizontal_wrapped(|ui| {
+            let start = document.data.meta.started_at.with_timezone(&chrono::Local);
+            let range = match document.data.meta.ended_at {
+                Some(end) => format!(
+                    "{}-{}",
+                    start.format("%d.%m, %H:%M"),
+                    end.with_timezone(&chrono::Local).format("%H:%M")
                 ),
+                None => start.format("%d.%m, %H:%M").to_string(),
+            };
+            theme::chip(ui, &range);
+            if let Some(app) = &document.data.meta.app {
+                theme::chip(ui, app);
+            }
+            theme::chip(
+                ui,
+                match document.data.meta.mode {
+                    Mode::Local => "Local",
+                    Mode::Hybrid => "Hybrid",
+                },
             );
+            theme::chip(ui, &format!("Шаблон: {}", document.template));
+            if !locked && !document.data.transcript.segments.is_empty() {
+                theme::chip(ui, "Транскрипт готов");
+            }
+            if !document.data.meta.capture_issues.is_empty() {
+                ui.collapsing("Неполный захват звука", |ui| {
+                    for issue in &document.data.meta.capture_issues {
+                        ui.small(format!(
+                            "{} с {}: {}",
+                            speaker(issue.channel),
+                            timestamp(issue.from_ms),
+                            issue.reason
+                        ));
+                    }
+                });
+            }
+        });
+        ui.add_space(12.0);
+        if document.generation.is_some() {
+            theme::bar(Palette::of(ui)).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Пишу конспект…");
+                });
+            });
         }
-        ui.horizontal(|ui| {
-            ui.small(
-                document
-                    .data
-                    .meta
-                    .started_at
-                    .with_timezone(&chrono::Local)
-                    .format("%d.%m.%Y %H:%M")
-                    .to_string(),
-            );
-            ui.small(mode_label(document.data.meta.mode));
-        });
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.state.tab, Tab::Notes, "Заметки");
-            ui.selectable_value(&mut self.state.tab, Tab::Enhanced, "Конспект");
-            ui.selectable_value(&mut self.state.tab, Tab::Transcript, "Транскрипт");
-        });
-        ui.separator();
+        if live {
+            let height = ui.available_height();
+            ui.columns(2, |columns| {
+                columns[0].set_height(height);
+                columns[1].set_height(height);
+                columns[0].weak("МОИ ЗАМЕТКИ");
+                notes_editor(&mut columns[0], document, &path);
+                columns[1].weak("ТРАНСКРИПТ");
+                transcript_view(&mut columns[1], document, &path, true);
+            });
+            return;
+        }
+        theme::segmented(
+            ui,
+            &mut self.state.tab,
+            &[
+                (Tab::Enhanced, "Конспект"),
+                (Tab::Notes, "Мои заметки"),
+                (Tab::Transcript, "Транскрипт"),
+            ],
+        );
         let mut enhance = false;
+        let mut export = None;
+        if self.state.tab == Tab::Enhanced {
+            egui::Panel::bottom("summary_actions")
+                .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(0, 10)))
+                .show(ui, |ui| {
+                    theme::bar(Palette::of(ui)).show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.add_enabled_ui(document.generation.is_none(), |ui| {
+                                egui::ComboBox::from_id_salt("template")
+                                    .selected_text(&document.template)
+                                    .show_ui(ui, |ui| {
+                                        for name in &self.state.templates {
+                                            ui.selectable_value(
+                                                &mut document.template,
+                                                name.clone(),
+                                                name,
+                                            );
+                                        }
+                                    });
+                            });
+                            ui.add_enabled_ui(can_enhance, |ui| {
+                                enhance = theme::button(ui, "Пересоздать", ButtonStyle::Secondary)
+                                    .clicked();
+                            });
+                            if theme::button(ui, "Копировать", ButtonStyle::Secondary).clicked()
+                            {
+                                ui.ctx().copy_text(
+                                    document
+                                        .generation
+                                        .as_ref()
+                                        .unwrap_or(&document.data.enhanced)
+                                        .clone(),
+                                );
+                            }
+                            ui.add_enabled_ui(document.generation.is_none(), |ui| {
+                                if theme::button(ui, "Сохранить .md", ButtonStyle::Primary)
+                                    .on_hover_text("Сохранить копию конспекта в папку встречи")
+                                    .clicked()
+                                {
+                                    export = Some(Command::Export {
+                                        folder: path.clone(),
+                                        text: document.data.enhanced.clone(),
+                                    });
+                                }
+                            });
+                        });
+                    });
+                });
+        }
         match self.state.tab {
             Tab::Notes => {
                 ui.checkbox(&mut self.notes_preview, "Просмотр Markdown");
-                egui::ScrollArea::vertical()
-                    .id_salt(("notes", &path))
-                    .show(ui, |ui| {
-                        if self.notes_preview {
+                if self.notes_preview {
+                    egui::ScrollArea::vertical()
+                        .id_salt(("notes_preview", &path))
+                        .show(ui, |ui| {
                             CommonMarkViewer::new().show(ui, &mut self.cache, &document.data.notes);
+                        });
+                } else {
+                    notes_editor(ui, document, &path);
+                }
+            }
+            Tab::Enhanced => {
+                ui.checkbox(&mut self.enhanced_preview, "Просмотр Markdown");
+                egui::ScrollArea::vertical()
+                    .id_salt(("enhanced", &path))
+                    .show(ui, |ui| {
+                        if let Some(text) = &document.generation {
+                            CommonMarkViewer::new().show(ui, &mut self.cache, text);
+                        } else if document.data.enhanced.is_empty() && self.enhanced_preview {
+                            ui.weak(
+                                "Выберите шаблон и нажмите «Пересоздать», чтобы собрать конспект.",
+                            );
+                        } else if self.enhanced_preview {
+                            CommonMarkViewer::new().show(
+                                ui,
+                                &mut self.cache,
+                                &document.data.enhanced,
+                            );
                         } else if ui
                             .add(
-                                egui::TextEdit::multiline(&mut document.data.notes)
-                                    .id_salt(("notes_edit", &path))
-                                    .hint_text("Пишите заметки во время звонка…")
+                                egui::TextEdit::multiline(&mut document.data.enhanced)
+                                    .id_salt(("enhanced_edit", &path))
+                                    .frame(egui::Frame::NONE)
                                     .desired_width(f32::INFINITY)
-                                    .desired_rows(28),
+                                    .desired_rows(24),
                             )
                             .changed()
                         {
-                            document.dirty.notes = true;
+                            document.dirty.enhanced = true;
                             document.changed();
                         }
                     });
             }
-            Tab::Enhanced => {
-                ui.horizontal_wrapped(|ui| {
-                    ui.add_enabled_ui(document.generation.is_none(), |ui| {
-                        egui::ComboBox::from_id_salt("template")
-                            .selected_text(&document.template)
-                            .show_ui(ui, |ui| {
-                                for name in &self.state.templates {
-                                    ui.selectable_value(&mut document.template, name.clone(), name);
-                                }
-                            });
-                    });
-                    enhance = ui
-                        .add_enabled(can_enhance, egui::Button::new("Сделать конспект"))
-                        .clicked();
-                    ui.checkbox(&mut self.enhanced_preview, "Просмотр Markdown");
-                });
-                egui::ScrollArea::vertical().id_salt(("enhanced", &path)).show(ui, |ui| {
-                    if let Some(text) = &document.generation {
-                        ui.spinner(); ui.label("Создаём конспект…");
-                        CommonMarkViewer::new().show(ui, &mut self.cache, text);
-                    } else if self.enhanced_preview { CommonMarkViewer::new().show(ui, &mut self.cache, &document.data.enhanced); }
-                    else if ui.add(egui::TextEdit::multiline(&mut document.data.enhanced).id_salt(("enhanced_edit", &path)).hint_text("Конспект появится здесь. Выберите шаблон и нажмите «Сделать конспект».").desired_width(f32::INFINITY).desired_rows(28)).changed() {
-                        document.dirty.enhanced = true; document.changed();
-                    }
-                });
-            }
-            Tab::Transcript => {
-                if locked_transcript {
-                    ui.small("Текст обновляется вживую. Правка сегментов доступна после чистового прохода.");
-                }
-                let mut edits = Vec::new();
-                egui::ScrollArea::vertical()
-                    .id_salt(("transcript", &path))
-                    .stick_to_bottom(locked_transcript)
-                    .show(ui, |ui| {
-                        for segment in &document.data.transcript.segments {
-                            ui.push_id(segment.id, |ui| {
-                                ui.label(
-                                    RichText::new(format!(
-                                        "[{}] {}{}",
-                                        timestamp(segment.start_ms),
-                                        speaker(segment.channel),
-                                        if segment.edited {
-                                            " · исправлено"
-                                        } else {
-                                            ""
-                                        }
-                                    ))
-                                    .strong(),
-                                );
-                                let mut text = segment.text.clone();
-                                if ui
-                                    .add_enabled(
-                                        !locked_transcript,
-                                        egui::TextEdit::multiline(&mut text)
-                                            .desired_width(f32::INFINITY)
-                                            .desired_rows(1),
-                                    )
-                                    .changed()
-                                {
-                                    edits.push((segment.id, text));
-                                }
-                            });
-                            ui.separator();
-                        }
-                        if document.data.transcript.segments.is_empty() {
-                            ui.label("Сегментов пока нет.");
-                        }
-                    });
-                for (id, text) in edits {
-                    if edit_segment(&mut document.data.transcript, id, text) {
-                        document.dirty.transcript = true;
-                        document.changed();
-                    }
-                }
-            }
+            Tab::Transcript => transcript_view(ui, document, &path, locked),
         }
         if enhance {
             self.state.enhance();
         }
+        if let Some(command) = export {
+            self.state.send(command);
+        }
+    }
+    fn notifications(&mut self, ctx: &egui::Context) {
+        for text in self
+            .state
+            .warnings
+            .drain(..)
+            .chain(self.state.recording.messages.drain(..))
+        {
+            if self.toasts.len() == 5 {
+                self.toasts.pop_front();
+            }
+            self.toasts.push_back((Instant::now(), text));
+        }
+        self.toasts
+            .retain(|(at, _)| at.elapsed() < Duration::from_secs(6));
+        if self.toasts.is_empty() && self.state.error.is_none() {
+            return;
+        }
+        egui::Area::new(egui::Id::unique("notifications"))
+            .anchor(egui::Align2::RIGHT_BOTTOM, [-18.0, -18.0])
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                ui.set_width(340.0);
+                for (_, text) in &self.toasts {
+                    theme::bar(Palette::of(ui)).show(ui, |ui| {
+                        ui.label(text);
+                    });
+                }
+                if let Some(error) = self.state.error.clone() {
+                    theme::bar(Palette::of(ui)).show(ui, |ui| {
+                        ui.colored_label(Palette::of(ui).red, error);
+                        ui.horizontal(|ui| {
+                            if ui.button("Настройки").clicked() {
+                                self.show_settings = true;
+                            }
+                            if ui.button("Закрыть").clicked() {
+                                self.state.error = None;
+                            }
+                        });
+                    });
+                }
+            });
     }
     fn recording_dialog(&mut self, ctx: &egui::Context) {
         let mut open = self.show_record;
@@ -381,7 +496,7 @@ impl NotetakerApp {
                     if ui.checkbox(&mut forever, "Хранить аудио навсегда").changed() { settings.retention_days = if forever { None } else { Some(7) }; }
                     if let Some(days) = &mut settings.retention_days { ui.add(egui::DragValue::new(days).range(0..=36_500).suffix(" дней")); }
                 });
-                ui.small("0 — удалить аудио после успешного чистового прохода. Срок применяется к новым записям; просроченное аудио очищается после записи.");
+                ui.small("0 - удалить аудио после успешного чистового прохода. Срок применяется к новым записям; просроченное аудио очищается после записи.");
                 ui.label("Глобальная клавиша старт/стоп (Windows)"); ui.text_edit_singleline(&mut settings.hotkey);
                 ui.small("Например Ctrl+Alt+R. Модификаторы: Ctrl, Alt, Shift, Super; клавиша: A–Z, 0–9, F1–F24.");
                 ui.separator();
@@ -394,7 +509,7 @@ impl NotetakerApp {
                     ui.label("Автостоп по тишине:");
                     ui.add(egui::DragValue::new(&mut settings.auto_stop_minutes).range(0..=u32::MAX).suffix(" мин"));
                 });
-                ui.small("0 — выключено. Завершение звонка само по себе не останавливает запись.");
+                ui.small("0 - выключено. Завершение звонка само по себе не останавливает запись.");
                 ui.separator(); ui.heading("Модели ASR");
                 ui.label("Загрузка выполняется отдельно через notetaker-asr. Прогресс показывает этапы загрузки и установки модели и Silero VAD.");
                 ui.horizontal(|ui| {
@@ -511,7 +626,7 @@ impl NotetakerApp {
                     dismiss = ui.button("Не сейчас").clicked();
                 });
                 if self.state.recording.capture_incomplete {
-                    ui.colored_label(Color32::YELLOW, "⚠ Неполный захват звука");
+                    ui.colored_label(Palette::of(ui).red, "⚠ Неполный захват звука");
                 }
                 if ui.input(|input| input.viewport().close_requested()) {
                     dismiss = true;
@@ -544,7 +659,7 @@ impl NotetakerApp {
                 .with_active(false),
             |ui, _| {
                 ui.horizontal(|ui| {
-                    ui.colored_label(Color32::LIGHT_RED, "●");
+                    ui.colored_label(Palette::of(ui).red, "●");
                     ui.label(timestamp(self.state.recording.elapsed().as_millis() as u64));
                     stop = ui
                         .add_enabled(
@@ -559,7 +674,7 @@ impl NotetakerApp {
                     _ => "Идёт запись",
                 });
                 if self.state.recording.capture_incomplete {
-                    ui.colored_label(Color32::YELLOW, "⚠ Неполный захват звука");
+                    ui.colored_label(Palette::of(ui).red, "⚠ Неполный захват звука");
                 }
                 if ui.input(|input| input.viewport().close_requested()) {
                     ui.ctx()
@@ -615,13 +730,6 @@ impl eframe::App for NotetakerApp {
         self.state.settings.theme.apply(ctx);
         #[cfg(windows)]
         self.desktop(ctx);
-        if self.state.error != self.last_error {
-            if self.state.error.is_some() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-            }
-            self.last_error = self.state.error.clone();
-        }
         if ctx.input(|input| input.viewport().close_requested()) && !self.state.can_exit() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             #[cfg(windows)]
@@ -651,28 +759,24 @@ impl eframe::App for NotetakerApp {
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
-        if let Some(error) = self.state.error.clone() {
-            egui::Panel::bottom("error").show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.colored_label(Color32::LIGHT_RED, &error);
-                    if ui.button("Настройки / скачать модель").clicked() {
-                        self.show_settings = true;
-                    }
-                    if ui.button("Закрыть сообщение").clicked() {
-                        self.state.error = None;
-                    }
-                });
-            });
-        }
+        let p = Palette::of(ui);
         egui::Panel::left("library")
             .resizable(true)
-            .default_size(270.0)
-            .size_range(180.0..=500.0)
+            .default_size(255.0)
+            .size_range(210.0..=400.0)
+            .frame(egui::Frame::new().fill(p.sidebar).inner_margin(16))
             .show(ui, |ui| self.meetings(ui));
-        egui::CentralPanel::default().show(ui, |ui| {
-            ui.add_enabled_ui(!self.state.settings_pending, |ui| self.meeting(ui));
-        });
+        if self.state.recording.busy() {
+            egui::Panel::bottom("recording_bar")
+                .frame(egui::Frame::new().fill(p.bg).inner_margin(16))
+                .show(ui, |ui| self.recording_bar(ui));
+        }
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(p.bg).inner_margin(24))
+            .show(ui, |ui| {
+                ui.add_enabled_ui(!self.state.settings_pending, |ui| self.meeting(ui));
+            });
+        self.notifications(&ctx);
         if self.show_record {
             self.recording_dialog(&ctx);
         }
@@ -708,25 +812,134 @@ fn model_selector(ui: &mut egui::Ui, id: &str, model: &mut String) {
         });
 }
 
+fn day_label(date: chrono::NaiveDate, today: chrono::NaiveDate) -> String {
+    if date == today {
+        "Сегодня".into()
+    } else if Some(date) == today.pred_opt() {
+        "Вчера".into()
+    } else {
+        date.format("%d.%m.%Y").to_string()
+    }
+}
+fn duration_label(seconds: Option<i64>) -> String {
+    seconds.map_or_else(
+        || "без длительности".into(),
+        |s| format!("{} мин", s.max(0) / 60),
+    )
+}
+fn notes_editor(ui: &mut egui::Ui, document: &mut Document, path: &std::path::Path) {
+    egui::ScrollArea::vertical()
+        .id_salt(("notes", path))
+        .show(ui, |ui| {
+            if ui
+                .add(
+                    egui::TextEdit::multiline(&mut document.data.notes)
+                        .id_salt(("notes_edit", path))
+                        .hint_text("Пишите важное здесь…")
+                        .frame(egui::Frame::NONE)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(24),
+                )
+                .changed()
+            {
+                document.dirty.notes = true;
+                document.changed();
+            }
+        });
+}
+fn transcript_view(ui: &mut egui::Ui, document: &mut Document, path: &std::path::Path, live: bool) {
+    let p = Palette::of(ui);
+    let mut edits = Vec::new();
+    egui::ScrollArea::vertical()
+        .id_salt(("transcript", path))
+        .stick_to_bottom(live)
+        .show(ui, |ui| {
+            for segment in &document.data.transcript.segments {
+                let me = segment.channel == notetaker_core::Channel::Mic;
+                let width = (ui.available_width() * 0.90).max(1.0);
+                ui.push_id(segment.id, |ui| {
+                    ui.with_layout(
+                        if me {
+                            egui::Layout::top_down(egui::Align::RIGHT)
+                        } else {
+                            egui::Layout::top_down(egui::Align::LEFT)
+                        },
+                        |ui| {
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} · {}{}",
+                                    speaker(segment.channel),
+                                    timestamp(segment.start_ms),
+                                    if segment.edited {
+                                        " · исправлено"
+                                    } else {
+                                        ""
+                                    }
+                                ))
+                                .size(12.0)
+                                .color(p.muted),
+                            );
+                            egui::Frame::new()
+                                .fill(if me { p.me } else { p.soft })
+                                .corner_radius(10)
+                                .inner_margin(10)
+                                .show(ui, |ui| {
+                                    ui.set_max_width(width);
+                                    if live {
+                                        ui.add(egui::Label::new(&segment.text).wrap());
+                                    } else {
+                                        let mut text = segment.text.clone();
+                                        if ui
+                                            .add(
+                                                egui::TextEdit::multiline(&mut text)
+                                                    .frame(egui::Frame::NONE)
+                                                    .desired_width(width)
+                                                    .desired_rows(1),
+                                            )
+                                            .changed()
+                                        {
+                                            edits.push((segment.id, text));
+                                        }
+                                    }
+                                });
+                        },
+                    );
+                });
+                ui.add_space(8.0);
+            }
+            if document.data.transcript.segments.is_empty() {
+                ui.weak("Текст появится здесь");
+            }
+        });
+    for (id, text) in edits {
+        if edit_segment(&mut document.data.transcript, id, text) {
+            document.dirty.transcript = true;
+            document.changed();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn default_fonts_have_russian_in_both_families() {
-        let ctx = egui::Context::default();
-        let output = ctx.run_pass(egui::RawInput::default(), |ctx| {
-            ctx.fonts_mut(|fonts| {
-                for font in [
-                    egui::FontId::proportional(16.0),
-                    egui::FontId::monospace(16.0),
-                ] {
-                    assert!(fonts.has_glyphs(
-                        &font,
-                        "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдеёжзийклмнопрстуфхцчшщъыьэюя"
-                    ));
-                }
-            });
-        });
-        output.drop_without_applying_deltas();
+    fn groups_by_local_calendar_day_including_year_boundary() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        assert_eq!(day_label(today, today), "Сегодня");
+        assert_eq!(day_label(today.pred_opt().unwrap(), today), "Вчера");
+        assert_eq!(
+            day_label(
+                chrono::NaiveDate::from_ymd_opt(2025, 12, 30).unwrap(),
+                today
+            ),
+            "30.12.2025"
+        );
+    }
+    #[test]
+    fn formats_duration_without_wrapping_at_one_hour() {
+        assert_eq!(duration_label(None), "без длительности");
+        assert_eq!(duration_label(Some(59)), "0 мин");
+        assert_eq!(duration_label(Some(3600)), "60 мин");
+        assert_eq!(duration_label(Some(-1)), "0 мин");
     }
 }

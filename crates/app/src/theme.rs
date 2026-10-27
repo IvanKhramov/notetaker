@@ -94,6 +94,16 @@ pub fn install(ctx: &egui::Context) {
         .get_mut(&FontFamily::Proportional)
         .unwrap()
         .insert(0, "Inter".into());
+    fonts.font_data.insert(
+        "Inter Semibold".into(),
+        std::sync::Arc::new(FontData::from_static(include_bytes!(
+            "../assets/Inter-SemiBold.ttf"
+        ))),
+    );
+    fonts.families.insert(
+        FontFamily::Name("heading".into()),
+        vec!["Inter Semibold".into()],
+    );
     // Retain the monospace face and provide Cyrillic/symbol fallback.
     fonts
         .families
@@ -116,9 +126,10 @@ pub fn install(ctx: &egui::Context) {
         style
             .text_styles
             .insert(TextStyle::Small, FontId::proportional(12.0));
-        style
-            .text_styles
-            .insert(TextStyle::Heading, FontId::proportional(29.0));
+        style.text_styles.insert(
+            TextStyle::Heading,
+            FontId::new(29.0, FontFamily::Name("heading".into())),
+        );
         let v = &mut style.visuals;
         *v = if theme == egui::Theme::Dark {
             egui::Visuals::dark()
@@ -190,4 +201,72 @@ mod tests {
             assert!(ctx.style().visuals.dark_mode);
         }
     }
+}
+
+pub enum ButtonStyle {
+    Primary,
+    Secondary,
+    Danger,
+}
+pub fn button(ui: &mut egui::Ui, text: &str, style: ButtonStyle) -> egui::Response {
+    let p = Palette::of(ui);
+    let (fill, ink) = match style {
+        ButtonStyle::Primary => (p.accent, p.on_accent),
+        ButtonStyle::Secondary => (p.soft, p.text),
+        ButtonStyle::Danger => (p.danger, p.red),
+    };
+    ui.add(
+        egui::Button::new(egui::RichText::new(text).color(ink))
+            .fill(fill)
+            .stroke(Stroke::NONE),
+    )
+}
+pub fn chip(ui: &mut egui::Ui, text: &str) {
+    let p = Palette::of(ui);
+    egui::Frame::new()
+        .fill(p.soft)
+        .corner_radius(20)
+        .inner_margin(egui::Margin::symmetric(9, 4))
+        .show(ui, |ui| {
+            ui.label(egui::RichText::new(text).size(12.0).color(p.muted));
+        });
+}
+pub fn segmented<T: Copy + PartialEq>(ui: &mut egui::Ui, selected: &mut T, values: &[(T, &str)]) {
+    let p = Palette::of(ui);
+    egui::Frame::new()
+        .fill(p.soft)
+        .corner_radius(9)
+        .inner_margin(3)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                for &(value, text) in values {
+                    let active = *selected == value;
+                    let text =
+                        egui::RichText::new(text).color(if active { p.text } else { p.muted });
+                    if ui
+                        .add(
+                            egui::Button::new(text)
+                                .fill(if active { p.card } else { Color32::TRANSPARENT })
+                                .stroke(Stroke::NONE),
+                        )
+                        .clicked()
+                    {
+                        *selected = value;
+                    }
+                }
+            });
+        });
+}
+pub fn recording_dot(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 16.0), egui::Sense::hover());
+    ui.painter()
+        .circle_filled(rect.center(), 4.0, Palette::of(ui).red);
+}
+pub fn bar(p: Palette) -> egui::Frame {
+    egui::Frame::new()
+        .fill(p.card)
+        .stroke(Stroke::new(1.0, p.border))
+        .corner_radius(10)
+        .inner_margin(10)
 }

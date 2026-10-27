@@ -2,7 +2,7 @@
 //! own threads. The UI never waits for a worker or owns a RecordingSession.
 use std::{
     fs,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Command as Process, Stdio},
     sync::mpsc::{self, Receiver, Sender},
@@ -151,6 +151,10 @@ pub struct RecordRequest {
 }
 
 pub enum Command {
+    Export {
+        folder: PathBuf,
+        text: String,
+    },
     List {
         root: PathBuf,
         query: String,
@@ -173,6 +177,7 @@ pub enum Command {
 // Rare worker-to-UI messages; boxing variants buys nothing measurable.
 #[allow(clippy::large_enum_variant)]
 pub enum Event {
+    Exported(Result<PathBuf, String>),
     Boot {
         settings: Settings,
         llm: LlmSettings,
@@ -253,6 +258,20 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
         });
         for command in rx {
             match command {
+                Command::Export { folder, text } => {
+                    let result = (|| -> Result<PathBuf> {
+                        let path = folder.join(format!(
+                            "summary-{}.md",
+                            Utc::now().format("%Y%m%d-%H%M%S-%f")
+                        ));
+                        let mut file = fs::File::create_new(&path)?;
+                        file.write_all(text.as_bytes())?;
+                        file.sync_all()?;
+                        Ok(path)
+                    })()
+                    .map_err(error_text);
+                    let _ = events.send(Event::Exported(result));
+                }
                 Command::List {
                     root,
                     query,

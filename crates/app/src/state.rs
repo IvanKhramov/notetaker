@@ -19,8 +19,8 @@ use crate::{
 
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
-    #[default]
     Notes,
+    #[default]
     Enhanced,
     Transcript,
 }
@@ -86,8 +86,7 @@ impl Recording {
                 self.fallback = true;
                 self.message("Переключение на весь системный звук".into());
             }
-            PipelineEvent::CaptureEvent(CaptureEvent::Error { message, .. })
-            | PipelineEvent::Error(message) => self.message(message.clone()),
+            PipelineEvent::CaptureEvent(CaptureEvent::Error { .. }) | PipelineEvent::Error(_) => {}
             PipelineEvent::CaptureEvent(
                 CaptureEvent::Discontinuity { .. } | CaptureEvent::TimestampError { .. },
             ) => self.message("Разрыв звука / ошибка временной метки".into()),
@@ -219,7 +218,7 @@ impl AppState {
             documents: HashMap::new(),
             loading: HashSet::new(),
             selected: None,
-            tab: Tab::Notes,
+            tab: Tab::Enhanced,
             recording: Recording::default(),
             call_prompt: None,
             detector: Monitor::default(),
@@ -579,6 +578,12 @@ impl AppState {
                     }
                 }
             }
+            Event::Exported(result) => match result {
+                Ok(path) => self
+                    .warnings
+                    .push(format!("Конспект сохранён: {}", path.display())),
+                Err(error) => self.error = Some(error),
+            },
             Event::Inventory(result) => {
                 self.inventory_pending = false;
                 match result {
@@ -613,6 +618,14 @@ impl AppState {
             }
             Event::Pipeline(event) => {
                 self.recording.apply(&event);
+                if let PipelineEvent::Error(message)
+                | PipelineEvent::CaptureEvent(CaptureEvent::Error { message, .. }) = &event
+                {
+                    self.error = Some(message.clone());
+                }
+                if self.recording.phase == Phase::Finalizing {
+                    self.tab = Tab::Enhanced;
+                }
                 if let PipelineEvent::CaptureIssue(issue) = &event
                     && let Some(doc) = self
                         .recording
@@ -753,7 +766,7 @@ pub fn timestamp(ms: u64) -> String {
 pub fn speaker(channel: Channel) -> &'static str {
     match channel {
         Channel::Mic => "Я",
-        Channel::System => "Они",
+        Channel::System => "Собеседники",
     }
 }
 pub fn edit_segment(transcript: &mut Transcript, id: Uuid, text: String) -> bool {
@@ -780,7 +793,7 @@ mod tests {
         assert_eq!(timestamp(65_999), "01:05");
         assert_eq!(timestamp(3_600_000), "60:00");
         assert_eq!(speaker(Channel::Mic), "Я");
-        assert_eq!(speaker(Channel::System), "Они");
+        assert_eq!(speaker(Channel::System), "Собеседники");
     }
     #[test]
     fn edit_marks_only_changed_segment_and_persists() {
