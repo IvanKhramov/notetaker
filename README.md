@@ -30,9 +30,28 @@ CLI: `people`, `person <name|email>`, `digest --week [--prev]`.
 MCP: `list_people`, `get_person`, `get_series`, `get_digest` с фильтром Local.
 Подробности: [люди, серии и дайджест](docs/people.md).
 
+## Помощь во время записи (0.11.0)
+
+Справа рядом с живым транскриптом доступен **Живой конспект**: обновление раз
+в 3 минуты (настройка 2-10) при появлении нового текста или **Обновить сейчас**.
+Нужен настроенный провайдер конспекта; Local допускает только loopback.
+Черновик живёт в памяти до следующей записи, итоговый `enhanced.md` создаётся
+обычным чистовым проходом и остаётся источником правды.
+
+**Что я пропустил?** даёт 3-5 пунктов за последние 5 минут (окно настраивается).
+Ответ остаётся до закрытия, в том числе в индикаторе записи поверх звонка.
+Windows: Ctrl+Alt+M - обзор, Ctrl+Alt+B - закладка, Ctrl+Alt+R - запись.
+Все три клавиши меняются в настройках с проверкой конфликтов.
+
+**Закладка** отмечает текущее время; подпись необязательна, пустой ввод
+закрывается через 5 секунд. После встречи подпись можно изменить или удалить
+закладку в транскрипте. Флаги таймлайна ведут к ближайшей реплике. Итоговый
+конспект получает отмеченные моменты и контекст по 30 секунд с каждой стороны.
+Markdown, JSON, CSV и VTT сохраняют закладки; SRT содержит только реплики.
+
 ## Install
 
-Download `notetaker-0.9.0-windows-x64.zip` from this repository's **Releases**
+Download `notetaker-0.11.0-windows-x64.zip` from this repository's **Releases**
 page and extract it into a folder. Keep all files together and run
 `notetaker-app.exe`. The binaries are unsigned: Windows SmartScreen may warn;
 choose **More info → Run anyway** if you trust the download. A SHA-256 checksum
