@@ -23,7 +23,9 @@ pub fn run(args: Args) -> Result<()> {
         .into_iter()
         .find(|m| m.path() == path)
         .context("meeting directory has no valid meta.yaml")?;
-    let text = meeting.read_transcript()?.export(args.format)?;
+    let mut transcript = meeting.read_transcript()?;
+    transcript.default_self_name(&notetaker_core::configured_user_name()?);
+    let text = transcript.export(args.format)?;
     std::io::stdout().lock().write_all(text.as_bytes())?;
     Ok(())
 }

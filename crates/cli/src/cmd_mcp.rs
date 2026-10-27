@@ -197,13 +197,13 @@ impl Server {
                     {
                         // Check privacy again immediately before reading content.
                         ensure!(self.allowed(&meeting)?, "Встреча недоступна");
+                        let mut transcript = meeting.read_transcript()?;
+                        transcript.default_self_name(&notetaker_core::configured_user_name()?);
                         if name == "get_speaker_timeline" {
-                            return Ok(serde_json::to_value(
-                                meeting.read_transcript()?.speaker_timeline(),
-                            )?);
+                            return Ok(serde_json::to_value(transcript.speaker_timeline())?);
                         }
                         return Ok(
-                            json!({"meta":meta,"notes":meeting.read_notes()?,"summary":meeting.read_enhanced()?,"transcript":meeting.read_transcript()?.named_text()}),
+                            json!({"meta":meta,"notes":meeting.read_notes()?,"summary":meeting.read_enhanced()?,"transcript":transcript.named_text()}),
                         );
                     }
                 }
