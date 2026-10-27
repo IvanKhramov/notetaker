@@ -608,34 +608,6 @@ impl NotetakerApp {
         let locked =
             self.state.recording.busy() && self.state.recording.path.as_ref() == Some(&path);
         let live = locked && self.state.recording.phase == Phase::Recording;
-        if let Some(document) = self.state.documents.get(&path)
-            && ui
-                .add_enabled(
-                    !self.state.chat.busy,
-                    egui::Button::new("Спросить про эту встречу"),
-                )
-                .clicked()
-        {
-            self.state.chat.open(
-                Some(document.data.meeting.clone()),
-                document.data.meta.title.clone(),
-            );
-        }
-        if self
-            .state
-            .documents
-            .get(&path)
-            .is_some_and(|doc| !doc.data.enhanced.trim().is_empty())
-            && ui
-                .add_enabled(
-                    can_enhance && !self.state.draft_busy,
-                    egui::Button::new("Черновик сообщения"),
-                )
-                .clicked()
-        {
-            self.state.followup_open = true;
-            self.state.followup_path = Some(path.clone());
-        }
         let target_line = self
             .state
             .task_target
@@ -762,15 +734,6 @@ impl NotetakerApp {
             self.state.attach(images);
             return;
         }
-        theme::segmented(
-            ui,
-            &mut self.state.tab,
-            &[
-                (Tab::Enhanced, "Конспект"),
-                (Tab::Notes, "Мои заметки"),
-                (Tab::Transcript, "Транскрипт"),
-            ],
-        );
         let mut enhance = update_summary;
         let mut export = None;
         let mut speaker_edit = None;
@@ -780,39 +743,89 @@ impl NotetakerApp {
             && document.attachments_pending == 0
             && self.state.enhancing.is_none()
             && !self.state.settings_pending;
+        let mut ask = None;
+        let mut followup = false;
         ui.add_enabled_ui(!locked && !speaker_busy, |ui| {
-            ui.menu_button("Экспорт", |ui| {
-                if ui
-                    .add_enabled(
-                        !document.data.enhanced.is_empty(),
-                        egui::Button::new("Конспект Markdown"),
-                    )
-                    .clicked()
-                {
-                    export = Some(Command::Export {
-                        meeting: document.data.meeting.clone(),
-                        text: document.data.enhanced.clone(),
-                    });
-                    ui.close();
-                }
-                for (format, label) in [
-                    (notetaker_core::ExportFormat::Md, "Транскрипт Markdown"),
-                    (notetaker_core::ExportFormat::Srt, "Субтитры SRT"),
-                    (notetaker_core::ExportFormat::Vtt, "Субтитры VTT"),
-                    (notetaker_core::ExportFormat::Csv, "Реплики CSV"),
-                    (notetaker_core::ExportFormat::Json, "Журнал таймингов JSON"),
-                ] {
-                    if ui.button(label).clicked() {
-                        export = Some(Command::ExportTranscript {
+            ui.horizontal_wrapped(|ui| {
+                ui.menu_button("Экспорт", |ui| {
+                    if ui
+                        .add_enabled(
+                            !document.data.enhanced.is_empty(),
+                            egui::Button::new("Конспект Markdown"),
+                        )
+                        .clicked()
+                    {
+                        export = Some(Command::Export {
                             meeting: document.data.meeting.clone(),
-                            transcript: document.data.transcript.clone(),
-                            format,
+                            text: document.data.enhanced.clone(),
                         });
                         ui.close();
                     }
+                    for (format, label) in [
+                        (notetaker_core::ExportFormat::Md, "Транскрипт Markdown"),
+                        (notetaker_core::ExportFormat::Srt, "Субтитры SRT"),
+                        (notetaker_core::ExportFormat::Vtt, "Субтитры VTT"),
+                        (notetaker_core::ExportFormat::Csv, "Реплики CSV"),
+                        (notetaker_core::ExportFormat::Json, "Журнал таймингов JSON"),
+                    ] {
+                        if ui.button(label).clicked() {
+                            export = Some(Command::ExportTranscript {
+                                meeting: document.data.meeting.clone(),
+                                transcript: document.data.transcript.clone(),
+                                format,
+                            });
+                            ui.close();
+                        }
+                    }
+                    ui.weak("Файл в папке встречи обновляется при повторном экспорте");
+                });
+                if ui
+                    .add_enabled(
+                        !self.state.chat.busy,
+                        egui::Button::new("Спросить про эту встречу"),
+                    )
+                    .clicked()
+                {
+                    ask = Some((
+                        document.data.meeting.clone(),
+                        document.data.meta.title.clone(),
+                    ));
                 }
-                ui.weak("Файл в папке встречи обновляется при повторном экспорте");
+                if ui
+                    .add_enabled(
+                        can_enhance
+                            && !self.state.draft_busy
+                            && !document.data.enhanced.trim().is_empty(),
+                        egui::Button::new("Черновик сообщения"),
+                    )
+                    .clicked()
+                {
+                    followup = true;
+                }
             });
+        });
+        ui.horizontal(|ui| {
+            theme::segmented(
+                ui,
+                &mut self.state.tab,
+                &[
+                    (Tab::Enhanced, "Конспект"),
+                    (Tab::Notes, "Мои заметки"),
+                    (Tab::Transcript, "Транскрипт"),
+                ],
+            );
+            ui.with_layout(
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| match self.state.tab {
+                    Tab::Notes => {
+                        ui.checkbox(&mut self.notes_preview, "Просмотр Markdown");
+                    }
+                    Tab::Enhanced => {
+                        ui.checkbox(&mut self.enhanced_preview, "Просмотр Markdown");
+                    }
+                    Tab::Transcript => {}
+                },
+            );
         });
         if self.state.tab == Tab::Enhanced {
             egui::Panel::bottom("summary_actions")
@@ -871,7 +884,6 @@ impl NotetakerApp {
         ui.add_enabled_ui(!speaker_busy, |ui| {
         match self.state.tab {
             Tab::Notes => {
-                ui.checkbox(&mut self.notes_preview, "Просмотр Markdown");
                 if self.notes_preview {
                     egui::ScrollArea::vertical()
                         .id_salt(("notes_preview", &path))
@@ -889,7 +901,6 @@ impl NotetakerApp {
                 }
             }
             Tab::Enhanced => {
-                ui.checkbox(&mut self.enhanced_preview, "Просмотр Markdown");
                 egui::ScrollArea::vertical()
                     .id_salt(("enhanced", &path))
                     .show(ui, |ui| {
@@ -940,6 +951,13 @@ impl NotetakerApp {
             }
         }
         });
+        if let Some((meeting, title)) = ask {
+            self.state.chat.open(Some(meeting), title);
+        }
+        if followup {
+            self.state.followup_open = true;
+            self.state.followup_path = Some(path.clone());
+        }
         if let Some(edit) = speaker_edit {
             self.state.edit_speakers(edit);
         }
