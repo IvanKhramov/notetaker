@@ -3,12 +3,21 @@ name: Release
 on:
   push:
     tags: ['v*']
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Published stable release version (e.g. 0.8.0)'
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 jobs:
   windows:
+    if: github.event_name == 'push'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -31,6 +40,13 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: ./scripts/package-windows.ps1 -Version ($env:RELEASE_TAG.Substring(1))
+      - name: Build per-user installer
+        id: installer
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          PAYLOAD_DIR: ${{ steps.package.outputs.payload }}
+        run: ./scripts/package-installer.ps1 -Version ($env:RELEASE_TAG.Substring(1)) -PayloadDir $env:PAYLOAD_DIR
       - name: Create draft release
         shell: pwsh
         env:
@@ -38,6 +54,45 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
           RELEASE_ZIP: ${{ steps.package.outputs.zip }}
           RELEASE_CHECKSUM: ${{ steps.package.outputs.checksum }}
+          RELEASE_SETUP: ${{ steps.installer.outputs.setup }}
+          SETUP_CHECKSUM: ${{ steps.installer.outputs.setup_checksum }}
         run: |
-          gh release create $env:RELEASE_TAG $env:RELEASE_ZIP $env:RELEASE_CHECKSUM --verify-tag --draft --generate-notes --title "notetaker $env:RELEASE_TAG"
+          gh release create $env:RELEASE_TAG $env:RELEASE_SETUP $env:SETUP_CHECKSUM $env:RELEASE_ZIP $env:RELEASE_CHECKSUM --verify-tag --draft --generate-notes --title "notetaker $env:RELEASE_TAG"
           if ($LASTEXITCODE -ne 0) { throw 'GitHub Release creation failed' }
+
+  winget:
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    concurrency:
+      group: winget-${{ github.event.release.tag_name || inputs.version }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate manifests from published release
+        id: manifests
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ github.event.release.tag_name || inputs.version }}
+        run: ./scripts/winget-manifests.ps1 -Version $env:RELEASE_VERSION
+      - name: Attach manifests to release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MANIFEST_DIR: ${{ steps.manifests.outputs.manifests }}
+          VERSION: ${{ steps.manifests.outputs.version }}
+        run: |
+          $asset = "notetaker-$env:VERSION-winget.zip"
+          Compress-Archive -Path "$env:MANIFEST_DIR/*.yaml" -DestinationPath $asset -Force
+          gh release upload "v$env:VERSION" $asset --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Manifest upload failed' }
+      - name: Submit update if configured
+        shell: pwsh
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          VERSION: ${{ steps.manifests.outputs.version }}
+          SETUP_URL: ${{ steps.manifests.outputs.url }}
+        run: |
+          if (-not $env:WINGET_TOKEN) { Write-Host 'WINGET_TOKEN not configured; manifests attached only'; exit 0 }
+          Invoke-WebRequest 'https://aka.ms/wingetcreate/latest' -OutFile wingetcreate.exe
+          ./wingetcreate.exe update IvanKhramov.Notetaker --version $env:VERSION --urls $env:SETUP_URL --submit --token $env:WINGET_TOKEN
+          if ($LASTEXITCODE -ne 0) { throw 'WinGet submission failed; first submission must be completed manually' }

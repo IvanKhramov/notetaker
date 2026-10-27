@@ -1,0 +1,15 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.9.0.schema.json
+PackageIdentifier: IvanKhramov.Notetaker
+PackageVersion: '@VERSION@'
+InstallerType: inno
+Scope: user
+ProductCode: '{9A1B3B55-9F48-4D83-A8E7-706D71F4F5D9}_is1'
+InstallerSwitches:
+  Custom: /CLOSEAPPLICATIONS=no
+UpgradeBehavior: install
+Installers:
+  - Architecture: x64
+    InstallerUrl: '@URL@'
+    InstallerSha256: '@SHA256@'
+ManifestType: installer
+ManifestVersion: 1.9.0
