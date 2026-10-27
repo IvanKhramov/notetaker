@@ -25,6 +25,7 @@ impl Fake {
                 base_url: "http://localhost:11434/v1".into(),
                 model: "fake".into(),
                 api_key_env: None,
+                key_source: Default::default(),
                 context_tokens,
             },
             calls: Mutex::new(Vec::new()),
@@ -112,7 +113,7 @@ fn prompt_preserves_user_outline_metadata_speakers_and_language() {
     let calls = provider.calls.lock().unwrap();
     assert_eq!(calls.len(), 1);
     assert!(calls[0].0.contains("preserve every point"));
-    assert!(calls[0].0.contains("language of the meeting"));
+    assert!(calls[0].0.contains("transcript language"));
     assert!(calls[0].1.contains(notes));
     assert!(calls[0].1.contains("Release planning"));
     assert!(calls[0].1.contains("2026-10-26T15:30:00+00:00"));
@@ -253,7 +254,7 @@ fn user_template_overrides_builtin_and_supports_frontmatter() {
             Template::load(directory.path(), name)
                 .unwrap()
                 .instruction
-                .contains("language of the meeting")
+                .contains("transcript language")
         );
     }
     fs::write(
@@ -338,4 +339,70 @@ fn saved_enhancement_survives_metadata_and_index_failures() {
     assert_eq!(result.warnings.len(), 2);
     assert!(result.warnings.iter().any(|s| s.contains("metadata")));
     assert!(result.warnings.iter().any(|s| s.contains("index")));
+}
+
+#[test]
+fn automatic_generation_preserves_user_summary_and_stamps_actual_input() {
+    let root = tempfile::tempdir().unwrap();
+    let library = Library::open(root.path()).unwrap();
+    let meeting = library
+        .create_meeting(MeetingMeta::new(
+            "Auto",
+            chrono::DateTime::from_timestamp(1_800_000_000, 0).unwrap(),
+        ))
+        .unwrap();
+    meeting.write_notes("before").unwrap();
+    let provider = Fake::new(8192);
+    let template = Template::builtin("general").unwrap();
+    let result = notetaker_llm::enhance_meeting_if_unedited(
+        &meeting,
+        "general",
+        &template,
+        &provider,
+        &mut |_| {
+            meeting.write_notes("changed during generation").unwrap();
+        },
+    )
+    .unwrap();
+    let meta = meeting.read_meta().unwrap();
+    let stamp = meta.summary.unwrap();
+    assert_eq!(stamp, result.stamp);
+    assert!(!stamp.stale("before", &Transcript::default(), "general"));
+    assert!(stamp.stale(
+        &meeting.read_notes().unwrap(),
+        &Transcript::default(),
+        "general"
+    ));
+    meeting.write_enhanced("user changes").unwrap();
+    let count = provider.calls.lock().unwrap().len();
+    assert!(
+        notetaker_llm::enhance_meeting_if_unedited(
+            &meeting,
+            "general",
+            &template,
+            &provider,
+            &mut |_| {}
+        )
+        .is_err()
+    );
+    assert_eq!(provider.calls.lock().unwrap().len(), count);
+    assert_eq!(meeting.read_enhanced().unwrap(), "user changes");
+    assert!(enhance_meeting(&meeting, "general", &template, &provider, &mut |_| {}).is_ok());
+}
+
+#[test]
+fn builtins_share_action_format_and_transcript_language() {
+    for name in ["general", "one-on-one", "client-call", "standup"] {
+        let template = Template::builtin(name).unwrap();
+        assert!(
+            template
+                .instruction
+                .contains("- [ ] Задача - Ответственный - срок")
+        );
+        assert!(
+            template
+                .instruction
+                .contains("transcript language, Russian by default")
+        );
+    }
 }

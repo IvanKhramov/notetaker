@@ -29,6 +29,8 @@ pub struct Defaults {
 pub enum ProviderKind {
     Openai,
     Anthropic,
+    ClaudeCli,
+    CodexCli,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -37,11 +39,34 @@ pub struct ProviderConfig {
     pub id: String,
     pub kind: ProviderKind,
     /// API root, including /v1 where required (never a completions/messages URL).
+    #[serde(default)]
     pub base_url: String,
+    #[serde(default)]
     pub model: String,
     /// Name of an environment variable, never an API key itself.
     pub api_key_env: Option<String>,
+    #[serde(default)]
+    pub key_source: KeySource,
+    #[serde(default = "default_context")]
     pub context_tokens: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum KeySource {
+    #[default]
+    Env,
+    Credential,
+}
+
+fn default_context() -> usize {
+    150_000
+}
+
+impl ProviderKind {
+    pub fn is_cli(self) -> bool {
+        matches!(self, Self::ClaudeCli | Self::CodexCli)
+    }
 }
 
 impl Config {
@@ -103,6 +128,25 @@ impl Config {
 impl ProviderConfig {
     /// Validate privacy before reading a key, constructing a client, or doing I/O.
     pub fn validate(&self, mode: Mode) -> Result<reqwest::Url> {
+        ensure!(
+            !self.id.trim().is_empty() && !self.id.chars().any(char::is_control),
+            "LLM provider id must not be empty"
+        );
+        ensure!(
+            self.context_tokens > 0,
+            "LLM context_tokens must be positive"
+        );
+        if self.kind.is_cli() {
+            ensure!(
+                mode != Mode::Local,
+                "Режим Local запрещает облачные CLI-провайдеры. Выберите Hybrid для этой встречи."
+            );
+            ensure!(
+                self.key_source == KeySource::Env && self.api_key_env.is_none(),
+                "CLI использует собственный вход; ключи не настраиваются"
+            );
+            return Ok(reqwest::Url::parse("https://cli.invalid").expect("static URL"));
+        }
         let url = reqwest::Url::parse(&self.base_url)
             .map_err(|_| anyhow::anyhow!("invalid LLM base_url"))?;
         ensure!(
@@ -127,12 +171,8 @@ impl ProviderConfig {
             }
         }
         ensure!(
-            !self.id.trim().is_empty() && !self.model.trim().is_empty(),
-            "LLM provider id and model must not be empty"
-        );
-        ensure!(
-            self.context_tokens > 0,
-            "LLM context_tokens must be positive"
+            !self.model.trim().is_empty(),
+            "LLM provider model must not be empty"
         );
         ensure!(
             self.api_key_env

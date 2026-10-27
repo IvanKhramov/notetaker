@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 use notetaker_core::Library;
-use notetaker_llm::{Config, HttpProvider, Template, enhance_meeting};
+use notetaker_llm::{Cancellation, Config, Template, create_provider, enhance_meeting};
 
 #[derive(Parser)]
 pub struct Args {
@@ -36,11 +36,18 @@ pub fn run(args: Args) -> Result<()> {
         .unwrap_or("general");
     let template = Template::load(library.root(), template_id)?;
     let config = Config::load()?;
-    let provider = HttpProvider::new(
+    let provider = create_provider(
         config.select(meta.mode, args.provider.as_deref())?.clone(),
         meta.mode,
+        Cancellation::default(),
     )?;
-    let result = enhance_meeting(&meeting, template_id, &template, &provider, &mut |_| {})?;
+    let result = enhance_meeting(
+        &meeting,
+        template_id,
+        &template,
+        provider.as_ref(),
+        &mut |_| {},
+    )?;
     println!("{}", result.text);
     for warning in result.warnings {
         eprintln!("Warning: {warning}");

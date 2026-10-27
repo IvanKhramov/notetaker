@@ -19,12 +19,15 @@ pub struct MeetingMeta {
     pub audio_expires_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capture_issues: Vec<CaptureIssue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<SummaryStamp>,
 }
 
 impl MeetingMeta {
     /// Create a local meeting with a UUID v7 and seven-day audio retention.
     pub fn new(title: impl Into<String>, started_at: DateTime<Utc>) -> Self {
         Self {
+            summary: None,
             capture_issues: Vec::new(),
             id: Uuid::now_v7(),
             title: title.into(),
@@ -110,4 +113,74 @@ pub struct CaptureIssue {
     pub channel: Channel,
     pub from_ms: u64,
     pub reason: String,
+}
+
+/// Content hashes detect both stale evidence and user changes without mtime races.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SummaryStamp {
+    pub input: String,
+    pub enhanced: String,
+}
+impl SummaryStamp {
+    pub fn new(notes: &str, transcript: &Transcript, template: &str, enhanced: &str) -> Self {
+        use sha2::{Digest, Sha256};
+        let input =
+            serde_json::to_vec(&(notes, transcript, template)).expect("serializable summary input");
+        Self {
+            input: format!("{:x}", Sha256::digest(input)),
+            enhanced: Self::digest(enhanced),
+        }
+    }
+    fn digest(text: &str) -> String {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(text.as_bytes()))
+    }
+    pub fn edited(&self, enhanced: &str) -> bool {
+        self.enhanced != Self::digest(enhanced)
+    }
+    pub fn stale(&self, notes: &str, transcript: &Transcript, template: &str) -> bool {
+        self.input != Self::new(notes, transcript, template, "").input
+    }
+}
+
+#[cfg(test)]
+mod summary_tests {
+    use super::*;
+    #[test]
+    fn stamp_detects_edits_and_survives_metadata_roundtrip() {
+        let transcript = Transcript::default();
+        let stamp = SummaryStamp::new("notes", &transcript, "general", "summary");
+        assert!(!stamp.stale("notes", &transcript, "general"));
+        assert!(stamp.stale("edited notes", &transcript, "general"));
+        assert!(stamp.stale("notes", &transcript, "standup"));
+        let mut changed = transcript.clone();
+        changed.segments.push(Segment {
+            id: Uuid::now_v7(),
+            speaker: SpeakerId("me".into()),
+            channel: Channel::Mic,
+            start_ms: 0,
+            end_ms: 100,
+            text: "edited".into(),
+            source: Source::Final,
+            edited: true,
+        });
+        assert!(stamp.stale("notes", &changed, "general"));
+        assert!(!stamp.edited("summary"));
+        assert!(stamp.edited("user summary"));
+        let mut meta =
+            MeetingMeta::new("test", DateTime::from_timestamp(1_800_000_000, 0).unwrap());
+        let old = serde_yaml::to_string(&meta).unwrap();
+        assert!(!old.contains("summary:"));
+        assert!(
+            serde_yaml::from_str::<MeetingMeta>(&old)
+                .unwrap()
+                .summary
+                .is_none()
+        );
+        meta.summary = Some(stamp);
+        assert_eq!(
+            serde_yaml::from_str::<MeetingMeta>(&serde_yaml::to_string(&meta).unwrap()).unwrap(),
+            meta
+        );
+    }
 }

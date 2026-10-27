@@ -57,7 +57,14 @@ impl Mock {
             let mut body = vec![0; size];
             reader.read_exact(&mut body).unwrap();
             stream.write_all(response.as_bytes()).unwrap();
-            (headers, serde_json::from_slice(&body).unwrap())
+            (
+                headers,
+                if body.is_empty() {
+                    Value::Null
+                } else {
+                    serde_json::from_slice(&body).unwrap()
+                },
+            )
         });
         Self { base, handle }
     }
@@ -70,6 +77,7 @@ impl Mock {
                 base_url: self.base.clone(),
                 model: "test-model".into(),
                 api_key_env: None,
+                key_source: Default::default(),
                 context_tokens: 4096,
             },
             Mode::Local,
@@ -203,6 +211,7 @@ fn local_only_rejects_remote_before_reading_key_or_connecting() {
             base_url: format!("http://{host}/v1"),
             model: "model".into(),
             api_key_env: Some("NOTETAKER_MISSING_KEY_LOCAL_POLICY_TEST".into()),
+            key_source: Default::default(),
             context_tokens: 4096,
         };
         let error = HttpProvider::new(config, Mode::Local)
@@ -255,5 +264,39 @@ fn incomplete_or_truncated_streams_are_errors() {
         assert!(error.contains(expected));
         assert!(!error.contains("private data"));
         server.handle.join().unwrap();
+    }
+}
+
+#[test]
+fn parses_models_and_rejects_missing_or_empty_lists() {
+    let models = parse_models(
+        json!({"data":[{"id":"z"},{"id":"a"},{"id":"a"},{"id":""},{"other":"ignored"}]}),
+    )
+    .unwrap();
+    assert_eq!(models, ["z", "a"]);
+    assert!(parse_models(json!({"models":[]})).is_err());
+    assert!(parse_models(json!({"data":[]})).is_err());
+}
+
+#[test]
+fn models_use_api_root_and_authorization_without_completion_request() {
+    for kind in [ProviderKind::Openai, ProviderKind::Anthropic] {
+        let server = Mock::start(
+            "200 OK",
+            "application/json",
+            r#"{"data":[{"id":"claude-sonnet-4-6"},{"id":"other"}]}"#,
+            "",
+        );
+        let models = server.provider(kind).models().unwrap();
+        assert_eq!(models, ["claude-sonnet-4-6", "other"]);
+        let (headers, body) = server.handle.join().unwrap();
+        assert!(headers.starts_with("GET /v1/models HTTP/1.1"));
+        assert_eq!(body, Value::Null);
+        let headers = headers.to_lowercase();
+        if kind == ProviderKind::Openai {
+            assert!(headers.contains("authorization: bearer test-key"));
+        } else {
+            assert!(headers.contains("x-api-key: test-key"));
+        }
     }
 }

@@ -82,7 +82,9 @@ impl Template {
         Some(Self {
             name: name.into(),
             description: description.into(),
-            instruction: format!("{instruction} Write the notes in the language of the meeting."),
+            instruction: format!(
+                "{instruction} Write the notes in the transcript language, Russian by default. Format every action item as `- [ ] Задача - Ответственный - срок` (translate labels into the transcript language). If an owner or deadline is missing, use `не указан` in that field; never invent them."
+            ),
         })
     }
 }

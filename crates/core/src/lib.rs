@@ -8,7 +8,7 @@ pub use attachments::{attachment_references, markdown_images};
 pub use index::Hit;
 pub use model::{
     CaptureIssue, Channel, MeetingMeta, Mode, SCHEMA_VERSION, Segment, Source, SpeakerId,
-    Transcript, migrate_transcript,
+    SummaryStamp, Transcript, migrate_transcript,
 };
 pub use storage::{Library, Meeting, Revision, Versioned};
 

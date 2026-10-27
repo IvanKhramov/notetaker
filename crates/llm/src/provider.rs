@@ -41,18 +41,25 @@ pub struct HttpProvider {
 impl HttpProvider {
     pub fn new(config: ProviderConfig, mode: Mode) -> Result<Self> {
         config.validate(mode)?;
-        let key = config
-            .api_key_env
-            .as_ref()
-            .map(|name| {
-                std::env::var(name)
-                    .context("LLM API key environment variable is missing or not Unicode")
-            })
-            .transpose()?;
+        let key = crate::resolve_key(&config, &crate::OsCredentialStore)?;
         Self::build(config, mode, key)
     }
 
+    pub fn with_key(config: ProviderConfig, mode: Mode, key: Option<String>) -> Result<Self> {
+        Self::build_timeout(config, mode, key, Duration::from_secs(30))
+    }
+
     fn build(config: ProviderConfig, mode: Mode, key: Option<String>) -> Result<Self> {
+        Self::build_timeout(config, mode, key, Duration::from_secs(600))
+    }
+
+    fn build_timeout(
+        config: ProviderConfig,
+        mode: Mode,
+        key: Option<String>,
+        timeout: Duration,
+    ) -> Result<Self> {
+        ensure!(!config.kind.is_cli(), "Используйте CliProvider для CLI");
         let mut endpoint = config.validate(mode)?;
         let path = format!(
             "{}/{}",
@@ -60,6 +67,7 @@ impl HttpProvider {
             match config.kind {
                 ProviderKind::Openai => "chat/completions",
                 ProviderKind::Anthropic => "messages",
+                _ => unreachable!("HTTP provider"),
             }
         );
         endpoint.set_path(&path);
@@ -69,10 +77,10 @@ impl HttpProvider {
         );
         ensure!(
             config.kind != ProviderKind::Anthropic || key.is_some(),
-            "Anthropic requires api_key_env"
+            "Anthropic требует API-ключ"
         );
         let mut client = Client::builder()
-            .timeout(Duration::from_secs(300))
+            .timeout(timeout)
             .connect_timeout(Duration::from_secs(10))
             // A loopback redirect must never leak a local-only meeting to a remote host.
             .redirect(Policy::none());
@@ -93,6 +101,34 @@ impl HttpProvider {
         })
     }
 
+    pub fn models(&self) -> Result<Vec<String>> {
+        let mut url = self.config.validate(Mode::Hybrid)?;
+        url.set_path(&format!("{}/models", url.path().trim_end_matches('/')));
+        let mut request = self.client.get(url).timeout(Duration::from_secs(30));
+        if let Some(key) = &self.key {
+            request = if self.config.kind == ProviderKind::Anthropic {
+                request
+                    .header("anthropic-version", "2023-06-01")
+                    .header("x-api-key", key)
+            } else {
+                request.bearer_auth(key)
+            };
+        }
+        let response = request.send().map_err(|_| {
+            anyhow::anyhow!("Не удалось загрузить модели; проверьте VPN, адрес и ключ")
+        })?;
+        ensure!(
+            response.status().is_success(),
+            "Список моделей: HTTP {}",
+            response.status().as_u16()
+        );
+        parse_models(
+            response
+                .json()
+                .context("Некорректный JSON списка моделей")?,
+        )
+    }
+
     fn response(&self, body: Value) -> Result<Response> {
         let mut request = self.client.post(self.endpoint.clone()).json(&body);
         match self.config.kind {
@@ -106,6 +142,7 @@ impl HttpProvider {
                     .header("anthropic-version", "2023-06-01")
                     .header("x-api-key", self.key.as_deref().unwrap_or_default());
             }
+            _ => unreachable!("HTTP provider"),
         }
         let response = request.send().map_err(|_| {
             anyhow::anyhow!(
@@ -195,6 +232,7 @@ impl Provider for HttpProvider {
                 on_text(&text);
                 text
             }
+            _ => unreachable!("HTTP provider"),
         };
         ensure!(!text.trim().is_empty(), "LLM returned an empty completion");
         Ok(text)
@@ -251,3 +289,19 @@ fn read_sse(response: Response, on_text: &mut dyn FnMut(&str)) -> Result<String>
 #[cfg(test)]
 #[path = "provider_tests.rs"]
 mod tests;
+
+fn parse_models(value: Value) -> Result<Vec<String>> {
+    let data = value["data"]
+        .as_array()
+        .context("В списке моделей нет массива data")?;
+    let mut models: Vec<String> = data
+        .iter()
+        .filter_map(|model| model["id"].as_str())
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_owned)
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    models.retain(|id| seen.insert(id.clone()));
+    ensure!(!models.is_empty(), "Шлюз не вернул доступных моделей");
+    Ok(models)
+}
