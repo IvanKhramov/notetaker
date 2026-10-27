@@ -71,19 +71,19 @@ impl Template {
             ),
             "general" => (
                 "General meeting notes",
-                "Organize the notes into Summary, Discussion, Decisions, and Action items. Preserve the user's headings where possible. Include owners and deadlines only when stated.",
+                "Для русского транскрипта используй заголовки: Кратко, Обсуждение, Решения, Задачи, Открытые вопросы. Только для английского транскрипта: Summary, Discussion, Decisions, Action items, Open questions. Сохраняй пользовательский план. Ответственных и сроки включай только из данных встречи.",
             ),
             "one-on-one" => (
                 "One-on-one conversation",
-                "Organize the notes into Check-in, Topics discussed, Feedback, Growth and support, and Next steps. Preserve the user's agenda and distinguish each person's commitments.",
+                "Для русского транскрипта используй заголовки: Как дела, Обсуждение, Обратная связь, Развитие и поддержка, Задачи. Только для английского транскрипта: Check-in, Discussion, Feedback, Growth and support, Next steps. Сохраняй повестку пользователя и различай обязательства участников.",
             ),
             "client-call" => (
                 "Client conversation",
-                "Organize the notes into Client goals, Requirements and constraints, Discussion, Decisions, Open questions, and Next steps. Distinguish requests from agreed commitments.",
+                "Для русского транскрипта используй заголовки: Цели клиента, Требования и ограничения, Обсуждение, Решения, Открытые вопросы, Задачи. Только для английского транскрипта: Client goals, Requirements and constraints, Discussion, Decisions, Open questions, Next steps. Различай запросы и согласованные обязательства.",
             ),
             "standup" => (
                 "Daily team standup",
-                "Organize the notes by participant with Progress, Plans, and Blockers, followed by Follow-ups. Preserve the user's priorities and do not invent participant names.",
+                "Группируй по участникам. Для русского транскрипта используй заголовки: Сделано, Планы, Блокеры, Задачи. Только для английского транскрипта: Progress, Plans, Blockers, Follow-ups. Сохраняй приоритеты пользователя, не выдумывай имена.",
             ),
             _ => return None,
         };
@@ -98,5 +98,18 @@ impl Template {
                 )
             },
         })
+    }
+}
+
+#[cfg(test)]
+mod heading_tests {
+    #[test]
+    fn summary_headings_follow_transcript_language() {
+        for id in ["general", "one-on-one", "client-call", "standup"] {
+            let instruction = super::Template::builtin(id).unwrap().instruction;
+            assert!(instruction.contains("Для русского транскрипта"));
+            assert!(instruction.contains("Только для английского транскрипта"));
+            assert!(instruction.contains("Задачи"));
+        }
     }
 }
