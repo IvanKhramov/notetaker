@@ -554,6 +554,7 @@ fn run_asr(asr: impl Asr, meeting: &Meeting, jobs: Receiver<Job>, queue: &Queue)
                             meeting.update_transcript(|transcript| {
                                 transcript.segments.extend(segments.clone());
                                 sort(&mut transcript.segments);
+                                crate::echo::suppress_echo(&mut transcript.segments);
                             })?;
                             let _ = queue.events.send(PipelineEvent::LiveSegments(segments));
                         }
@@ -592,6 +593,7 @@ fn run_asr(asr: impl Asr, meeting: &Meeting, jobs: Receiver<Job>, queue: &Queue)
                 meeting.update_transcript(|transcript| {
                     transcript.segments =
                         replace_final(std::mem::take(&mut transcript.segments), final_segments);
+                    crate::echo::suppress_echo(&mut transcript.segments);
                 })?;
             }
         }
