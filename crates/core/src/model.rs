@@ -20,6 +20,8 @@ pub struct MeetingMeta {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capture_issues: Vec<CaptureIssue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calendar_event: Option<crate::calendar::EventLink>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<SummaryStamp>,
 }
 
@@ -27,6 +29,7 @@ impl MeetingMeta {
     /// Create a local meeting with a UUID v7 and seven-day audio retention.
     pub fn new(title: impl Into<String>, started_at: DateTime<Utc>) -> Self {
         Self {
+            calendar_event: None,
             summary: None,
             capture_issues: Vec::new(),
             id: Uuid::now_v7(),

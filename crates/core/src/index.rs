@@ -77,6 +77,47 @@ impl Library {
         .collect()
     }
 
+    /// Natural-language retrieval with safe OR terms and weighted FTS5 BM25.
+    /// Read privacy from source metadata before returning snippets or applying limit.
+    pub fn retrieve(&self, question: &str, limit: usize, exclude_local: bool) -> Result<Vec<Hit>> {
+        let query = retrieval_query(question);
+        if query.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let connection = self.open_index()?;
+        let mut statement = connection.prepare(
+            "SELECT meeting_id, path, title, snippet(meetings, -1, '[', ']', ' … ', 48)
+             FROM meetings WHERE meetings MATCH ?1
+             ORDER BY bm25(meetings, 0, 0, 0, 5, 2, 2, 1), path",
+        )?;
+        let mut rows = statement.query([query])?;
+        let mut hits = Vec::new();
+        while let Some(row) = rows.next()? {
+            let path = PathBuf::from(row.get::<_, String>(1)?);
+            // Index paths must still identify a direct child of this library.
+            if path.parent() != Some(self.root()) {
+                continue;
+            }
+            let meeting = Meeting { path: path.clone() };
+            let Ok(meta) = meeting.read_meta() else {
+                continue;
+            };
+            if exclude_local && meta.mode == crate::Mode::Local {
+                continue;
+            }
+            hits.push(Hit {
+                meeting_id: meta.id,
+                path,
+                title: meta.title,
+                snippet: row.get(3)?,
+            });
+            if hits.len() >= limit.min(100) {
+                break;
+            }
+        }
+        Ok(hits)
+    }
+
     fn open_index(&self) -> Result<Connection> {
         let path = self.index_path();
         fs::create_dir_all(path.parent().expect("index has a parent"))?;
@@ -205,5 +246,135 @@ fn disposable_index_error(error: &Error) -> bool {
                 | rusqlite::ffi::SQLITE_ERROR
         ),
         _ => false, // Busy, permissions and I/O failures must not discard an index.
+    }
+}
+
+/// Never interpolate FTS operators. A small bilingual stop list is enough for v0.6.
+fn retrieval_query(question: &str) -> String {
+    const STOP: &[&str] = &[
+        "и",
+        "а",
+        "но",
+        "в",
+        "во",
+        "на",
+        "по",
+        "о",
+        "об",
+        "от",
+        "до",
+        "из",
+        "к",
+        "ко",
+        "с",
+        "со",
+        "у",
+        "за",
+        "для",
+        "не",
+        "это",
+        "как",
+        "что",
+        "какие",
+        "какой",
+        "кто",
+        "где",
+        "когда",
+        "мы",
+        "вы",
+        "я",
+        "он",
+        "она",
+        "они",
+        "ли",
+        "же",
+        "про",
+        "были",
+        "было",
+        "был",
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "to",
+        "of",
+        "in",
+        "on",
+        "for",
+        "is",
+        "are",
+        "was",
+        "were",
+        "what",
+        "which",
+        "who",
+        "when",
+        "where",
+        "how",
+        "did",
+        "do",
+        "about",
+        "we",
+        "you",
+        "i",
+    ];
+    let mut terms = std::collections::BTreeSet::new();
+    for term in question
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .take(128)
+    {
+        let term = term.to_lowercase();
+        if !STOP.contains(&term.as_str()) && term.chars().count() > 1 {
+            terms.insert(term);
+        }
+    }
+    terms
+        .into_iter()
+        .take(32)
+        .map(|term| format!("\"{term}\"*"))
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
+#[cfg(test)]
+mod retrieval_tests {
+    use super::*;
+    use crate::{MeetingMeta, Mode};
+    #[test]
+    fn natural_question_bm25_ranking_and_source_privacy() {
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open(root.path()).unwrap();
+        let now = chrono::DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        let relevant = library
+            .create_meeting(MeetingMeta::new("Kubernetes", now))
+            .unwrap();
+        relevant.write_notes("решили обновить Kubernetes").unwrap();
+        let other = library
+            .create_meeting(MeetingMeta::new("Другое", now))
+            .unwrap();
+        other
+            .write_notes("Kubernetes и много слов о погоде и об инфраструктуре")
+            .unwrap();
+        let mut meta = other.read_meta().unwrap();
+        meta.mode = Mode::Hybrid;
+        other.write_meta(&meta).unwrap();
+        library.reindex_full().unwrap();
+        let hits = library
+            .retrieve("Что мы решили про Kubernetes?", 10, false)
+            .unwrap();
+        assert_eq!(hits[0].path, relevant.path());
+        assert_eq!(hits.len(), 2);
+        assert_eq!(
+            library.retrieve("Kubernetes", 1, true).unwrap()[0].path,
+            other.path()
+        );
+        // Privacy changes are authoritative even before reindexing.
+        meta.mode = Mode::Local;
+        other.write_meta(&meta).unwrap();
+        assert!(library.retrieve("Kubernetes", 10, true).unwrap().is_empty());
+        assert!(library.retrieve("что и как", 10, false).unwrap().is_empty());
+        assert!(library.retrieve("\" OR *", 10, false).unwrap().is_empty());
     }
 }

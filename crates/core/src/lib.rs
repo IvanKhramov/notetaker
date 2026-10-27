@@ -1,5 +1,6 @@
 //! Meeting files are the source of truth; the SQLite search index is disposable.
 mod attachments;
+pub mod calendar;
 mod index;
 mod model;
 mod storage;
