@@ -72,7 +72,9 @@ impl Library {
     pub fn create_meeting(&self, meta: MeetingMeta) -> Result<Meeting> {
         let base = format!(
             "{}_{}",
-            meta.started_at.format("%Y-%m-%d_%H%M"),
+            meta.started_at
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d_%H%M"),
             slug(&meta.title)
         );
         let mut suffix = 0u64;

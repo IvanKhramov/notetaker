@@ -116,18 +116,26 @@ fn roundtrip_and_atomic_replacement() {
 #[test]
 fn slug_transliterates_and_resolves_collisions() {
     let (_directory, library) = fixture();
+    let prefix = meta("")
+        .started_at
+        .with_timezone(&chrono::Local)
+        .format("%Y-%m-%d_%H%M")
+        .to_string();
     let first = library.create_meeting(meta("Привет, мир!")).unwrap();
     let second = library.create_meeting(meta("Привет, мир!")).unwrap();
     assert_eq!(
         first.path().file_name().unwrap(),
-        "2026-10-26_1530_privet-mir"
+        format!("{prefix}_privet-mir").as_str()
     );
     assert_eq!(
         second.path().file_name().unwrap(),
-        "2026-10-26_1530_privet-mir-1"
+        format!("{prefix}_privet-mir-1").as_str()
     );
     let empty = library.create_meeting(meta("... / \\ ")).unwrap();
-    assert_eq!(empty.path().file_name().unwrap(), "2026-10-26_1530_meeting");
+    assert_eq!(
+        empty.path().file_name().unwrap(),
+        format!("{prefix}_meeting").as_str()
+    );
     assert_eq!(library.list_meetings().unwrap().len(), 3);
 }
 
