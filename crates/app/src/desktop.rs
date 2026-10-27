@@ -1,6 +1,12 @@
 //! Windows-only native integrations. Constructed and polled on eframe's Win32
 //! event-loop thread. Native callbacks wake egui via Context::request_repaint.
-use std::sync::mpsc::{self, Receiver};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, Receiver},
+    },
+};
 
 use anyhow::Result;
 use eframe::egui;
@@ -10,16 +16,20 @@ use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem},
 };
 
+#[derive(Clone, Copy)]
 pub enum Action {
     Show,
     Toggle,
+    Recap,
+    Bookmark,
     Quit,
 }
 pub struct Desktop {
     tray: TrayIcon,
     recording: bool,
     manager: GlobalHotKeyManager,
-    hotkey: Option<HotKey>,
+    hotkeys: Vec<HotKey>,
+    routes: Arc<Mutex<HashMap<u32, Action>>>,
     events: Receiver<Action>,
 }
 impl Desktop {
@@ -73,9 +83,17 @@ impl Desktop {
             }
         }));
         let context = ctx.clone();
+        let routes = Arc::new(Mutex::new(HashMap::new()));
+        let callback_routes = Arc::clone(&routes);
         GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
             if event.state == HotKeyState::Pressed {
-                let _ = tx.send(Action::Toggle);
+                if let Some(action) = callback_routes
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&event.id)
+                {
+                    let _ = tx.send(*action);
+                }
                 context.request_repaint();
             }
         }));
@@ -83,20 +101,43 @@ impl Desktop {
             tray,
             recording: false,
             manager,
-            hotkey: None,
+            hotkeys: Vec::new(),
+            routes,
             events,
         })
     }
-    pub fn set_hotkey(&mut self, text: &str) -> Result<()> {
-        let hotkey: HotKey = text.parse()?;
-        if self.hotkey == Some(hotkey) {
-            return Ok(());
+    pub fn set_hotkeys(&mut self, values: [&str; 3]) -> Result<()> {
+        crate::config::validate_hotkeys(values)?;
+        let next = values
+            .iter()
+            .map(|value| value.parse::<HotKey>())
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut registered = Vec::new();
+        for key in &next {
+            if !self.hotkeys.contains(key) {
+                if let Err(error) = self.manager.register(*key) {
+                    for key in registered {
+                        let _ = self.manager.unregister(key);
+                    }
+                    return Err(error.into());
+                }
+                registered.push(*key);
+            }
         }
-        // Register first: a conflict preserves the working old shortcut.
-        self.manager.register(hotkey)?;
-        if let Some(old) = self.hotkey.replace(hotkey) {
-            self.manager.unregister(old)?;
+        for old in &self.hotkeys {
+            if !next.contains(old) {
+                self.manager.unregister(*old)?;
+            }
         }
+        let mut routes = self.routes.lock().unwrap_or_else(|e| e.into_inner());
+        routes.clear();
+        for (key, action) in next
+            .iter()
+            .zip([Action::Toggle, Action::Recap, Action::Bookmark])
+        {
+            routes.insert(key.id(), action);
+        }
+        self.hotkeys = next;
         Ok(())
     }
     pub fn poll(&self) -> Vec<Action> {
@@ -116,7 +157,7 @@ impl Desktop {
 }
 impl Drop for Desktop {
     fn drop(&mut self) {
-        if let Some(hotkey) = self.hotkey.take() {
+        for hotkey in self.hotkeys.drain(..) {
             let _ = self.manager.unregister(hotkey);
         }
     }

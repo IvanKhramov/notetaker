@@ -38,6 +38,11 @@ pub struct Settings {
     #[serde(default)]
     pub retention_days: Option<u32>,
     pub hotkey: String,
+    pub recap_hotkey: String,
+    pub bookmark_hotkey: String,
+    pub live_summary: bool,
+    pub live_summary_minutes: u32,
+    pub recap_minutes: u32,
     pub detect_calls: bool,
     pub detect_browsers: bool,
     pub detect_any_microphone: bool,
@@ -79,6 +84,11 @@ impl Default for Settings {
             mode: Mode::Local,
             retention_days: Some(7),
             hotkey: "Ctrl+Alt+R".into(),
+            recap_hotkey: "Ctrl+Alt+M".into(),
+            bookmark_hotkey: "Ctrl+Alt+B".into(),
+            live_summary: true,
+            live_summary_minutes: 3,
+            recap_minutes: 5,
             detect_calls: true,
             detect_browsers: true,
             detect_any_microphone: true,
@@ -172,7 +182,15 @@ impl Settings {
             );
             calendar.validate()?;
         }
-        validate_hotkey(&self.hotkey)
+        ensure!(
+            (2..=10).contains(&self.live_summary_minutes),
+            "Живой конспект: интервал 2-10 минут"
+        );
+        ensure!(
+            (1..=30).contains(&self.recap_minutes),
+            "Что я пропустил: окно 1-30 минут"
+        );
+        validate_hotkeys([&self.hotkey, &self.recap_hotkey, &self.bookmark_hotkey])
     }
 }
 
@@ -298,6 +316,21 @@ pub fn atomic_write(path: &Path, text: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn validate_hotkeys(values: [&str; 3]) -> Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    for value in values {
+        validate_hotkey(value)?;
+        let mut parts: Vec<_> = value.split('+').collect();
+        let key = parts.pop().unwrap_or_default();
+        parts.sort_unstable();
+        ensure!(
+            seen.insert((parts, key)),
+            "Горячие клавиши записи, обзора и закладки должны различаться"
+        );
+    }
+    Ok(())
+}
+
 pub fn validate_hotkey(value: &str) -> Result<()> {
     let mut parts: Vec<_> = value.split('+').collect();
     let key = parts.pop().unwrap_or_default();
@@ -329,6 +362,17 @@ pub fn validate_hotkey(value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn hotkey_conflicts_ignore_modifier_order_and_defaults_roundtrip() {
+        assert!(validate_hotkeys(["Ctrl+Alt+R", "Alt+Ctrl+R", "Ctrl+Alt+B"]).is_err());
+        assert!(validate_hotkeys(["Ctrl+Alt+R", "Ctrl+Alt+M", "Ctrl+Alt+M"]).is_err());
+        assert!(validate_hotkeys(["Ctrl+Alt+R", "Ctrl+Alt+M", "Ctrl+Alt+B"]).is_ok());
+        let settings: Settings = toml::from_str("").unwrap();
+        assert!(settings.live_summary);
+        assert_eq!(settings.live_summary_minutes, 3);
+        assert_eq!(settings.recap_minutes, 5);
+        settings.validate().unwrap();
+    }
     #[test]
     fn quickstart_preferences_roundtrip() {
         let settings = Settings {

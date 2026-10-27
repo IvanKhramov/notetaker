@@ -35,6 +35,7 @@ pub enum Phase {
 #[derive(Default)]
 pub struct Recording {
     pub phase: Phase,
+    pub assist: crate::live::Assist,
     pub importing: bool,
     pub process_id: Option<u32>,
     pub path: Option<PathBuf>,
@@ -108,6 +109,7 @@ impl Recording {
         }
     }
     pub fn request_stop(&mut self) {
+        self.assist.schedule.stop();
         self.stop_requested = true;
         if let Some(stop) = &self.stop {
             stop.stop();
@@ -463,6 +465,7 @@ impl AppState {
             .is_none_or(|doc| doc.saving || doc.speaker_ui.busy || doc.attachments_pending > 0)
             || self.documents.values().any(|doc| doc.speaker_ui.busy)
             || self.recording.busy()
+            || self.recording.assist.bookmarks_pending > 0
             || self.enhancing.is_some()
             || self.settings_pending
         {
@@ -538,6 +541,7 @@ impl AppState {
     fn start_recording_with_app(&mut self, call_override: Option<notetaker_detect::DetectedCall>) {
         if !self.ready
             || self.recording.busy()
+            || self.recording.assist.bookmarks_pending > 0
             || self.downloading
             || self.quickstart.probe_busy
             || self.settings_pending
@@ -602,6 +606,7 @@ impl AppState {
     pub fn start_event(&mut self, event: notetaker_core::calendar::CalendarEvent) {
         if !self.ready
             || self.recording.busy()
+            || self.recording.assist.bookmarks_pending > 0
             || self.downloading
             || self.quickstart.probe_busy
             || self.settings_pending
@@ -675,6 +680,7 @@ impl AppState {
             || self.unsaved()
             || self.settings_pending
             || self.recording.busy()
+            || self.recording.assist.bookmarks_pending > 0
             || self.enhancing.is_some()
         {
             return;
@@ -747,6 +753,7 @@ impl AppState {
     pub fn import_recording(&mut self, file: PathBuf) {
         if !self.ready
             || self.recording.busy()
+            || self.recording.assist.bookmarks_pending > 0
             || self.downloading
             || self.quickstart.probe_busy
             || self.settings_pending
@@ -778,6 +785,7 @@ impl AppState {
     pub fn enhance(&mut self) {
         if self.enhancing.is_some()
             || self.recording.busy()
+            || self.recording.assist.bookmarks_pending > 0
             || self.settings_pending
             || self.unsaved()
         {
@@ -840,6 +848,7 @@ impl AppState {
         self.ready
             && !self.exit_requested
             && !self.recording.busy()
+            && self.recording.assist.bookmarks_pending == 0
             && self.enhancing.is_none()
             && !self.chat.busy
             && !self.draft_busy
@@ -892,6 +901,7 @@ impl AppState {
     pub fn can_exit(&self) -> bool {
         self.exit_requested
             && !self.recording.busy()
+            && self.recording.assist.bookmarks_pending == 0
             && self.enhancing.is_none()
             && !self.chat.busy
             && !self.draft_busy
@@ -913,6 +923,7 @@ impl AppState {
                 "Разрыв звука / ошибка временной метки (событий: {count})"
             ));
         }
+        self.poll_live();
         crate::quickstart::auto_download(self);
         self.poll_detection();
         let now = chrono::Utc::now();
@@ -967,6 +978,7 @@ impl AppState {
         if self.pending_summary.is_some()
             && !self.unsaved()
             && !self.recording.busy()
+            && self.recording.assist.bookmarks_pending == 0
             && self.enhancing.is_none()
             && !self.settings_pending
         {
@@ -1042,6 +1054,23 @@ impl AppState {
     }
     fn apply(&mut self, event: Event) {
         match event {
+            Event::BookmarkSaved { path, result } => {
+                self.recording.assist.bookmarks_pending =
+                    self.recording.assist.bookmarks_pending.saturating_sub(1);
+                match result {
+                    Ok(value) => {
+                        if let Some(doc) = self.documents.get_mut(&path) {
+                            doc.data.transcript.bookmarks = value.value.bookmarks;
+                            doc.data.revisions.transcript = value.revision;
+                            doc.changed();
+                        }
+                    }
+                    Err(error) => {
+                        self.error = Some(error);
+                        self.exit_requested = false;
+                    }
+                }
+            }
             Event::SeriesContext { path, result } => {
                 if let Some(doc) = self.documents.get_mut(&path) {
                     doc.saving = false;
@@ -1367,6 +1396,19 @@ impl AppState {
                 self.recording.path = Some(path.clone());
                 self.recording.stop = Some(stop);
                 self.recording.started = Some(Instant::now());
+                self.recording.assist.provider = self
+                    .llm_configured
+                    .then(|| {
+                        notetaker_llm::Config::parse(&self.llm.validate().ok()?)
+                            .ok()?
+                            .select_scenario(
+                                document.meta.mode,
+                                notetaker_llm::Scenario::Summary,
+                                None,
+                            )
+                            .ok()
+                    })
+                    .flatten();
                 self.recording.importing = importing;
                 self.recording.phase = if importing {
                     Phase::Finalizing
@@ -1383,6 +1425,9 @@ impl AppState {
             Event::Pipeline(event) => {
                 let previous = self.recording.phase;
                 self.recording.apply(&event);
+                if self.recording.phase != Phase::Recording {
+                    self.recording.assist.schedule.stop();
+                }
                 if let PipelineEvent::Warning(message) = &event {
                     self.notices
                         .push((crate::theme::ToastLevel::Info, message.clone()));
@@ -1422,6 +1467,14 @@ impl AppState {
                             .iter()
                             .any(|s| s.id == segment.id)
                         {
+                            if !segment.text.trim().is_empty() {
+                                self.recording.assist.pending.push_str(&format!(
+                                    "[{}] {}: {}\n",
+                                    timestamp(segment.start_ms),
+                                    doc.data.transcript.speaker_name(&segment.speaker.0),
+                                    segment.text
+                                ));
+                            }
                             doc.data.transcript.segments.push(segment);
                         }
                     }
@@ -1437,7 +1490,19 @@ impl AppState {
                 if let (Some(path), Some(data)) = (path, document) {
                     if let Some(doc) = self.documents.get_mut(&path) {
                         doc.data.meta = data.meta;
+                        let bookmarks = doc.data.transcript.bookmarks.clone();
                         doc.data.transcript = data.transcript;
+                        for bookmark in bookmarks {
+                            if !doc
+                                .data
+                                .transcript
+                                .bookmarks
+                                .iter()
+                                .any(|b| b.id == bookmark.id)
+                            {
+                                doc.data.transcript.bookmarks.push(bookmark);
+                            }
+                        }
                         doc.data.revisions.transcript = data.revisions.transcript;
                         doc.changed();
                     } else {
@@ -1618,6 +1683,70 @@ pub fn edit_segment(transcript: &mut Transcript, id: Uuid, text: String) -> bool
 mod tests {
     use super::*;
     use notetaker_core::{Segment, Source, SpeakerId};
+    #[test]
+    fn live_stop_cancels_and_bookmark_button_uses_atomic_worker_commands() {
+        let (mut state, commands, _root, path) = fixture();
+        state.recording.path = Some(path.clone());
+        state.recording.phase = Phase::Recording;
+        state.recording.stopped = Some(Duration::from_secs(42));
+        let cancel = state
+            .recording
+            .assist
+            .schedule
+            .begin(0, 3, true, true, true)
+            .unwrap();
+        state.add_bookmark();
+        let Command::Bookmark { meeting, bookmark } = commands.recv().unwrap() else {
+            panic!("bookmark");
+        };
+        assert_eq!(meeting.path(), path);
+        assert_eq!(bookmark.at_ms, 42_000);
+        state.recording.assist.label.as_mut().unwrap().2 = "Решение".into();
+        state.save_bookmark_label();
+        let Command::BookmarkLabel { id, label, .. } = commands.recv().unwrap() else {
+            panic!("label");
+        };
+        assert_eq!(id, bookmark.id);
+        assert_eq!(label, "Решение");
+        state.recording.request_stop();
+        assert!(cancel.is_cancelled());
+        state.add_bookmark();
+        assert!(commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn live_transcript_keeps_delta_and_missing_provider_cannot_start_request() {
+        let (mut state, _commands, _root, path) = fixture();
+        state.recording.path = Some(path);
+        state.recording.phase = Phase::Recording;
+        let segment = Segment {
+            id: Uuid::now_v7(),
+            speaker: SpeakerId("me".into()),
+            channel: Channel::Mic,
+            start_ms: 0,
+            end_ms: 1000,
+            text: "Новая строка".into(),
+            source: Source::Live,
+            edited: false,
+            lang: None,
+        };
+        state.apply(Event::Pipeline(PipelineEvent::LiveSegments(vec![
+            segment.clone(),
+        ])));
+        state.apply(Event::Pipeline(PipelineEvent::LiveSegments(vec![segment])));
+        assert_eq!(
+            state
+                .recording
+                .assist
+                .pending
+                .matches("Новая строка")
+                .count(),
+            1
+        );
+        state.request_live(false, true);
+        assert!(!state.recording.assist.schedule.busy());
+    }
+
     #[test]
     fn quickstart_preferences_do_not_create_a_configured_ai_provider() {
         let (mut state, commands, _root, _) = fixture();

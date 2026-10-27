@@ -8,6 +8,7 @@ mod config;
 mod desktop;
 mod detection;
 mod icon;
+mod live;
 mod maintenance;
 mod people;
 mod quickstart;

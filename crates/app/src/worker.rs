@@ -159,6 +159,15 @@ pub struct RecordRequest {
 }
 
 pub enum Command {
+    BookmarkLabel {
+        meeting: Meeting,
+        id: uuid::Uuid,
+        label: String,
+    },
+    Bookmark {
+        meeting: Meeting,
+        bookmark: notetaker_core::Bookmark,
+    },
     InsertSeriesContext {
         meeting: Meeting,
         previous: uuid::Uuid,
@@ -250,6 +259,10 @@ pub enum Command {
 // Rare worker-to-UI messages; boxing variants buys nothing measurable.
 #[allow(clippy::large_enum_variant)]
 pub enum Event {
+    BookmarkSaved {
+        path: PathBuf,
+        result: Result<notetaker_core::Versioned<Transcript>, String>,
+    },
     SeriesContext {
         path: PathBuf,
         result: Result<Box<DocumentData>, String>,
@@ -378,6 +391,30 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
         });
         for command in rx {
             match command {
+                Command::BookmarkLabel { meeting, id, label } => {
+                    let path = meeting.path().to_owned();
+                    let result = (|| -> Result<_> {
+                        meeting.update_transcript(|t| {
+                            if let Some(bookmark) = t.bookmarks.iter_mut().find(|b| b.id == id) {
+                                bookmark.label = Some(label);
+                            }
+                        })?;
+                        Ok(meeting.load_transcript()?)
+                    })()
+                    .map_err(error_text);
+                    let _ = events.send(Event::BookmarkSaved { path, result });
+                }
+                Command::Bookmark { meeting, bookmark } => {
+                    let path = meeting.path().to_owned();
+                    let result = (|| -> Result<_> {
+                        meeting.update_transcript(|t| {
+                            t.bookmarks.push(bookmark);
+                        })?;
+                        Ok(meeting.load_transcript()?)
+                    })()
+                    .map_err(error_text);
+                    let _ = events.send(Event::BookmarkSaved { path, result });
+                }
                 Command::InsertSeriesContext {
                     meeting,
                     previous,

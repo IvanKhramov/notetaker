@@ -41,6 +41,7 @@ pub struct NotetakerApp {
     tasks_by_meeting: bool,
     toasts: VecDeque<Toast>,
     main_rect: Option<egui::Rect>,
+    live_summary_tab: bool,
     maintenance: crate::maintenance::Maintenance,
     #[cfg(windows)]
     desktop: Option<crate::desktop::Desktop>,
@@ -69,6 +70,7 @@ impl NotetakerApp {
             tasks_by_meeting: false,
             toasts: VecDeque::new(),
             main_rect: None,
+            live_summary_tab: true,
             maintenance: Default::default(),
             #[cfg(windows)]
             desktop: None,
@@ -472,6 +474,34 @@ impl NotetakerApp {
                         self.state.toggle_recording();
                     }
                 });
+                if self.state.recording.phase == Phase::Recording {
+                    if ui
+                        .add_enabled(
+                            !self.state.recording.assist.schedule.busy(),
+                            egui::Button::new("Что я пропустил?"),
+                        )
+                        .clicked()
+                    {
+                        self.state.request_live(true, true);
+                    }
+                    if ui.button("Закладка").clicked() {
+                        self.state.add_bookmark();
+                    }
+                    let mut save = false;
+                    if let Some((_, _, label)) = &mut self.state.recording.assist.label {
+                        let response = ui.add(
+                            egui::TextEdit::singleline(label)
+                                .hint_text("Метка (необязательно)")
+                                .desired_width(160.0),
+                        );
+                        save = ui.small_button("Готово").clicked()
+                            || (response.lost_focus()
+                                && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                    }
+                    if save {
+                        self.state.save_bookmark_label();
+                    }
+                }
             });
         });
     }
@@ -757,28 +787,40 @@ impl NotetakerApp {
         }
         let mut images = Vec::new();
         if live {
+            let mut update_live = false;
             let height = ui.available_height();
             ui.columns(2, |columns| {
                 columns[0].set_height(height);
                 columns[1].set_height(height);
                 columns[0].weak("МОИ ЗАМЕТКИ");
                 images = notes_editor(&mut columns[0], document, &path, &mut self.image_viewer);
-                columns[1].weak("ТРАНСКРИПТ");
-                transcript_view(
-                    &mut columns[1],
-                    document,
-                    &path,
-                    true,
-                    self.state
-                        .settings
-                        .voice_library
-                        .then_some(&self.state.voices),
-                    false,
-                    false,
-                );
+                columns[1].horizontal(|ui| {
+                    ui.selectable_value(&mut self.live_summary_tab, false, "Транскрипт");
+                    ui.selectable_value(&mut self.live_summary_tab, true, "Живой конспект");
+                });
+                if self.live_summary_tab {
+                    let assist = &self.state.recording.assist;
+                    update_live = columns[1].add_enabled(!assist.schedule.busy(), egui::Button::new("Обновить сейчас")).clicked();
+                    if let Some(updated) = assist.updated {
+                        columns[1].weak(format!("обновлено {} мин назад", updated.elapsed().as_secs() / 60));
+                    }
+                    if assist.schedule.busy() { columns[1].spinner(); }
+                    if let Some(error) = &assist.error { columns[1].label(error); }
+                    if assist.summary.is_empty() {
+                        columns[1].weak("Конспект появится после новых строк транскрипта. Нужен настроенный провайдер.");
+                    }
+                    egui::ScrollArea::vertical().id_salt("live_summary").show(&mut columns[1], |ui| {
+                        CommonMarkViewer::new().show(ui, &mut self.cache, &assist.summary);
+                    });
+                } else {
+                    transcript_view(&mut columns[1], document, &path, true, None, false, false);
+                }
             });
             if let Some(crate::people::HeaderAction::Open(meeting)) = series_action {
                 self.state.select(meeting);
+            }
+            if update_live {
+                self.state.request_live(false, true);
             }
             self.state.attach(images);
             return;
@@ -787,6 +829,7 @@ impl NotetakerApp {
         let mut export = None;
         let mut speaker_edit = None;
         let speaker_editable = !locked
+            && self.state.recording.assist.bookmarks_pending == 0
             && !document.saving
             && !speaker_busy
             && document.attachments_pending == 0
@@ -1031,6 +1074,24 @@ impl NotetakerApp {
         }
     }
     fn notifications(&mut self, ctx: &egui::Context) {
+        let mut dismissed = false;
+        if let Some(text) = &self.state.recording.assist.recap {
+            egui::Window::new("Что я пропустил?")
+                .id(egui::Id::unique("recap-card"))
+                .resizable(true)
+                .default_width(380.0)
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height(280.0)
+                        .show(ui, |ui| {
+                            ui.label(text);
+                        });
+                    dismissed = ui.button("Закрыть").clicked();
+                });
+        }
+        if dismissed {
+            self.state.recording.assist.recap = None;
+        }
         for (level, text) in self
             .state
             .warnings
@@ -1213,6 +1274,24 @@ impl NotetakerApp {
                 });
                 ui.small("0 - удалить аудио после успешного чистового прохода. Срок применяется к новым записям; просроченное аудио очищается после записи.");
                 ui.label("Глобальная клавиша старт/стоп (Windows)"); ui.text_edit_singleline(&mut settings.hotkey);
+                ui.label("Что я пропустил? (Windows)"); ui.text_edit_singleline(&mut settings.recap_hotkey);
+                ui.label("Закладка (Windows)"); ui.text_edit_singleline(&mut settings.bookmark_hotkey);
+                let summary_available = self.state.llm_configured && self.state.llm.validate().ok()
+                    .and_then(|text| notetaker_llm::Config::parse(&text).ok())
+                    .is_some_and(|config| config.select_scenario(settings.mode, notetaker_llm::Scenario::Summary, None).is_ok());
+                let mut live_enabled = settings.live_summary && summary_available;
+                if ui.add_enabled(summary_available, egui::Checkbox::new(&mut live_enabled, "Живой конспект")).changed() {
+                    settings.live_summary = live_enabled;
+                }
+                ui.small("Работает только с настроенным провайдером конспекта. Local разрешает только локальный провайдер.");
+                ui.horizontal(|ui| {
+                    ui.label("Обновлять каждые");
+                    ui.add(egui::DragValue::new(&mut settings.live_summary_minutes).range(2..=10).suffix(" мин"));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Что я пропустил: последние");
+                    ui.add(egui::DragValue::new(&mut settings.recap_minutes).range(1..=30).suffix(" мин"));
+                });
                 ui.small("Например Ctrl+Alt+R. Модификаторы: Ctrl, Alt, Shift, Super; клавиша: A–Z, 0–9, F1–F24.");
                 ui.separator();
                 ui.add_enabled_ui(cfg!(windows), |ui| {
@@ -1428,13 +1507,22 @@ impl NotetakerApp {
             .map_or("Встреча", |doc| doc.data.meta.title.as_str());
         let mut stop = false;
         let mut open = false;
+        let mut recap = false;
+        let mut bookmark = false;
+        let mut dismiss = false;
+        let mut save_label = false;
+        let expanded = self.state.recording.assist.recap.is_some()
+            || self.state.recording.assist.schedule.busy()
+            || self.state.recording.assist.error.is_some()
+            || self.state.recording.assist.label.is_some();
+        let height = if expanded { 290.0 } else { 52.0 };
         ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("recording-indicator"),
             egui::ViewportBuilder::default()
                 .with_title("notetaker · запись")
-                .with_inner_size([430.0, 52.0])
-                .with_min_inner_size([430.0, 52.0])
-                .with_max_inner_size([430.0, 52.0])
+                .with_inner_size([710.0, height])
+                .with_min_inner_size([710.0, height])
+                .with_max_inner_size([710.0, height])
                 .with_resizable(false)
                 .with_decorations(false)
                 .with_transparent(true)
@@ -1448,7 +1536,7 @@ impl NotetakerApp {
                     .corner_radius(26)
                     .inner_margin(10)
                     .show(ui, |ui| {
-                        ui.set_width(410.0);
+                        ui.set_width(690.0);
                         ui.horizontal(|ui| {
                             theme::recording_dot(ui);
                             ui.label(
@@ -1461,9 +1549,39 @@ impl NotetakerApp {
                                 [145.0, 28.0],
                                 egui::Label::new(RichText::new(title).color(p.muted)).truncate(),
                             );
+                            recap = ui
+                                .add_enabled(
+                                    !self.state.recording.assist.schedule.busy(),
+                                    egui::Button::new("Что пропустил?"),
+                                )
+                                .clicked();
+                            bookmark = ui.button("Закладка").clicked();
                             open = theme::button(ui, "Открыть", ButtonStyle::Secondary).clicked();
                             stop = theme::button(ui, "Стоп", ButtonStyle::Danger).clicked();
                         });
+                        if let Some((_, _, label)) = &mut self.state.recording.assist.label {
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(label)
+                                        .hint_text("Метка (необязательно)"),
+                                );
+                                save_label = ui.button("Готово").clicked();
+                            });
+                        }
+                        if self.state.recording.assist.schedule.busy() {
+                            ui.label("Готовлю ответ…");
+                        }
+                        if let Some(error) = &self.state.recording.assist.error {
+                            ui.label(error);
+                        }
+                        if let Some(text) = &self.state.recording.assist.recap {
+                            egui::ScrollArea::vertical()
+                                .max_height(150.0)
+                                .show(ui, |ui| {
+                                    ui.label(text);
+                                });
+                            dismiss = ui.button("Закрыть ответ").clicked();
+                        }
                     });
                 if ui.input(|input| input.viewport().close_requested()) {
                     ui.ctx()
@@ -1482,6 +1600,18 @@ impl NotetakerApp {
         }
         if stop {
             self.state.toggle_recording();
+        }
+        if recap {
+            self.state.request_live(true, true);
+        }
+        if bookmark {
+            self.state.add_bookmark();
+        }
+        if dismiss {
+            self.state.recording.assist.recap = None;
+        }
+        if save_label {
+            self.state.save_bookmark_label();
         }
     }
     #[cfg(windows)]
@@ -1503,9 +1633,18 @@ impl NotetakerApp {
             if desktop.set_recording(self.state.recording.busy()).is_err() {
                 notetaker_runtime::diagnostics::event("tray icon update failed");
             }
-            if self.applied_hotkey != self.state.settings.hotkey {
-                self.applied_hotkey = self.state.settings.hotkey.clone();
-                if let Err(error) = desktop.set_hotkey(&self.applied_hotkey) {
+            let settings = &self.state.settings;
+            let signature = format!(
+                "{}|{}|{}",
+                settings.hotkey, settings.recap_hotkey, settings.bookmark_hotkey
+            );
+            if self.applied_hotkey != signature {
+                self.applied_hotkey = signature;
+                if let Err(error) = desktop.set_hotkeys([
+                    &settings.hotkey,
+                    &settings.recap_hotkey,
+                    &settings.bookmark_hotkey,
+                ]) {
                     self.state.error = Some(format!("Хоткей не зарегистрирован: {error:#}"));
                 }
             }
@@ -1517,6 +1656,8 @@ impl NotetakerApp {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                     }
                     Action::Toggle => self.state.toggle_recording(),
+                    Action::Recap => self.state.request_live(true, true),
+                    Action::Bookmark => self.state.add_bookmark(),
                     Action::Quit => self.state.exit(),
                 }
             }
@@ -1936,6 +2077,70 @@ fn transcript_view(
             );
         });
     }
+    if !document.data.transcript.bookmarks.is_empty() {
+        egui::CollapsingHeader::new("Важные моменты")
+            .default_open(true)
+            .show(ui, |ui| {
+                let mut changed = false;
+                let mut deleted = None;
+                let mut jump_to = None;
+                for bookmark in &mut document.data.transcript.bookmarks {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .link(format!("⚑ {}", timestamp(bookmark.at_ms)))
+                            .clicked()
+                        {
+                            jump_to = Some(bookmark.at_ms);
+                        }
+                        if !live && editable {
+                            let mut label = bookmark.label.clone().unwrap_or_default();
+                            if ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut label)
+                                        .id_salt(bookmark.id)
+                                        .hint_text("Важный момент")
+                                        .desired_width(180.0),
+                                )
+                                .changed()
+                            {
+                                bookmark.label = (!label.trim().is_empty()).then_some(label);
+                                changed = true;
+                            }
+                            if ui.small_button("Удалить").clicked() {
+                                deleted = Some(bookmark.id);
+                            }
+                        } else {
+                            ui.label(bookmark.label.as_deref().unwrap_or("Важный момент"));
+                        }
+                    });
+                }
+                if let Some(at_ms) = jump_to {
+                    document.speaker_ui.scroll_to =
+                        document.data.transcript.segment_at(at_ms).map(|s| s.id);
+                }
+                if let Some(id) = deleted {
+                    document.data.transcript.bookmarks.retain(|b| b.id != id);
+                    changed = true;
+                }
+                if changed {
+                    document.dirty.transcript = true;
+                    document.changed();
+                }
+            });
+    }
+    let marker_targets: std::collections::HashMap<_, _> = document
+        .data
+        .transcript
+        .bookmarks
+        .iter()
+        .filter_map(|b| {
+            document
+                .data
+                .transcript
+                .segment_at(b.at_ms)
+                .map(|s| (b.id, s.id))
+        })
+        .collect();
     let mut selected = None;
     let mut scrolled = false;
     egui::ScrollArea::vertical()
@@ -1943,6 +2148,24 @@ fn transcript_view(
         .stick_to_bottom(live)
         .show(ui, |ui| {
             for (index, segment) in document.data.transcript.segments.iter().enumerate() {
+                for bookmark in document
+                    .data
+                    .transcript
+                    .bookmarks
+                    .iter()
+                    .filter(|b| marker_targets.get(&b.id) == Some(&segment.id))
+                {
+                    if ui
+                        .link(format!(
+                            "⚑ {} {}",
+                            timestamp(bookmark.at_ms),
+                            bookmark.label.as_deref().unwrap_or("Важный момент")
+                        ))
+                        .clicked()
+                    {
+                        document.speaker_ui.scroll_to = Some(segment.id);
+                    }
+                }
                 let me = segment.speaker.0 == "me"
                     || document.data.transcript.self_speaker.as_ref() == Some(&segment.speaker.0);
                 let width = (ui.available_width() * 0.90).max(1.0);

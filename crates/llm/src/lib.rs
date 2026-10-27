@@ -9,6 +9,7 @@ mod cli;
 mod config;
 mod credentials;
 mod drafts;
+pub mod live;
 mod people;
 pub use people::{PeopleBrief, person_brief, summarize_digest};
 mod enhance;
@@ -37,6 +38,8 @@ pub fn create_provider(
     if config.kind.is_cli() {
         Ok(Box::new(CliProvider::new(config, mode, cancel)?))
     } else {
-        Ok(Box::new(HttpProvider::new(config, mode)?))
+        Ok(Box::new(
+            HttpProvider::new(config, mode)?.with_cancellation(cancel),
+        ))
     }
 }

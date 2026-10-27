@@ -36,9 +36,14 @@ pub struct HttpProvider {
     client: Client,
     endpoint: reqwest::Url,
     key: Option<String>,
+    cancel: crate::Cancellation,
 }
 
 impl HttpProvider {
+    pub fn with_cancellation(mut self, cancel: crate::Cancellation) -> Self {
+        self.cancel = cancel;
+        self
+    }
     pub fn new(config: ProviderConfig, mode: Mode) -> Result<Self> {
         config.validate(mode)?;
         let key = crate::resolve_key(&config, &crate::OsCredentialStore)?;
@@ -98,6 +103,7 @@ impl HttpProvider {
             client: client.build().context("cannot create LLM HTTP client")?,
             endpoint,
             key,
+            cancel: crate::Cancellation::default(),
         })
     }
 
@@ -130,6 +136,7 @@ impl HttpProvider {
     }
 
     fn response(&self, body: Value) -> Result<Response> {
+        ensure!(!self.cancel.is_cancelled(), "Запрос отменён");
         let mut request = self.client.post(self.endpoint.clone()).json(&body);
         match self.config.kind {
             ProviderKind::Openai => {
@@ -149,6 +156,7 @@ impl HttpProvider {
                 "LLM HTTP request failed (check connectivity, TLS, timeout and API key header)"
             )
         })?;
+        ensure!(!self.cancel.is_cancelled(), "Запрос отменён");
         let status = response.status();
         // Error bodies may echo private inputs or credentials; never include them.
         ensure!(
@@ -188,7 +196,7 @@ impl Provider for HttpProvider {
                     .and_then(|value| value.to_str().ok())
                     .is_some_and(|value| value.starts_with("text/event-stream"))
                 {
-                    read_sse(response, on_text)?
+                    read_sse(response, on_text, &self.cancel)?
                 } else {
                     // Some local OpenAI-compatible servers ignore stream=true.
                     let value: Value = response.json().context("invalid OpenAI JSON response")?;
@@ -234,12 +242,17 @@ impl Provider for HttpProvider {
             }
             _ => unreachable!("HTTP provider"),
         };
+        ensure!(!self.cancel.is_cancelled(), "Запрос отменён");
         ensure!(!text.trim().is_empty(), "LLM returned an empty completion");
         Ok(text)
     }
 }
 
-fn read_sse(response: Response, on_text: &mut dyn FnMut(&str)) -> Result<String> {
+fn read_sse(
+    response: Response,
+    on_text: &mut dyn FnMut(&str),
+    cancel: &crate::Cancellation,
+) -> Result<String> {
     let mut text = String::new();
     let mut event = String::new();
     let mut finished = false;
@@ -247,6 +260,7 @@ fn read_sse(response: Response, on_text: &mut dyn FnMut(&str)) -> Result<String>
         .lines()
         .chain(std::iter::once(Ok(String::new())))
     {
+        ensure!(!cancel.is_cancelled(), "Запрос отменён");
         let line = line.context("cannot read OpenAI event stream")?;
         if let Some(data) = line.strip_prefix("data:") {
             if !event.is_empty() {

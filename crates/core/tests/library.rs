@@ -27,6 +27,7 @@ fn meta(title: &str) -> MeetingMeta {
 fn transcript(text: &str) -> Transcript {
     Transcript {
         version: SCHEMA_VERSION,
+        bookmarks: Vec::new(),
         speaker_names: Default::default(),
         speaker_suggestions: Default::default(),
         self_speaker: None,
