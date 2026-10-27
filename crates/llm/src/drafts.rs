@@ -201,7 +201,7 @@ pub fn render_followup(
     })
 }
 
-fn compose(
+pub(crate) fn compose(
     instruction: &str,
     evidence: &str,
     provider: &dyn Provider,

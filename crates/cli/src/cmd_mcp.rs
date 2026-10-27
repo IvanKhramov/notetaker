@@ -67,6 +67,107 @@ impl Server {
     }
     fn call(&self, name: &str, args: Value) -> Result<Value> {
         match name {
+            "list_people" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {}
+                let _: Input = serde_json::from_value(args)?;
+                Ok(serde_json::to_value(
+                    self.library
+                        .people(self.exclude_local, "", "")?
+                        .into_iter()
+                        .filter(|p| !p.hidden)
+                        .collect::<Vec<_>>(),
+                )?)
+            }
+            "get_person" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    person: String,
+                }
+                let input: Input = serde_json::from_value(args)?;
+                let people: Vec<_> = self
+                    .library
+                    .people(self.exclude_local, "", "")?
+                    .into_iter()
+                    .filter(|p| !p.hidden && (p.id == input.person || p.matches(&input.person)))
+                    .collect();
+                ensure!(people.len() == 1, "Человек не найден или имя неоднозначно");
+                Ok(serde_json::to_value(self.library.person_page(
+                    people.into_iter().next().unwrap(),
+                    self.exclude_local,
+                )?)?)
+            }
+            "get_series" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    meeting: String,
+                }
+                let input: Input = serde_json::from_value(args)?;
+                let requested = PathBuf::from(&input.meeting);
+                let requested = if requested.is_absolute() {
+                    requested
+                } else {
+                    self.library.root().join(requested)
+                };
+                let requested = requested.canonicalize().ok();
+                let series = self
+                    .library
+                    .series(self.exclude_local)?
+                    .into_iter()
+                    .find(|s| {
+                        s.meetings.iter().any(|m| {
+                            m.meta.id.to_string() == input.meeting
+                                || requested.as_deref() == Some(m.path.as_path())
+                        })
+                    })
+                    .context("Серия не найдена или недоступна")?;
+                Ok(serde_json::to_value(series)?)
+            }
+            "get_digest" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    start: Option<chrono::NaiveDate>,
+                    end: Option<chrono::NaiveDate>,
+                    #[serde(default)]
+                    prev: bool,
+                    person: Option<String>,
+                    series: Option<String>,
+                }
+                let input: Input = serde_json::from_value(args)?;
+                let period = match (input.start, input.end) {
+                    (Some(start), Some(end)) => notetaker_core::DigestPeriod { start, end },
+                    (None, None) => {
+                        notetaker_core::DigestPeriod::week(chrono::Local::now(), input.prev)
+                    }
+                    _ => anyhow::bail!("Укажите start и end вместе"),
+                };
+                let person = input
+                    .person
+                    .map(|name| -> Result<_> {
+                        let matches: Vec<_> = self
+                            .library
+                            .people(self.exclude_local, "", "")?
+                            .into_iter()
+                            .filter(|p| !p.hidden && (p.id == name || p.matches(&name)))
+                            .collect();
+                        ensure!(matches.len() == 1, "Человек не найден или имя неоднозначно");
+                        Ok(matches.into_iter().next().unwrap())
+                    })
+                    .transpose()?;
+                Ok(serde_json::to_value(self.library.digest(
+                    period,
+                    &notetaker_core::DigestFilter {
+                        person,
+                        series_id: input.series,
+                    },
+                    &chrono::Local,
+                    self.exclude_local,
+                )?)?)
+            }
             "list_tasks" => {
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]
@@ -218,6 +319,10 @@ fn ten() -> usize {
 }
 fn tools() -> Value {
     json!({"tools":[
+        {"name":"list_people","description":"Люди из доступных встреч и задач. Соблюдает фильтр Local.","inputSchema":{"type":"object","properties":{},"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}},
+        {"name":"get_person","description":"Встречи, задачи и время речи человека по имени, email или id.","inputSchema":{"type":"object","properties":{"person":{"type":"string"}},"required":["person"],"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}},
+        {"name":"get_series","description":"Серия по UUID или пути доступной встречи.","inputSchema":{"type":"object","properties":{"meeting":{"type":"string"}},"required":["meeting"],"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}},
+        {"name":"get_digest","description":"Дайджест без LLM и записи на диск. Локальные даты start включительно, end исключительно; по умолчанию текущая ISO-неделя.","inputSchema":{"type":"object","properties":{"start":{"type":"string"},"end":{"type":"string"},"prev":{"type":"boolean"},"person":{"type":"string"},"series":{"type":"string"}},"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}},
         {"name":"list_tasks","description":"Задачи из конспектов. Соблюдает фильтр Local.","inputSchema":{"type":"object","properties":{"status":{"type":"string","enum":["all","open","completed","done"]},"owner":{"type":"string"}},"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}},
         {"name":"search_meetings","description":"Поиск встреч по словам, BM25. Local-встречи скрыты по настройке.","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer","minimum":0,"maximum":100}},"required":["query"],"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}},
         {"name":"get_meeting","description":"Заметки, конспект и транскрипт с именами. Укажите id или path внутри библиотеки.","inputSchema":{"type":"object","properties":{"id":{"type":"string"},"path":{"type":"string"}},"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}},
@@ -260,6 +365,10 @@ fn handle(server: &Server, request: Value, initialized: &mut bool) -> Option<Val
                 return Some(error(id, -32602, "Missing tool name"));
             };
             if ![
+                "list_people",
+                "get_person",
+                "get_series",
+                "get_digest",
                 "list_tasks",
                 "search_meetings",
                 "get_meeting",
@@ -319,6 +428,93 @@ mod tests {
     use super::*;
     use notetaker_core::{Channel, MeetingMeta, Segment, Source, SpeakerId, Transcript};
     use std::io::Cursor;
+    #[test]
+    fn people_series_and_digest_recheck_privacy_without_reusing_saved_digest() {
+        use notetaker_core::calendar::{Attendee, EventLink};
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open(root.path()).unwrap();
+        let now = chrono::Utc::now();
+        let mut meta = MeetingMeta::new("SECRET", now);
+        meta.calendar_event = Some(EventLink {
+            uid: "private-series".into(),
+            title: "SECRET".into(),
+            attendees: vec![Attendee {
+                name: "SECRET PERSON".into(),
+                email: "secret@example.org".into(),
+            }],
+            call_url: None,
+        });
+        let meeting = library.create_meeting(meta).unwrap();
+        meeting
+            .write_enhanced("## Решения\nSECRET\n- [ ] SECRET TASK - SECRET PERSON - сегодня")
+            .unwrap();
+        library.reindex_full().unwrap();
+        std::fs::create_dir(root.path().join(".digests")).unwrap();
+        std::fs::write(
+            root.path().join(".digests/private.md"),
+            "SECRET CACHED DIGEST",
+        )
+        .unwrap();
+        let server = Server {
+            library,
+            exclude_local: true,
+        };
+        for tool in ["list_people", "get_digest"] {
+            assert!(
+                !server
+                    .call(tool, json!({}))
+                    .unwrap()
+                    .to_string()
+                    .contains("SECRET")
+            );
+        }
+        assert!(
+            server
+                .call("get_person", json!({"person":"secret@example.org"}))
+                .is_err()
+        );
+        assert!(
+            server
+                .call("get_series", json!({"meeting":meeting.path()}))
+                .is_err()
+        );
+        let mut meta = meeting.read_meta().unwrap();
+        meta.mode = Mode::Hybrid;
+        meeting.write_meta(&meta).unwrap();
+        assert_eq!(
+            server
+                .call("list_people", json!({}))
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            server
+                .call("get_person", json!({"person":"secret@example.org"}))
+                .unwrap()
+                .to_string()
+                .contains("SECRET")
+        );
+        assert!(
+            server
+                .call("get_series", json!({"meeting":meta.id}))
+                .unwrap()
+                .to_string()
+                .contains("SECRET")
+        );
+        meta.mode = Mode::Local;
+        meeting.write_meta(&meta).unwrap();
+        assert!(server.library.people(true, "", "").unwrap().is_empty());
+        assert!(
+            !server
+                .call("get_digest", json!({}))
+                .unwrap()
+                .to_string()
+                .contains("SECRET")
+        );
+    }
     #[test]
     fn tasks_recheck_source_privacy() {
         let root = tempfile::tempdir().unwrap();
@@ -524,7 +720,7 @@ mod tests {
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
         assert_eq!(responses.len(), 10);
-        assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 5);
+        assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 9);
         for response in &responses[2..5] {
             assert_eq!(response["result"]["isError"], false);
         }

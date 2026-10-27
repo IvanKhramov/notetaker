@@ -4,6 +4,7 @@ mod cmd_enhance;
 mod cmd_export;
 mod cmd_import;
 mod cmd_mcp;
+mod cmd_people;
 mod cmd_probe;
 mod cmd_record;
 mod cmd_self_update;
@@ -22,6 +23,12 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// List people in the library.
+    People(cmd_people::PeopleArgs),
+    /// Show meetings and tasks for a person.
+    Person(cmd_people::PersonArgs),
+    /// Generate and save a weekly digest.
+    Digest(cmd_people::DigestArgs),
     /// List action items across meetings.
     Tasks(cmd_tasks::Args),
     #[command(hide = true)]
@@ -46,6 +53,9 @@ enum Command {
 
 fn main() -> anyhow::Result<()> {
     match Args::parse().command {
+        Command::People(args) => cmd_people::people(args),
+        Command::Person(args) => cmd_people::person(args),
+        Command::Digest(args) => cmd_people::digest(args),
         Command::Tasks(args) => cmd_tasks::run(args),
         Command::SelfUpdateApply(args) => cmd_self_update::run(args),
         Command::Mcp(args) => cmd_mcp::run(args),

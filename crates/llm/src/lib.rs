@@ -9,6 +9,8 @@ mod cli;
 mod config;
 mod credentials;
 mod drafts;
+mod people;
+pub use people::{PeopleBrief, person_brief, summarize_digest};
 mod enhance;
 pub use drafts::{Brief, FollowupKind, brief, followup, render_followup, strip_internal};
 mod provider;
