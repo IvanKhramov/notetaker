@@ -14,7 +14,7 @@ use anyhow::{Context, Result, ensure};
 use chrono::Utc;
 use notetaker_capture::{AudioSource, Inventory, LiveOptions, inventory, live_sources};
 use notetaker_core::{Library, Meeting, MeetingMeta, Revision, Transcript};
-use notetaker_llm::{Config, HttpProvider, Template, enhance_meeting};
+use notetaker_llm::{Cancellation, Config, Template, create_provider, enhance_meeting};
 use notetaker_pipeline::{
     Asr, AsrConfig, PipelineEvent, RecordingConfig, RecordingSession, StopHandle,
 };
@@ -154,6 +154,7 @@ pub struct RecordRequest {
 }
 
 pub enum Command {
+    Ai(crate::ai::Action),
     Attach {
         meeting: Meeting,
         inputs: Vec<ImageInput>,
@@ -175,6 +176,8 @@ pub enum Command {
     Enhance {
         meeting: Meeting,
         template: String,
+        cancel: Cancellation,
+        automatic: bool,
     },
     Download(String),
     Settings {
@@ -185,6 +188,7 @@ pub enum Command {
 // Rare worker-to-UI messages; boxing variants buys nothing measurable.
 #[allow(clippy::large_enum_variant)]
 pub enum Event {
+    Ai(crate::ai::Response),
     Attached {
         path: PathBuf,
         anchor: InsertAt,
@@ -196,6 +200,7 @@ pub enum Event {
         llm: LlmSettings,
         warnings: Vec<String>,
         needs_model: bool,
+        llm_configured: bool,
     },
     Listed {
         request: u64,
@@ -268,14 +273,22 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                     .is_ok_and(|status| status.success())
             })
         });
+        let llm_configured = Config::load().is_ok();
         let _ = events.send(Event::Boot {
             settings,
             llm,
             warnings,
             needs_model,
+            llm_configured,
         });
         for command in rx {
             match command {
+                Command::Ai(action) => {
+                    let events = events.clone();
+                    thread::spawn(move || {
+                        let _ = events.send(Event::Ai(crate::ai::execute(action)));
+                    });
+                }
                 Command::Attach {
                     meeting,
                     inputs,
@@ -338,7 +351,12 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                     let events = events.clone();
                     thread::spawn(move || record(request, &events));
                 }
-                Command::Enhance { meeting, template } => {
+                Command::Enhance {
+                    meeting,
+                    template,
+                    cancel,
+                    automatic,
+                } => {
                     let events = events.clone();
                     thread::spawn(move || {
                         let path = meeting.path().to_owned();
@@ -347,15 +365,21 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                             let root = path.parent().context("Нет библиотеки")?;
                             let template_data = Template::load(root, &template)?;
                             let config = Config::load()?;
-                            let provider = HttpProvider::new(
+                            let provider = create_provider(
                                 config.select(meta.mode, None)?.clone(),
                                 meta.mode,
+                                cancel,
                             )?;
-                            let result = enhance_meeting(
+                            let enhance = if automatic {
+                                notetaker_llm::enhance_meeting_if_unedited
+                            } else {
+                                enhance_meeting
+                            };
+                            let result = enhance(
                                 &meeting,
                                 &template,
                                 &template_data,
-                                &provider,
+                                provider.as_ref(),
                                 &mut |text| {
                                     let _ = events.send(Event::EnhancedChunk {
                                         path: path.clone(),
@@ -406,6 +430,15 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
         }
     });
     (commands, messages)
+}
+
+pub fn summary_can_overwrite(data: &DocumentData) -> bool {
+    data.enhanced.is_empty()
+        || data
+            .meta
+            .summary
+            .as_ref()
+            .is_some_and(|stamp| !stamp.edited(&data.enhanced))
 }
 
 fn error_text(error: anyhow::Error) -> String {

@@ -134,6 +134,13 @@ impl AudioWarnings {
     }
 }
 
+pub struct SummaryStatus {
+    changed_at: Instant,
+    template: String,
+    input: String,
+    stale: bool,
+}
+
 pub struct Document {
     pub attachments_pending: usize,
     pub notes_cursor: Option<std::ops::Range<usize>>,
@@ -144,6 +151,7 @@ pub struct Document {
     pub changed_at: Instant,
     pub generation: Option<String>,
     pub template: String,
+    pub summary_status: Option<SummaryStatus>,
 }
 impl Document {
     fn new(data: DocumentData) -> Self {
@@ -162,10 +170,31 @@ impl Document {
             changed_at: Instant::now(),
             generation: None,
             template,
+            summary_status: None,
         }
     }
     pub fn changed(&mut self) {
         self.changed_at = Instant::now();
+    }
+    pub fn summary_stale(&mut self) -> bool {
+        let Some(stamp) = &self.data.meta.summary else {
+            return false;
+        };
+        if let Some(status) = &self.summary_status
+            && status.changed_at == self.changed_at
+            && status.template == self.template
+            && status.input == stamp.input
+        {
+            return status.stale;
+        }
+        let stale = stamp.stale(&self.data.notes, &self.data.transcript, &self.template);
+        self.summary_status = Some(SummaryStatus {
+            changed_at: self.changed_at,
+            template: self.template.clone(),
+            input: stamp.input.clone(),
+            stale,
+        });
+        stale
     }
     fn save(&mut self) -> Option<Save> {
         if self.saving || self.attachments_pending > 0 || !self.dirty.any() {
@@ -188,6 +217,11 @@ pub struct AppState {
     pub settings: Settings,
     pub settings_draft: Settings,
     pub llm_draft: LlmSettings,
+    llm: LlmSettings,
+    llm_configured: bool,
+    pub connections: crate::ai::Connections,
+    pub generation_cancel: notetaker_llm::Cancellation,
+    pending_summary: Option<PathBuf>,
     pub ready: bool,
     pub settings_pending: bool,
     pub rows: Vec<MeetingRow>,
@@ -234,6 +268,11 @@ impl AppState {
             settings: settings.clone(),
             settings_draft: settings.clone(),
             llm_draft: LlmSettings::default(),
+            llm: LlmSettings::default(),
+            llm_configured: false,
+            connections: crate::ai::Connections::default(),
+            generation_cancel: notetaker_llm::Cancellation::default(),
+            pending_summary: None,
             ready: false,
             settings_pending: false,
             rows: Vec::new(),
@@ -269,7 +308,14 @@ impl AppState {
         }
     }
     pub fn send(&mut self, command: Command) {
+        let selecting_ai = matches!(&command, Command::Ai(action) if action.operation == crate::ai::Operation::Default);
+        if selecting_ai {
+            self.settings_pending = true;
+        }
         if self.tx.send(command).is_err() {
+            if selecting_ai {
+                self.settings_pending = false;
+            }
             self.error = Some("Фоновый поток завершился; перезапустите приложение".into());
         }
     }
@@ -418,17 +464,38 @@ impl AppState {
         let Some(path) = self.selected.clone() else {
             return;
         };
+        self.start_summary(path, false);
+    }
+    fn start_summary(&mut self, path: PathBuf, automatic: bool) {
         self.flush();
         let Some(document) = self.documents.get_mut(&path) else {
             return;
         };
+        self.generation_cancel = notetaker_llm::Cancellation::default();
         document.generation = Some(String::new());
         let command = Command::Enhance {
             meeting: document.data.meeting.clone(),
             template: document.template.clone(),
+            cancel: self.generation_cancel.clone(),
+            automatic,
         };
         self.enhancing = Some(path);
         self.send(command);
+    }
+    pub fn generation_cancellable(&self) -> bool {
+        self.enhancing
+            .as_ref()
+            .and_then(|path| self.documents.get(path))
+            .is_some_and(|doc| {
+                let id = match doc.data.meta.mode {
+                    notetaker_core::Mode::Local => &self.llm.defaults.local,
+                    notetaker_core::Mode::Hybrid => &self.llm.defaults.hybrid,
+                };
+                self.llm.providers.iter().any(|provider| {
+                    &provider.id == id
+                        && matches!(provider.kind.as_str(), "claude-cli" | "codex-cli")
+                })
+            })
     }
     pub fn download(&mut self, model: String) {
         if self.downloading || self.recording.busy() {
@@ -506,6 +573,21 @@ impl AppState {
         for save in saves {
             self.send(Command::Save(Box::new(save)));
         }
+        if self.pending_summary.is_some()
+            && !self.unsaved()
+            && !self.recording.busy()
+            && self.enhancing.is_none()
+            && !self.settings_pending
+        {
+            let path = self.pending_summary.take().expect("pending summary");
+            if !self.exit_requested
+                && let Some(document) = self.documents.get(&path)
+                && self.llm_configured
+                && auto_summary_ready(self.settings.auto_summary, &document.data, &self.llm)
+            {
+                self.start_summary(path, true);
+            }
+        }
         // Keep only active/unsaved documents; revisiting a meeting reloads files
         // and opening a large library does not accumulate transcripts in RAM.
         let selected = &self.selected;
@@ -515,6 +597,7 @@ impl AppState {
             selected.as_ref() == Some(path)
                 || (recording.busy() && recording.path.as_ref() == Some(path))
                 || enhancing.as_ref() == Some(path)
+                || self.pending_summary.as_ref() == Some(path)
                 || doc.dirty.any()
                 || doc.saving
                 || doc.attachments_pending > 0
@@ -555,6 +638,38 @@ impl AppState {
     }
     fn apply(&mut self, event: Event) {
         match event {
+            Event::Ai(response) => {
+                if response.operation == crate::ai::Operation::Default {
+                    self.settings_pending = false;
+                }
+                self.connections.apply(&response);
+                if response.operation == crate::ai::Operation::Default && response.result.is_ok() {
+                    let provider = response.provider;
+                    let cloud = provider
+                        .config()
+                        .is_ok_and(|config| config.validate(notetaker_core::Mode::Local).is_err());
+                    self.llm_draft.defaults.hybrid = provider.id.clone();
+                    if !cloud {
+                        self.llm_draft.defaults.local = provider.id.clone();
+                    }
+                    if let Some(existing) = self
+                        .llm_draft
+                        .providers
+                        .iter_mut()
+                        .find(|p| p.id == provider.id)
+                    {
+                        *existing = provider;
+                    } else {
+                        self.llm_draft.providers.push(provider);
+                    }
+                    if cloud && self.settings_draft.mode == notetaker_core::Mode::Local {
+                        self.settings_draft.mode = notetaker_core::Mode::Hybrid;
+                        self.warnings
+                            .push("Для новых встреч включён Hybrid: выбран облачный AI".into());
+                    }
+                    self.save_settings();
+                }
+            }
             Event::Attached {
                 path,
                 anchor,
@@ -584,10 +699,14 @@ impl AppState {
                 llm,
                 warnings,
                 needs_model,
+                llm_configured,
             } => {
+                self.llm_configured = llm_configured;
                 self.offer_model_download = needs_model;
                 self.settings = settings.clone();
                 self.settings_draft = settings.clone();
+                self.connections.load(&llm);
+                self.llm = llm.clone();
                 self.llm_draft = llm;
                 self.record_model = settings.model;
                 self.record_mode = settings.mode;
@@ -753,12 +872,18 @@ impl AppState {
                 document,
                 error,
             } => {
-                if let (Some(path), Some(data)) = (path, document)
-                    && let Some(doc) = self.documents.get_mut(&path)
-                {
-                    doc.data.meta = data.meta;
-                    doc.data.transcript = data.transcript;
-                    doc.data.revisions.transcript = data.revisions.transcript;
+                if let (Some(path), Some(data)) = (path, document) {
+                    if let Some(doc) = self.documents.get_mut(&path) {
+                        doc.data.meta = data.meta;
+                        doc.data.transcript = data.transcript;
+                        doc.data.revisions.transcript = data.revisions.transcript;
+                        doc.changed();
+                    } else {
+                        self.documents.insert(path.clone(), Document::new(*data));
+                    }
+                    if error.is_none() && self.settings.auto_summary {
+                        self.pending_summary = Some(path);
+                    }
                 }
                 self.detector.recording_stopped();
                 self.recording.phase = Phase::Idle;
@@ -794,6 +919,7 @@ impl AppState {
                             self.warnings = text.warnings;
                             doc.data.revisions.enhanced = text.revision;
                             doc.data.meta.template = Some(doc.template.clone());
+                            doc.data.meta.summary = Some(text.stamp);
                         }
                         Err(error) => {
                             self.error = Some(error);
@@ -826,6 +952,7 @@ impl AppState {
                 self.settings_pending = false;
                 match result {
                     Ok((settings, llm)) => {
+                        self.llm_configured = true;
                         let changed_library = self.settings.library != settings.library;
                         if self.settings.detect_calls != settings.detect_calls
                             || self.settings.detect_browsers != settings.detect_browsers
@@ -836,6 +963,8 @@ impl AppState {
                         self.record_mode = settings.mode;
                         self.settings = settings.clone();
                         self.settings_draft = settings;
+                        self.connections.load(&llm);
+                        self.llm = llm.clone();
                         self.llm_draft = llm;
                         if changed_library {
                             self.selected = None;
@@ -851,6 +980,16 @@ impl AppState {
             }
         }
     }
+}
+
+fn auto_summary_ready(enabled: bool, data: &DocumentData, llm: &LlmSettings) -> bool {
+    enabled
+        && worker::summary_can_overwrite(data)
+        && llm
+            .validate()
+            .ok()
+            .and_then(|text| notetaker_llm::Config::parse(&text).ok())
+            .is_some_and(|config| config.select(data.meta.mode, None).is_ok())
 }
 
 pub fn timestamp(ms: u64) -> String {
@@ -1191,6 +1330,12 @@ mod tests {
                 text: "committed".into(),
                 revision,
                 warnings: vec!["Index unavailable".into()],
+                stamp: notetaker_core::SummaryStamp::new(
+                    "",
+                    &Transcript::default(),
+                    "general",
+                    "committed",
+                ),
             }),
         });
         assert_eq!(state.documents[&path].data.enhanced, "committed");
@@ -1227,5 +1372,142 @@ mod tests {
             templates: vec![],
         });
         assert!(state.error.is_none());
+    }
+    #[test]
+    fn auto_summary_respects_mode_setting_and_user_edits() {
+        let (state, _commands, _root, path) = fixture();
+        let mut data = DocumentData::read(state.documents[&path].data.meeting.clone()).unwrap();
+        let mut llm = LlmSettings::default();
+        assert!(auto_summary_ready(true, &data, &llm));
+        assert!(!auto_summary_ready(false, &data, &llm));
+        llm.providers[0].kind = "claude-cli".into();
+        assert!(!auto_summary_ready(true, &data, &llm));
+        data.meta.mode = notetaker_core::Mode::Hybrid;
+        assert!(auto_summary_ready(true, &data, &llm));
+        data.enhanced = "old summary without stamp".into();
+        assert!(!auto_summary_ready(true, &data, &llm));
+        data.meta.summary = Some(notetaker_core::SummaryStamp::new(
+            "",
+            &data.transcript,
+            "general",
+            &data.enhanced,
+        ));
+        assert!(auto_summary_ready(true, &data, &llm));
+        data.enhanced.push_str("edited");
+        assert!(!auto_summary_ready(true, &data, &llm));
+        llm.defaults.hybrid = "missing".into();
+        data.enhanced.clear();
+        assert!(!auto_summary_ready(true, &data, &llm));
+    }
+    #[test]
+    fn final_pass_queues_auto_summary_but_failure_does_not() {
+        let (mut state, _commands, _root, path) = fixture();
+        let meeting = state.documents[&path].data.meeting.clone();
+        state.apply(Event::RecordDone {
+            path: Some(path.clone()),
+            document: Some(Box::new(DocumentData::read(meeting.clone()).unwrap())),
+            error: None,
+        });
+        assert_eq!(state.pending_summary, Some(path.clone()));
+        state.pending_summary = None;
+        state.apply(Event::RecordDone {
+            path: Some(path),
+            document: Some(Box::new(DocumentData::read(meeting).unwrap())),
+            error: Some("final pass failed".into()),
+        });
+        assert!(state.pending_summary.is_none());
+    }
+    #[test]
+    fn choosing_cloud_ai_switches_only_the_new_meeting_default() {
+        let (mut state, commands, _root, path) = fixture();
+        state.settings_draft.library = path.parent().unwrap().to_owned();
+        let provider = crate::config::ProviderSettings {
+            id: "claude-subscription".into(),
+            kind: "claude-cli".into(),
+            model: "sonnet".into(),
+            ..crate::config::ProviderSettings::default()
+        };
+        state.apply(Event::Ai(crate::ai::Response {
+            index: 0,
+            operation: crate::ai::Operation::Default,
+            provider,
+            result: Ok(Vec::new()),
+            latency: Duration::ZERO,
+        }));
+        assert_eq!(state.settings_draft.mode, notetaker_core::Mode::Hybrid);
+        assert_eq!(
+            state.documents[&path].data.meta.mode,
+            notetaker_core::Mode::Local
+        );
+        assert_eq!(state.llm_draft.defaults.hybrid, "claude-subscription");
+        assert!(!state.warnings.is_empty());
+        assert!(matches!(
+            commands.try_recv().unwrap(),
+            Command::Settings { .. }
+        ));
+    }
+    #[test]
+    fn stale_chip_tracks_notes_and_template_changes_with_cached_status() {
+        let (mut state, _commands, _root, path) = fixture();
+        let doc = state.documents.get_mut(&path).unwrap();
+        doc.data.meta.summary = Some(notetaker_core::SummaryStamp::new(
+            &doc.data.notes,
+            &doc.data.transcript,
+            "general",
+            "summary",
+        ));
+        assert!(!doc.summary_stale());
+        doc.data.notes.push_str("edited");
+        doc.changed();
+        assert!(doc.summary_stale());
+        doc.data.notes.clear();
+        doc.changed();
+        assert!(!doc.summary_stale());
+        doc.template = "standup".into();
+        assert!(doc.summary_stale());
+        doc.template = "general".into();
+        assert!(!doc.summary_stale());
+    }
+    #[test]
+    fn auto_summary_waits_for_latest_notes_to_be_saved() {
+        let (mut state, commands, _root, path) = fixture();
+        state.llm_configured = true;
+        state.pending_summary = Some(path.clone());
+        let doc = state.documents.get_mut(&path).unwrap();
+        doc.data.notes = "latest notes".into();
+        doc.dirty.notes = true;
+        doc.changed();
+        state.poll();
+        assert!(state.enhancing.is_none());
+        assert_eq!(state.pending_summary, Some(path.clone()));
+        state.flush();
+        let Command::Save(save) = commands.try_recv().unwrap() else {
+            panic!("expected notes save");
+        };
+        save.meeting
+            .write_notes(save.notes.as_deref().unwrap())
+            .unwrap();
+        let mut revisions = save.revisions;
+        revisions.notes = save.meeting.load_notes().unwrap().revision;
+        let result = worker::SaveResult {
+            revisions,
+            ..Default::default()
+        };
+        state.apply(Event::Saved {
+            path: path.clone(),
+            result,
+        });
+        state.poll();
+        assert_eq!(state.enhancing, Some(path));
+        let Command::Enhance {
+            automatic,
+            template,
+            ..
+        } = commands.try_recv().unwrap()
+        else {
+            panic!("expected automatic generation");
+        };
+        assert!(automatic);
+        assert_eq!(template, "general");
     }
 }

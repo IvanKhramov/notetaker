@@ -26,6 +26,7 @@ pub struct Settings {
     pub detect_browsers: bool,
     /// Zero disables the silence timeout.
     pub auto_stop_minutes: u32,
+    pub auto_summary: bool,
 }
 
 impl Default for Settings {
@@ -45,6 +46,7 @@ impl Default for Settings {
             detect_calls: true,
             detect_browsers: true,
             auto_stop_minutes: 15,
+            auto_summary: true,
         }
     }
 }
@@ -103,10 +105,38 @@ pub struct LlmDefaults {
 pub struct ProviderSettings {
     pub id: String,
     pub kind: String,
+    #[serde(default)]
     pub base_url: String,
+    #[serde(default)]
     pub model: String,
     pub api_key_env: Option<String>,
+    #[serde(default = "env_key_source")]
+    pub key_source: String,
+    #[serde(default = "cli_context")]
     pub context_tokens: usize,
+}
+
+fn cli_context() -> usize {
+    150_000
+}
+
+fn env_key_source() -> String {
+    "env".into()
+}
+
+impl ProviderSettings {
+    pub fn config(&self) -> Result<notetaker_llm::ProviderConfig> {
+        let settings = LlmSettings {
+            defaults: LlmDefaults {
+                local: self.id.clone(),
+                hybrid: self.id.clone(),
+            },
+            providers: vec![self.clone()],
+        };
+        Ok(notetaker_llm::Config::parse(&toml::to_string(&settings)?)?
+            .providers
+            .remove(0))
+    }
 }
 
 impl Default for ProviderSettings {
@@ -117,6 +147,7 @@ impl Default for ProviderSettings {
             base_url: "http://localhost:11434/v1".into(),
             model: "qwen3:8b".into(),
             api_key_env: None,
+            key_source: "env".into(),
             context_tokens: 32_768,
         }
     }

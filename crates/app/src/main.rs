@@ -1,5 +1,6 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod ai;
 mod attachments;
 mod config;
 #[cfg(windows)]

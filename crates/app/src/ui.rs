@@ -228,6 +228,7 @@ impl NotetakerApp {
             && !self.state.recording.busy()
             && !self.state.unsaved()
             && !self.state.settings_pending;
+        let can_cancel_generation = self.state.generation_cancellable();
         let locked =
             self.state.recording.busy() && self.state.recording.path.as_ref() == Some(&path);
         let live = locked && self.state.recording.phase == Phase::Recording;
@@ -274,12 +275,37 @@ impl NotetakerApp {
                 });
             }
         });
+        let mut update_summary = false;
+        if document.summary_stale() {
+            ui.horizontal(|ui| {
+                theme::chip(ui, "Конспект устарел");
+                let edited = document
+                    .data
+                    .meta
+                    .summary
+                    .as_ref()
+                    .is_some_and(|stamp| stamp.edited(&document.data.enhanced));
+                update_summary = ui
+                    .add_enabled(
+                        can_enhance,
+                        egui::Button::new(if edited {
+                            "Пересоздать"
+                        } else {
+                            "Обновить"
+                        }),
+                    )
+                    .clicked();
+            });
+        }
         ui.add_space(12.0);
         if document.generation.is_some() {
             theme::bar(Palette::of(ui)).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spinner();
                     ui.label("Пишу конспект…");
+                    if can_cancel_generation && ui.button("Отменить").clicked() {
+                        self.state.generation_cancel.cancel();
+                    }
                 });
             });
         }
@@ -306,7 +332,7 @@ impl NotetakerApp {
                 (Tab::Transcript, "Транскрипт"),
             ],
         );
-        let mut enhance = false;
+        let mut enhance = update_summary;
         let mut export = None;
         if self.state.tab == Tab::Enhanced {
             egui::Panel::bottom("summary_actions")
@@ -328,8 +354,16 @@ impl NotetakerApp {
                                     });
                             });
                             ui.add_enabled_ui(can_enhance, |ui| {
-                                enhance = theme::button(ui, "Пересоздать", ButtonStyle::Secondary)
-                                    .clicked();
+                                enhance |= theme::button(
+                                    ui,
+                                    if document.data.enhanced.is_empty() {
+                                        "Создать конспект"
+                                    } else {
+                                        "Пересоздать"
+                                    },
+                                    ButtonStyle::Secondary,
+                                )
+                                .clicked();
                             });
                             if theme::button(ui, "Копировать", ButtonStyle::Secondary).clicked()
                             {
@@ -390,7 +424,7 @@ impl NotetakerApp {
                             );
                         } else if document.data.enhanced.is_empty() && self.enhanced_preview {
                             ui.weak(
-                                "Выберите шаблон и нажмите «Пересоздать», чтобы собрать конспект.",
+                                "Выберите шаблон и нажмите «Создать конспект», чтобы собрать конспект.",
                             );
                         } else if self.enhanced_preview {
                             markdown_preview(
@@ -541,7 +575,12 @@ impl NotetakerApp {
                     if self.state.downloading { ui.spinner(); }
                 });
                 for line in &self.state.download_messages { ui.small(line); }
-                ui.separator(); ui.heading("LLM-провайдеры");
+                ui.checkbox(&mut self.state.settings_draft.auto_summary, "Делать конспект автоматически");
+                ui.separator(); ui.heading("Подключение AI");
+                let can_default = self.state.ready && !self.state.recording.busy() && self.state.enhancing.is_none() && !self.state.unsaved() && !self.state.settings_pending;
+                let actions = self.state.connections.ui(ui, &self.state.llm_draft.defaults.hybrid, can_default);
+                for action in actions { self.state.send(Command::Ai(action)); }
+                ui.collapsing("Расширенные", |ui| {
                 ui.label("Указывайте имена переменных окружения; значения ключей здесь не хранятся. Для Local разрешены только loopback-провайдеры.");
                 let llm = &mut self.state.llm_draft;
                 ui.horizontal(|ui| { ui.label("По умолчанию Local:"); ui.text_edit_singleline(&mut llm.defaults.local); });
@@ -553,9 +592,15 @@ impl NotetakerApp {
                         egui::ComboBox::from_id_salt("kind").selected_text(&provider.kind).show_ui(ui, |ui| {
                             ui.selectable_value(&mut provider.kind, "openai".into(), "OpenAI-compatible (Ollama, OpenRouter, vLLM…)");
                             ui.selectable_value(&mut provider.kind, "anthropic".into(), "Anthropic");
+                            ui.selectable_value(&mut provider.kind, "claude-cli".into(), "Claude CLI");
+                            ui.selectable_value(&mut provider.kind, "codex-cli".into(), "Codex CLI");
                         });
                         ui.horizontal(|ui| { ui.label("base_url"); ui.text_edit_singleline(&mut provider.base_url); });
                         ui.horizontal(|ui| { ui.label("model"); ui.text_edit_singleline(&mut provider.model); });
+                        egui::ComboBox::from_id_salt("key_source").selected_text(&provider.key_source).show_ui(ui, |ui| {
+                            ui.selectable_value(&mut provider.key_source, "env".into(), "env");
+                            ui.selectable_value(&mut provider.key_source, "credential".into(), "credential");
+                        });
                         let mut env = provider.api_key_env.clone().unwrap_or_default();
                         ui.horizontal(|ui| { ui.label("api_key_env"); if ui.text_edit_singleline(&mut env).changed() { provider.api_key_env = (!env.is_empty()).then_some(env.clone()); } });
                         ui.horizontal(|ui| { ui.label("context_tokens"); ui.add(egui::DragValue::new(&mut provider.context_tokens).range(1..=2_000_000)); });
@@ -563,11 +608,12 @@ impl NotetakerApp {
                 }
                 if let Some(index) = remove { llm.providers.remove(index); }
                 if ui.button("Добавить провайдер").clicked() { llm.providers.push(ProviderSettings { id: format!("provider-{}", llm.providers.len() + 1), ..ProviderSettings::default() }); }
+                });
                 ui.separator();
                 let can_save = self.state.ready && !self.state.recording.busy() && self.state.enhancing.is_none() && !self.state.unsaved() && !self.state.settings_pending;
                 if ui.add_enabled(can_save, egui::Button::new("Сохранить настройки")).clicked() { self.state.save_settings(); }
                 if self.state.recording.busy() || self.state.enhancing.is_some() { ui.small("Сохранение настроек доступно после завершения записи и конспекта."); }
-                ui.small("Настройки приложения и LLM сохраняются отдельно. Значения API-ключей читаются из окружения при создании конспекта.");
+                ui.small("Настройки приложения и LLM сохраняются отдельно. Ключи шлюзов хранятся в Credential Manager на Windows; также поддерживается окружение.");
                 #[cfg(not(windows))]
                 ui.small("Трей и глобальная клавиша включены только на Windows; GTK/AppIndicator не нужны для сборки Linux.");
             });
@@ -1181,6 +1227,7 @@ mod tests {
             saving: false,
             changed_at: Instant::now(),
             generation: None,
+            summary_status: None,
             template: "general".into(),
         };
         let ctx = egui::Context::default();
