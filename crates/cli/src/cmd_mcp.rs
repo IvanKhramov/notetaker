@@ -121,20 +121,39 @@ impl Server {
                     result.into_iter().map(|(_, row)| row).collect::<Vec<_>>()
                 ))
             }
-            "get_meeting" => {
+            "get_meeting" | "get_speaker_timeline" => {
+                let timeline_meeting = if name == "get_speaker_timeline" {
+                    #[derive(Deserialize)]
+                    #[serde(deny_unknown_fields)]
+                    struct TimelineInput {
+                        meeting: String,
+                    }
+                    let input = TimelineInput::deserialize(&args)?;
+                    Some(input.meeting)
+                } else {
+                    None
+                };
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]
                 struct Input {
                     id: Option<String>,
                     path: Option<PathBuf>,
                 }
-                let input: Input = serde_json::from_value(args)?;
+                let input: Input = if let Some(meeting) = &timeline_meeting {
+                    Input {
+                        id: Some(meeting.clone()),
+                        path: None,
+                    }
+                } else {
+                    serde_json::from_value(args)?
+                };
                 ensure!(
                     input.id.is_some() != input.path.is_some(),
                     "Укажите id или path"
                 );
                 let requested_path = input
                     .path
+                    .or_else(|| timeline_meeting.map(PathBuf::from))
                     .map(|p| {
                         if p.is_absolute() {
                             p
@@ -156,6 +175,11 @@ impl Server {
                     {
                         // Check privacy again immediately before reading content.
                         ensure!(self.allowed(&meeting)?, "Встреча недоступна");
+                        if name == "get_speaker_timeline" {
+                            return Ok(serde_json::to_value(
+                                meeting.read_transcript()?.speaker_timeline(),
+                            )?);
+                        }
                         return Ok(
                             json!({"meta":meta,"notes":meeting.read_notes()?,"summary":meeting.read_enhanced()?,"transcript":meeting.read_transcript()?.named_text()}),
                         );
@@ -174,6 +198,7 @@ fn tools() -> Value {
     json!({"tools":[
         {"name":"search_meetings","description":"Поиск встреч по словам, BM25. Local-встречи скрыты по настройке.","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer","minimum":0,"maximum":100}},"required":["query"],"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}},
         {"name":"get_meeting","description":"Заметки, конспект и транскрипт с именами. Укажите id или path внутри библиотеки.","inputSchema":{"type":"object","properties":{"id":{"type":"string"},"path":{"type":"string"}},"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}},
+        {"name":"get_speaker_timeline","description":"Таймлайн спикеров, суммарное время, доли, реплики и монологи. meeting: UUID или путь внутри библиотеки. Политика Local применяется.","inputSchema":{"type":"object","properties":{"meeting":{"type":"string"}},"required":["meeting"],"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}},
         {"name":"list_recent","description":"Последние доступные встречи.","inputSchema":{"type":"object","properties":{"n":{"type":"integer","minimum":0,"maximum":100}},"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}}
     ]})
 }
@@ -211,7 +236,14 @@ fn handle(server: &Server, request: Value, initialized: &mut bool) -> Option<Val
             let Some(name) = params["name"].as_str() else {
                 return Some(error(id, -32602, "Missing tool name"));
             };
-            if !["search_meetings", "get_meeting", "list_recent"].contains(&name) {
+            if ![
+                "search_meetings",
+                "get_meeting",
+                "get_speaker_timeline",
+                "list_recent",
+            ]
+            .contains(&name)
+            {
                 return Some(error(id, -32602, "Unknown tool"));
             }
             let args = params
@@ -293,6 +325,12 @@ mod tests {
                 server.call("get_meeting", json!({"id":id})).is_err(),
                 "{name}"
             );
+            assert!(
+                server
+                    .call("get_speaker_timeline", json!({"meeting":id}))
+                    .is_err(),
+                "{name}"
+            );
             assert_eq!(
                 server.call("list_recent", json!({})).unwrap(),
                 json!([]),
@@ -360,6 +398,30 @@ mod tests {
         public.write_transcript(&transcript).unwrap();
         let id = public.read_meta().unwrap().id;
         let hidden = local.read_meta().unwrap().id;
+        let privacy_server = Server {
+            library: library.clone(),
+            exclude_local: true,
+        };
+        let timeline = privacy_server
+            .call("get_speaker_timeline", json!({"meeting":id}))
+            .unwrap();
+        assert_eq!(timeline["speakers"][0]["name"], "Иван");
+        assert_eq!(timeline["speakers"][0]["total_ms"], 1000);
+        assert!(
+            privacy_server
+                .call("get_speaker_timeline", json!({"meeting":hidden}))
+                .is_err()
+        );
+        assert!(
+            privacy_server
+                .call("get_speaker_timeline", json!({"meeting":local.path()}))
+                .is_err()
+        );
+        assert!(
+            privacy_server
+                .call("get_speaker_timeline", json!({"meeting":"../outside"}))
+                .is_err()
+        );
         let requests = [
             json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}),
             json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
@@ -391,7 +453,7 @@ mod tests {
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
         assert_eq!(responses.len(), 10);
-        assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 3);
+        assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 4);
         for response in &responses[2..5] {
             assert_eq!(response["result"]["isError"], false);
         }
@@ -411,5 +473,10 @@ mod tests {
             ..server
         };
         assert!(server.call("get_meeting", json!({"id":hidden})).is_ok());
+        assert!(
+            server
+                .call("get_speaker_timeline", json!({"meeting":hidden}))
+                .is_ok()
+        );
     }
 }

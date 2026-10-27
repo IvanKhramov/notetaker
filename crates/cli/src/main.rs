@@ -1,6 +1,7 @@
 //! Command-line entry point for notetaker.
 
 mod cmd_enhance;
+mod cmd_export;
 mod cmd_import;
 mod cmd_mcp;
 mod cmd_probe;
@@ -21,6 +22,8 @@ struct Args {
 enum Command {
     /// Read-only MCP server over stdio.
     Mcp(cmd_mcp::Options),
+    /// Export a transcript or speaker timing log to stdout.
+    Export(cmd_export::Args),
     /// Import audio or video and create a meeting with a final transcript.
     Import(cmd_import::Args),
     /// Watch microphone usage and print call hints on Windows.
@@ -38,6 +41,7 @@ enum Command {
 fn main() -> anyhow::Result<()> {
     match Args::parse().command {
         Command::Mcp(args) => cmd_mcp::run(args),
+        Command::Export(args) => cmd_export::run(args),
         Command::Import(args) => cmd_import::run(args),
         Command::Watch(args) => cmd_watch::run(args),
         Command::Probe(args) => cmd_probe::run(args),
