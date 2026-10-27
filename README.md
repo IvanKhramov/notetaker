@@ -3,13 +3,13 @@
 An open-source AI notebook for online meetings, inspired by Granola and written
 in Rust. Windows comes first, with macOS and Linux capture support planned.
 
-**v0.4.0:** Windows recording, local ASR with echo deduplication and custom
-vocabulary, audio/video import, meeting notes, search, and automatic summaries.
+**v0.5.0:** Local speaker diarization, participant names and an opt-in voice
+library, alongside Windows recording, audio/video import, search and summaries.
 See [the project plan](docs/PLAN.md) for architecture and milestones.
 
 ## Install
 
-Download `notetaker-0.4.0-windows-x64.zip` from this repository's **Releases**
+Download `notetaker-0.5.0-windows-x64.zip` from this repository's **Releases**
 page and extract it into a folder. Keep all files together and run
 `notetaker-app.exe`. The binaries are unsigned: Windows SmartScreen may warn;
 choose **More info → Run anyway** if you trust the download. A SHA-256 checksum
