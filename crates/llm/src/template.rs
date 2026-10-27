@@ -61,6 +61,14 @@ impl Template {
 
     pub fn builtin(name: &str) -> Option<Self> {
         let (description, instruction) = match name {
+            "followup-team" => (
+                "Сообщение в команду",
+                "Напиши короткое сообщение в команду на русском. Только решения и следующие действия: задача, ответственный, срок. Без вступления, благодарностей и воды. Не выдумывай отсутствующие сроки и имена.",
+            ),
+            "followup-client" => (
+                "Сообщение клиенту",
+                "Напиши короткое сообщение клиенту на русском. Только согласованные решения, действия, ответственные и сроки. Исключи внутренние замечания, оценки, внутренние обсуждения и строки с пометкой internal или внутреннее. Без воды и выдуманных обязательств.",
+            ),
             "general" => (
                 "General meeting notes",
                 "Organize the notes into Summary, Discussion, Decisions, and Action items. Preserve the user's headings where possible. Include owners and deadlines only when stated.",
@@ -82,9 +90,13 @@ impl Template {
         Some(Self {
             name: name.into(),
             description: description.into(),
-            instruction: format!(
-                "{instruction} Write the notes in the transcript language, Russian by default. Format every action item as `- [ ] Задача - Ответственный - срок` (translate labels into the transcript language). If an owner or deadline is missing, use `не указан` in that field; never invent them."
-            ),
+            instruction: if name.starts_with("followup-") {
+                instruction.into()
+            } else {
+                format!(
+                    "{instruction} Write the notes in the transcript language, Russian by default. Format every action item as `- [ ] Задача - Ответственный - срок` (translate labels into the transcript language). If an owner or deadline is missing, use `не указан` in that field; never invent them."
+                )
+            },
         })
     }
 }

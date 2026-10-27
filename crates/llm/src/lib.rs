@@ -8,7 +8,9 @@ mod chat;
 mod cli;
 mod config;
 mod credentials;
+mod drafts;
 mod enhance;
+pub use drafts::{Brief, FollowupKind, brief, followup, render_followup, strip_internal};
 mod provider;
 mod template;
 

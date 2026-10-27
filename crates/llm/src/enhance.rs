@@ -74,7 +74,9 @@ fn enhance_meeting_with_policy(
     )?;
     let mut template = template.clone();
     template.instruction.push_str(&vocabulary.prompt_context());
-    let result = enhance(&meta, &notes, &transcript, &template, provider, on_text)?;
+    let mut named = transcript.clone();
+    named.default_self_name(&notetaker_core::configured_user_name()?);
+    let result = enhance(&meta, &notes, &named, &template, provider, on_text)?;
     let revision = meeting.save_enhanced(&result, enhanced_revision)?;
     let stamp = notetaker_core::SummaryStamp::new(&notes, &transcript, template_id, &result);
     let mut warnings = Vec::new();

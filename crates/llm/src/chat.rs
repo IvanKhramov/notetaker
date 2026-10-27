@@ -56,6 +56,7 @@ pub fn ask(
     } else {
         Mode::Hybrid
     };
+    let user_name = notetaker_core::configured_user_name()?;
     let mut citations = Vec::new();
     let mut evidence = String::new();
     for (index, meeting) in meetings.iter().enumerate() {
@@ -82,11 +83,13 @@ pub fn ask(
             "[{number}: {}, {date}]",
             meta.title.replace(['\r', '\n'], " ")
         );
+        let mut transcript = meeting.read_transcript()?;
+        transcript.default_self_name(&user_name);
         let text = format!(
             "Участники: {participants}\nЗаметки:\n{}\nКонспект:\n{}\nТранскрипт:\n{}",
             notes_without_images(&meeting.read_notes()?),
             notes_without_images(&meeting.read_enhanced()?),
-            meeting.read_transcript()?.named_text()
+            transcript.named_text()
         );
         for line in text.lines() {
             evidence.push_str(&format!("{prefix} {line}\n"));
