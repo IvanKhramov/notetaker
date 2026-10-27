@@ -4,7 +4,7 @@ impl Library {
     /// Attendee matches take precedence, then title FTS; only earlier meetings.
     pub fn brief_sources(&self, event: &CalendarEvent, limit: usize) -> Result<Vec<Meeting>> {
         self.reindex_incremental()?;
-        let title_hits = self.retrieve(&event.link.title, 100, false)?;
+        let title_hits = self.retrieve_titles(&event.link.title, 100)?;
         let mut selected = Vec::new();
         for meeting in self.list_meetings()? {
             if meeting.validate_source_paths().is_err() {
@@ -70,6 +70,10 @@ mod tests {
         lib.create_meeting(MeetingMeta::new("Кластер", now + chrono::Duration::days(1)))
             .unwrap();
         lib.create_meeting(MeetingMeta::new("Погода", now - chrono::Duration::days(1)))
+            .unwrap();
+        lib.create_meeting(MeetingMeta::new("Бюджет", now - chrono::Duration::days(1)))
+            .unwrap()
+            .write_notes("Кластер")
             .unwrap();
         let event = CalendarEvent {
             link,

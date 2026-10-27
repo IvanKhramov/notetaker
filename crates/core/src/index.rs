@@ -80,7 +80,20 @@ impl Library {
     /// Natural-language retrieval with safe OR terms and weighted FTS5 BM25.
     /// Read privacy from source metadata before returning snippets or applying limit.
     pub fn retrieve(&self, question: &str, limit: usize, exclude_local: bool) -> Result<Vec<Hit>> {
-        let query = retrieval_query(question);
+        self.retrieve_query(retrieval_query(question), limit, exclude_local)
+    }
+
+    pub(crate) fn retrieve_titles(&self, title: &str, limit: usize) -> Result<Vec<Hit>> {
+        let query = retrieval_query(title);
+        let query = if query.is_empty() {
+            query
+        } else {
+            format!("title : ({query})")
+        };
+        self.retrieve_query(query, limit, false)
+    }
+
+    fn retrieve_query(&self, query: String, limit: usize, exclude_local: bool) -> Result<Vec<Hit>> {
         if query.is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
