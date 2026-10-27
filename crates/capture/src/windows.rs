@@ -230,6 +230,7 @@ struct Stream {
     anchor: Option<Duration>,
     position: u64,
     expected_index: Option<u64>,
+    startup_warnings: crate::policy::StartupWarnings,
 }
 
 impl Stream {
@@ -261,6 +262,7 @@ impl Stream {
             anchor: None,
             position: 0,
             expected_index: None,
+            startup_warnings: crate::policy::StartupWarnings::default(),
         })
     }
 
@@ -343,17 +345,20 @@ impl Stream {
                 break;
             };
             let at = clock.timestamp(&packet);
+            let report_warning = self.startup_warnings.allows(clock.origin.elapsed());
             if packet.discontinuity || self.expected_index.is_some_and(|i| i != packet.index) {
                 self.normalizer = Normalizer::new(RATE, CHANNELS)?;
                 self.anchor = None;
                 self.position = 0;
-                send(
-                    sender,
-                    stop,
-                    CaptureMessage::Event(CaptureEvent::Discontinuity { channel, at }),
-                );
+                if report_warning {
+                    send(
+                        sender,
+                        stop,
+                        CaptureMessage::Event(CaptureEvent::Discontinuity { channel, at }),
+                    );
+                }
             }
-            if packet.timestamp_error {
+            if packet.timestamp_error && report_warning {
                 send(
                     sender,
                     stop,

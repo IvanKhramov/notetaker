@@ -47,6 +47,7 @@ pub struct Recording {
     pub capture_incomplete: bool,
     pub progress: Option<(usize, usize)>,
     pub messages: VecDeque<String>,
+    audio_warnings: AudioWarnings,
 }
 impl Recording {
     pub fn busy(&self) -> bool {
@@ -89,7 +90,7 @@ impl Recording {
             PipelineEvent::CaptureEvent(CaptureEvent::Error { .. }) | PipelineEvent::Error(_) => {}
             PipelineEvent::CaptureEvent(
                 CaptureEvent::Discontinuity { .. } | CaptureEvent::TimestampError { .. },
-            ) => self.message("Разрыв звука / ошибка временной метки".into()),
+            ) => self.audio_warnings.pending += 1,
             PipelineEvent::AutoStopped => {
                 if self.stopped.is_none() {
                     self.stopped = Some(self.elapsed());
@@ -111,6 +112,25 @@ impl Recording {
             self.stopped = Some(self.elapsed());
             self.phase = Phase::Finalizing;
         }
+    }
+}
+
+#[derive(Default)]
+struct AudioWarnings {
+    last: Option<Instant>,
+    pending: u64,
+}
+impl AudioWarnings {
+    fn take(&mut self, now: Instant) -> Option<u64> {
+        if self.pending == 0
+            || self
+                .last
+                .is_some_and(|last| now.saturating_duration_since(last) < Duration::from_secs(30))
+        {
+            return None;
+        }
+        self.last = Some(now);
+        Some(std::mem::take(&mut self.pending))
     }
 }
 
@@ -425,6 +445,11 @@ impl AppState {
                 break;
             };
             self.apply(event);
+        }
+        if let Some(count) = self.recording.audio_warnings.take(Instant::now()) {
+            self.recording.message(format!(
+                "Разрыв звука / ошибка временной метки (событий: {count})"
+            ));
         }
         self.poll_detection();
         if self
@@ -788,6 +813,18 @@ pub fn edit_segment(transcript: &mut Transcript, id: Uuid, text: String) -> bool
 mod tests {
     use super::*;
     use notetaker_core::{Segment, Source, SpeakerId};
+    #[test]
+    fn audio_warnings_are_counted_and_flushed_at_most_every_thirty_seconds() {
+        let start = Instant::now();
+        let mut warnings = AudioWarnings::default();
+        assert_eq!(warnings.take(start), None);
+        warnings.pending += 2;
+        assert_eq!(warnings.take(start), Some(2));
+        warnings.pending += 8;
+        assert_eq!(warnings.take(start + Duration::from_secs(29)), None);
+        assert_eq!(warnings.take(start + Duration::from_secs(30)), Some(8));
+        assert_eq!(warnings.take(start + Duration::from_secs(60)), None);
+    }
     #[test]
     fn time_and_speakers() {
         assert_eq!(timestamp(0), "00:00");

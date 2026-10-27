@@ -233,3 +233,33 @@ mod tests {
         assert_eq!(tail.samples.len(), 160000);
     }
 }
+
+/// WASAPI may flag the first packets even when capture starts normally.
+#[cfg(any(windows, test))]
+#[derive(Default)]
+pub(crate) struct StartupWarnings {
+    first_packet: Option<Duration>,
+}
+#[cfg(any(windows, test))]
+impl StartupWarnings {
+    pub(crate) fn allows(&mut self, now: Duration) -> bool {
+        let first = *self.first_packet.get_or_insert(now);
+        now.saturating_sub(first) >= Duration::from_millis(500)
+    }
+}
+
+#[cfg(test)]
+mod startup_warning_tests {
+    use super::*;
+    #[test]
+    fn suppresses_first_half_second_relative_to_each_streams_first_packet() {
+        let mut stream = StartupWarnings::default();
+        assert!(!stream.allows(Duration::from_secs(8)));
+        assert!(!stream.allows(Duration::from_millis(8499)));
+        assert!(stream.allows(Duration::from_millis(8500)));
+        assert!(stream.allows(Duration::from_secs(40)));
+        let mut fallback = StartupWarnings::default();
+        assert!(!fallback.allows(Duration::from_secs(40)));
+        assert!(fallback.allows(Duration::from_millis(40500)));
+    }
+}
