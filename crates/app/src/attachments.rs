@@ -25,9 +25,11 @@ pub struct InsertAt {
 pub fn import(meeting: &Meeting, input: ImageInput) -> Result<String> {
     let (bytes, extension) = match input {
         ImageInput::Clipboard(image) => {
+            // The 20 MB limit applies to the encoded PNG: a full 4K screenshot is
+            // ~33 MB as raw RGBA but a few MB as PNG.
             ensure!(
-                image.pixels.len() <= MAX_IMAGE_BYTES / 4,
-                "Изображение больше 20 МБ"
+                image.width() <= 16384 && image.height() <= 16384,
+                "Изображение слишком большое"
             );
             let width = u32::try_from(image.width())?;
             let height = u32::try_from(image.height())?;
@@ -155,12 +157,15 @@ mod tests {
         assert_eq!(decoded.get_pixel(0, 0).0, color.to_srgba_unmultiplied());
         let copy = import(&meeting, ImageInput::File(meeting.path().join(relative))).unwrap();
         assert!(copy.ends_with(".png"));
-        let large_clipboard = egui::ColorImage::filled([2561, 2048], egui::Color32::WHITE);
+        // A 4K screenshot is over 20 MB as raw RGBA but small as PNG.
+        let screenshot = egui::ColorImage::filled([3840, 2160], egui::Color32::WHITE);
+        import(&meeting, ImageInput::Clipboard(Arc::new(screenshot))).unwrap();
+        let oversized = egui::ColorImage::filled([16385, 1], egui::Color32::WHITE);
         assert!(
-            import(&meeting, ImageInput::Clipboard(Arc::new(large_clipboard)))
+            import(&meeting, ImageInput::Clipboard(Arc::new(oversized)))
                 .unwrap_err()
                 .to_string()
-                .contains("20 МБ")
+                .contains("слишком большое")
         );
         let jpeg = temp.path().join("photo.JPEG");
         image::RgbImage::new(2, 3)
