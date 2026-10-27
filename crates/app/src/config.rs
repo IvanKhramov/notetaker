@@ -267,7 +267,7 @@ mod tests {
         let mut config = LlmSettings::default();
         assert!(config.validate().is_ok());
         config.providers[0].base_url = "https://api.example.com/v1".into();
-        assert!(config.validate().is_err()); // local default cannot leave loopback
+        assert!(config.validate().is_ok()); // remote Local default fails only Local meetings
         config.providers[0].base_url = "http://localhost:11434/v1".into();
         config.providers[0].api_key_env = Some("sk-secret-value".into());
         assert!(config.validate().is_err());

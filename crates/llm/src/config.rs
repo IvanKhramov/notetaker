@@ -74,8 +74,14 @@ impl Config {
             );
             provider.validate(Mode::Hybrid)?;
         }
-        config.select(Mode::Local, None)?;
-        config.select(Mode::Hybrid, None)?;
+        // A remote Local default only fails Local meetings at select(); it must
+        // not block Hybrid meetings from loading the same config.
+        for id in [&config.defaults.local, &config.defaults.hybrid] {
+            ensure!(
+                config.providers.iter().any(|provider| &provider.id == id),
+                "selected LLM provider is not configured"
+            );
+        }
         Ok(config)
     }
 

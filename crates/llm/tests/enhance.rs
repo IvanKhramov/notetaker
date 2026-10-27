@@ -295,6 +295,10 @@ context_tokens = 200000
         "ollama"
     );
     assert!(config.select(Mode::Local, Some("cloud")).is_err());
+    // A remote Local default loads; only Local meetings are refused.
+    let remote = Config::parse(&text.replace("local = \"ollama\"", "local = \"cloud\"")).unwrap();
+    assert!(remote.select(Mode::Local, None).is_err());
+    assert_eq!(remote.select(Mode::Hybrid, None).unwrap().id, "cloud");
     assert!(config.select(Mode::Hybrid, Some("missing")).is_err());
     assert!(Config::parse(&text.replace("context_tokens = 8192", "context_tokens = 0")).is_err());
     assert!(Config::parse(&text.replace("id = \"cloud\"", "id = \"ollama\"")).is_err());
