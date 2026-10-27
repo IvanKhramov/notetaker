@@ -1,7 +1,11 @@
 use crate::{Library, MeetingSummary, Mode, Person, Result, Task, decisions};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, fs, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::PathBuf,
+};
 
 /// Inclusive local calendar start, exclusive end. Membership uses the caller's TZ.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +50,8 @@ pub struct Digest {
     pub meetings: Vec<MeetingSummary>,
     pub new_tasks: Vec<Task>,
     pub overdue_tasks: Vec<Task>,
+    #[serde(default)]
+    pub highlights: BTreeMap<String, BTreeSet<String>>,
     pub markdown: String,
 }
 impl Library {
@@ -104,7 +110,41 @@ impl Library {
             new_tasks,
             overdue_tasks,
             markdown: String::new(),
+            highlights: BTreeMap::new(),
         };
+        let (name, aliases) = if exclude_local {
+            (String::new(), String::new())
+        } else {
+            crate::identity::configured_identity()?
+        };
+        for person in self.people(exclude_local, &name, &aliases)? {
+            let mut items: BTreeSet<_> = digest
+                .meetings
+                .iter()
+                .filter(|m| m.has_person(&person))
+                .map(|m| format!("{}: {}", m.meta.title, m.excerpt()))
+                .collect();
+            for task in digest
+                .new_tasks
+                .iter()
+                .chain(&digest.overdue_tasks)
+                .filter(|t| person.matches(&t.owner))
+            {
+                items.insert(format!("Задача: {} ({})", task.text, task.due_text));
+            }
+            if !items.is_empty() {
+                let label = if person.emails.is_empty() {
+                    person.name
+                } else {
+                    format!(
+                        "{} <{}>",
+                        person.name,
+                        person.emails.into_iter().collect::<Vec<_>>().join(", ")
+                    )
+                };
+                digest.highlights.insert(label, items);
+            }
+        }
         digest.markdown = digest.plain_markdown();
         Ok(digest)
     }
@@ -162,33 +202,7 @@ impl Digest {
             }
         }
         text.push_str("\n## По людям\n");
-        let mut highlights: std::collections::BTreeMap<String, BTreeSet<String>> =
-            std::collections::BTreeMap::new();
-        for meeting in &self.meetings {
-            let mut names: BTreeSet<_> =
-                meeting.transcript.speaker_names.values().cloned().collect();
-            if let Some(event) = &meeting.meta.calendar_event {
-                names.extend(event.attendees.iter().map(|a| a.label().to_owned()));
-            }
-            for name in names {
-                if !name.trim().is_empty() {
-                    highlights.entry(name).or_default().insert(format!(
-                        "{}: {}",
-                        meeting.meta.title,
-                        meeting.excerpt()
-                    ));
-                }
-            }
-        }
-        for task in &self.new_tasks {
-            if !task.owner.is_empty() {
-                highlights
-                    .entry(task.owner.clone())
-                    .or_default()
-                    .insert(format!("Задача: {} ({})", task.text, task.due_text));
-            }
-        }
-        for (name, lines) in highlights {
+        for (name, lines) in &self.highlights {
             text.push_str(&format!("\n### {name}\n"));
             for line in lines {
                 text.push_str(&format!("- {line}\n"));

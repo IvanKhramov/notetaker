@@ -292,3 +292,47 @@ fn user_edits_follow_a_new_email_and_can_be_unhidden() {
     library.write_people_edits(&edits).unwrap();
     assert!(!library.people(false, "", "").unwrap()[0].hidden);
 }
+
+#[test]
+fn digest_highlights_use_merged_people_instead_of_spelling_variants() {
+    let dir = tempfile::tempdir().unwrap();
+    let library = Library::open(dir.path()).unwrap();
+    add(
+        &library,
+        "Первая",
+        -1,
+        Some("uid"),
+        "Александр",
+        "a@example.org",
+        None,
+    )
+    .write_enhanced("План")
+    .unwrap();
+    add(&library, "Вторая", 0, None, "Саша", "", None)
+        .write_enhanced("Результат")
+        .unwrap();
+    let people = library.people(false, "", "").unwrap();
+    let alex = people.iter().find(|p| p.matches("a@example.org")).unwrap();
+    let sasha = people.iter().find(|p| p.matches("Саша")).unwrap();
+    let mut edits = library.read_people_edits().unwrap();
+    edits.merge(sasha, alex);
+    library.write_people_edits(&edits).unwrap();
+    let digest = library
+        .digest(
+            DigestPeriod::week(now().with_timezone(&chrono::Local), false),
+            &DigestFilter::default(),
+            &chrono::Local,
+            false,
+        )
+        .unwrap();
+    assert_eq!(digest.highlights.len(), 1);
+    assert_eq!(digest.highlights.values().next().unwrap().len(), 2);
+    assert!(
+        digest
+            .highlights
+            .keys()
+            .next()
+            .unwrap()
+            .contains("Александр")
+    );
+}
