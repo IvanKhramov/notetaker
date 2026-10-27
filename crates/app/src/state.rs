@@ -68,6 +68,7 @@ impl Recording {
         match event {
             PipelineEvent::Lag { seconds } => self.lag = *seconds,
             PipelineEvent::LiveDisabled => self.live_disabled = true,
+            PipelineEvent::Warning(message) => self.message(message.clone()),
             PipelineEvent::CaptureIssue(issue) => {
                 self.capture_incomplete = true;
                 self.message(format!(
@@ -246,6 +247,7 @@ pub struct AppState {
     pub process_id: Option<u32>,
     pub templates: Vec<String>,
     pub enhancing: Option<PathBuf>,
+    pub voices: notetaker_core::VoiceLibrary,
     pub downloading: bool,
     pub offer_model_download: bool,
     pub download_messages: VecDeque<String>,
@@ -297,6 +299,7 @@ impl AppState {
             process_id: None,
             templates: vec!["general".into()],
             enhancing: None,
+            voices: Default::default(),
             downloading: false,
             offer_model_download: false,
             download_messages: VecDeque::new(),
@@ -525,7 +528,7 @@ impl AppState {
         self.downloading = true;
         self.download_messages.clear();
         self.download_messages
-            .push_back(format!("Загрузка {model} и Silero VAD…"));
+            .push_back(format!("Загрузка {model}…"));
         self.send(Command::Download(model));
     }
     pub fn save_settings(&mut self) {
@@ -960,6 +963,10 @@ impl AppState {
                 }
                 self.refresh();
             }
+            Event::Voices(result) => match result {
+                Ok(voices) => self.voices = voices,
+                Err(error) => self.error = Some(error),
+            },
             Event::DownloadProgress(message) => {
                 if self.download_messages.len() == 8 {
                     self.download_messages.pop_front();

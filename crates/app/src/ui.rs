@@ -328,7 +328,13 @@ impl NotetakerApp {
                 columns[0].weak("МОИ ЗАМЕТКИ");
                 images = notes_editor(&mut columns[0], document, &path, &mut self.image_viewer);
                 columns[1].weak("ТРАНСКРИПТ");
-                transcript_view(&mut columns[1], document, &path, true);
+                transcript_view(
+                    &mut columns[1],
+                    document,
+                    &path,
+                    true,
+                    self.state.settings.voice_library,
+                );
             });
             self.state.attach(images);
             return;
@@ -462,7 +468,13 @@ impl NotetakerApp {
                         }
                     });
             }
-            Tab::Transcript => transcript_view(ui, document, &path, locked),
+            Tab::Transcript => transcript_view(
+                ui,
+                document,
+                &path,
+                locked,
+                self.state.settings.voice_library,
+            ),
         }
         self.state.attach(images);
         if enhance {
@@ -583,6 +595,13 @@ impl NotetakerApp {
                 let mut library = settings.library.to_string_lossy().into_owned();
                 if ui.text_edit_singleline(&mut library).changed() { settings.library = library.into(); }
                 model_selector(ui, "default_model", &mut settings.model);
+                ui.checkbox(&mut settings.diarize, "Разделять собеседников");
+                egui::ComboBox::from_id_salt("speakers").selected_text(format!("Участников: {}", settings.speakers.map_or("авто".into(), |n| n.to_string()))).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut settings.speakers, None, "авто");
+                    for n in 1..=32 { ui.selectable_value(&mut settings.speakers, Some(n), n.to_string()); }
+                });
+                ui.checkbox(&mut settings.voice_library, "Голоса: запоминать имена");
+                ui.small("Голосовые отпечатки - биометрические данные; хранятся только локально. Применяется к новым встречам.");
                 ui.label("Словарь (один термин на строку)");
                 ui.add(egui::TextEdit::multiline(&mut settings.vocabulary).desired_rows(4));
                 ui.small("Алиасы: werf = верф, вёрф. Дополнения библиотеки: .notetaker/vocabulary.txt");
@@ -614,7 +633,19 @@ impl NotetakerApp {
                     }
                     if self.state.downloading { ui.spinner(); }
                 });
+                if ui.add_enabled(!self.state.downloading && !self.state.recording.busy(), egui::Button::new("Скачать модели разделения собеседников (47 МБ)")).clicked() { self.state.download("diarization".into()); }
                 for line in &self.state.download_messages { ui.small(line); }
+                ui.collapsing("Голоса", |ui| {
+                    if self.state.voices.voices.is_empty() { ui.small("Голосов пока нет. Назовите участника в транскрипте или нажмите «Это я»."); }
+                    let mut delete = None;
+                    for voice in &self.state.voices.voices {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("{}{}", voice.name, if voice.is_me { " (это я)" } else { "" }));
+                            if ui.button("Удалить").clicked() { delete = Some(voice.name.clone()); }
+                        });
+                    }
+                    if let Some(name) = delete { self.state.send(Command::Voices { root:self.state.settings.library.clone(), delete:Some(name) }); }
+                });
                 ui.checkbox(&mut self.state.settings_draft.auto_summary, "Делать конспект автоматически");
                 ui.separator(); ui.heading("Подключение AI");
                 let can_default = self.state.ready && !self.state.recording.busy() && self.state.enhancing.is_none() && !self.state.unsaved() && !self.state.settings_pending;
@@ -1181,15 +1212,23 @@ fn notes_editor(
         });
     images
 }
-fn transcript_view(ui: &mut egui::Ui, document: &mut Document, path: &std::path::Path, live: bool) {
+fn transcript_view(
+    ui: &mut egui::Ui,
+    document: &mut Document,
+    path: &std::path::Path,
+    live: bool,
+    voices: bool,
+) {
     let p = Palette::of(ui);
     let mut edits = Vec::new();
+    let mut rename = None;
     egui::ScrollArea::vertical()
         .id_salt(("transcript", path))
         .stick_to_bottom(live)
         .show(ui, |ui| {
             for segment in &document.data.transcript.segments {
-                let me = segment.channel == notetaker_core::Channel::Mic;
+                let me = segment.speaker.0 == "me"
+                    || document.data.transcript.self_speaker.as_ref() == Some(&segment.speaker.0);
                 let width = (ui.available_width() * 0.90).max(1.0);
                 ui.push_id(segment.id, |ui| {
                     ui.with_layout(
@@ -1199,20 +1238,66 @@ fn transcript_view(ui: &mut egui::Ui, document: &mut Document, path: &std::path:
                             egui::Layout::top_down(egui::Align::LEFT)
                         },
                         |ui| {
-                            ui.label(
-                                RichText::new(format!(
-                                    "{} · {}{}",
-                                    speaker(segment.channel),
-                                    timestamp(segment.start_ms),
-                                    if segment.edited {
-                                        " · исправлено"
-                                    } else {
-                                        ""
+                            let id = &segment.speaker.0;
+                            let transcript = &document.data.transcript;
+                            let suggestion = transcript.speaker_suggestions.get(id);
+                            let label = suggestion.map_or_else(
+                                || {
+                                    match transcript.speaker_name(id) {
+                                        "me" => "Я",
+                                        "them" => "Собеседники",
+                                        name => name,
                                     }
-                                ))
-                                .size(12.0)
-                                .color(p.muted),
+                                    .to_owned()
+                                },
+                                |name| format!("{name}?"),
                             );
+                            ui.horizontal(|ui| {
+                                if live {
+                                    ui.label(RichText::new(label).size(12.0).color(p.muted));
+                                } else {
+                                    ui.menu_button(label, |ui| {
+                                        if let Some(name) = suggestion
+                                            && ui.button(format!("Подтвердить: {name}")).clicked()
+                                        {
+                                            rename = Some((id.clone(), name.clone(), false));
+                                            ui.close();
+                                        }
+                                        let key = ui.make_persistent_id(("speaker-name", path, id));
+                                        let mut name = ui
+                                            .data_mut(|data| data.get_temp::<String>(key))
+                                            .unwrap_or_else(|| transcript.speaker_name(id).into());
+                                        ui.text_edit_singleline(&mut name);
+                                        ui.data_mut(|data| data.insert_temp(key, name.clone()));
+                                        if ui.button("Назвать").clicked() {
+                                            rename = Some((id.clone(), name, false));
+                                            ui.close();
+                                        }
+                                        if voices && ui.button("Это я").clicked() {
+                                            let name = transcript
+                                                .speaker_names
+                                                .get(id)
+                                                .cloned()
+                                                .unwrap_or_else(|| "Я".into());
+                                            rename = Some((id.clone(), name, true));
+                                            ui.close();
+                                        }
+                                    });
+                                }
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{}{}",
+                                        timestamp(segment.start_ms),
+                                        if segment.edited {
+                                            " · исправлено"
+                                        } else {
+                                            ""
+                                        }
+                                    ))
+                                    .size(12.0)
+                                    .color(p.muted),
+                                );
+                            });
                             egui::Frame::new()
                                 .fill(if me { p.me } else { p.soft })
                                 .corner_radius(10)
@@ -1245,6 +1330,17 @@ fn transcript_view(ui: &mut egui::Ui, document: &mut Document, path: &std::path:
                 ui.weak("Текст появится здесь");
             }
         });
+    if let Some((id, name, is_me)) = rename {
+        let transcript = &mut document.data.transcript;
+        let changed = transcript.rename_speaker(&id, &name);
+        if is_me {
+            transcript.self_speaker = Some(id);
+        }
+        if changed || is_me {
+            document.dirty.transcript = true;
+            document.changed();
+        }
+    }
     for (id, text) in edits {
         if edit_segment(&mut document.data.transcript, id, text) {
             document.dirty.transcript = true;

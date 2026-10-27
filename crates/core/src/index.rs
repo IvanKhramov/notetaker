@@ -118,13 +118,7 @@ impl Library {
                 let meta = meeting.read_meta()?;
                 let notes = meeting.read_notes()?;
                 let enhanced = meeting.read_enhanced()?;
-                let transcript = meeting
-                    .read_transcript()?
-                    .segments
-                    .into_iter()
-                    .map(|segment| segment.text)
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                let transcript = meeting.read_transcript()?.named_text();
                 Ok(Some((stamp, meta, notes, enhanced, transcript)))
             })();
             let (stamp, meta, notes, enhanced, transcript) = match contents {

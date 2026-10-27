@@ -73,7 +73,7 @@ pub(crate) fn run(
     asr.start()?;
     let cancel = asr.cancellation_handle();
     let segments = asr.transcribe_with_progress(
-        AudioInput::WavPath(wav),
+        AudioInput::WavPath(wav.clone()),
         Channel::System,
         0,
         &mut |fraction| {
@@ -93,6 +93,7 @@ pub(crate) fn run(
             convert(segments, Channel::System, Source::Final),
         );
     })?;
+    crate::diarization::final_pass(meeting, &mut asr, &wav, None, &config.diarization, events);
     if config.retention == Some(Duration::ZERO) {
         fs::remove_file(meeting.system_audio_path())?;
     }

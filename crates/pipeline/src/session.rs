@@ -27,6 +27,7 @@ use crate::{
 #[derive(Clone, Debug)]
 pub struct RecordingConfig {
     pub chunks: ChunkConfig,
+    pub diarization: crate::DiarizationConfig,
     /// Total queued/in-flight audio seconds across both channels, not wall time.
     pub max_live_lag: Duration,
     /// None keeps audio forever; zero removes Opus only after a successful final.
@@ -40,6 +41,7 @@ impl Default for RecordingConfig {
     fn default() -> Self {
         Self {
             chunks: ChunkConfig::default(),
+            diarization: crate::DiarizationConfig::default(),
             max_live_lag: Duration::from_secs(60),
             retention: Some(Duration::from_secs(7 * 86400)),
             auto_stop_after_silence: Some(Duration::from_secs(15 * 60)),
@@ -59,6 +61,7 @@ pub enum PipelineEvent {
     CaptureEvent(CaptureEvent),
     CaptureIssue(notetaker_core::CaptureIssue),
     Error(String),
+    Warning(String),
     FinalPassProgress {
         completed: usize,
         total: usize,
@@ -325,9 +328,10 @@ fn record(
     let (jobs_tx, jobs_rx) = mpsc::channel();
     let asr_queue = Arc::clone(&queue);
     let asr_meeting = meeting.clone();
+    let diarization = config.diarization.clone();
     let asr_handle = thread::Builder::new()
         .name("session-asr".into())
-        .spawn(move || run_asr(asr, &asr_meeting, jobs_rx, &asr_queue))?;
+        .spawn(move || run_asr(asr, &asr_meeting, jobs_rx, &asr_queue, &diarization))?;
     // Always join ASR, including disk/capture errors. Dropping jobs_tx cancels the
     // consumer rather than leaving a detached worker holding the model in RAM.
     let captured = (|| -> Result<()> {
@@ -603,7 +607,13 @@ impl<A: Asr> Recognizer<A> {
     }
 }
 
-fn run_asr(asr: impl Asr, meeting: &Meeting, jobs: Receiver<Job>, queue: &Queue) -> Result<()> {
+fn run_asr(
+    asr: impl Asr,
+    meeting: &Meeting,
+    jobs: Receiver<Job>,
+    queue: &Queue,
+    diarization: &crate::DiarizationConfig,
+) -> Result<()> {
     let mut asr = Recognizer {
         asr,
         ready: false,
@@ -651,13 +661,11 @@ fn run_asr(asr: impl Asr, meeting: &Meeting, jobs: Receiver<Job>, queue: &Queue)
                     completed: 0,
                     total: 2,
                 });
-                for (i, (wav, channel)) in wavs
-                    .into_iter()
-                    .zip([Channel::Mic, Channel::System])
-                    .enumerate()
+                for (i, (wav, channel)) in
+                    wavs.iter().zip([Channel::Mic, Channel::System]).enumerate()
                 {
                     final_segments.extend(convert(
-                        asr.transcribe(AudioInput::WavPath(wav), channel, 0, queue)?,
+                        asr.transcribe(AudioInput::WavPath(wav.clone()), channel, 0, queue)?,
                         channel,
                         Source::Final,
                     ));
@@ -673,6 +681,14 @@ fn run_asr(asr: impl Asr, meeting: &Meeting, jobs: Receiver<Job>, queue: &Queue)
                         replace_final(std::mem::take(&mut transcript.segments), final_segments);
                     crate::echo::suppress_echo(&mut transcript.segments);
                 })?;
+                crate::diarization::final_pass(
+                    meeting,
+                    &mut asr.asr,
+                    &wavs[1],
+                    Some(&wavs[0]),
+                    diarization,
+                    &queue.events,
+                );
             }
         }
     }

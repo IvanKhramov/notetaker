@@ -12,6 +12,21 @@ pub trait Asr: Send + 'static {
     fn cancellation_handle(&self) -> Option<notetaker_asr_proto::CancellationHandle> {
         None
     }
+    fn diarize(
+        &mut self,
+        _wav: &std::path::Path,
+        _speakers: Option<u32>,
+        _embeddings: bool,
+    ) -> Result<notetaker_asr_proto::Diarization> {
+        anyhow::bail!("диаризация недоступна")
+    }
+    fn embed(
+        &mut self,
+        _wav: &std::path::Path,
+        _ranges: Vec<notetaker_asr_proto::TimeRange>,
+    ) -> Result<Vec<f32>> {
+        anyhow::bail!("извлечение голоса недоступно")
+    }
     fn transcribe(
         &mut self,
         input: AudioInput,
@@ -109,6 +124,29 @@ impl Asr for WorkerAsr {
         Ok(())
     }
 
+    fn diarize(
+        &mut self,
+        wav: &std::path::Path,
+        speakers: Option<u32>,
+        embeddings: bool,
+    ) -> Result<notetaker_asr_proto::Diarization> {
+        Ok(self
+            .client
+            .as_mut()
+            .context("ASR is not started")?
+            .diarize(wav, "system", speakers, embeddings)?)
+    }
+    fn embed(
+        &mut self,
+        wav: &std::path::Path,
+        ranges: Vec<notetaker_asr_proto::TimeRange>,
+    ) -> Result<Vec<f32>> {
+        Ok(self
+            .client
+            .as_mut()
+            .context("ASR is not started")?
+            .embed(wav, ranges)?)
+    }
     fn transcribe(
         &mut self,
         input: AudioInput,

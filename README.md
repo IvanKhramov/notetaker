@@ -159,6 +159,23 @@ speech chunks. Opus follows retention settings (zero only after successful ASR).
 Long ASR deadlines allow five minutes plus four times the recording duration;
 Ctrl+C/exit cancellation is observed at decode and ASR progress boundaries.
 
+## Speakers and voices
+
+Enable **Разделять собеседников** (on by default) and explicitly download its
+~47 MB models in Settings. The final system track and imported recordings get
+speaker ids `s1`, `s2`, etc.; an optional **Участников** hint controls their count.
+Click a speaker label to name them. Search and summaries use confirmed names;
+renaming marks an existing summary stale. Missing models leave ASR usable.
+
+**Голоса** is opt-in biometric storage. Name a speaker or click **Это я** to
+remember their voice. New matches appear as **Name?** for confirmation; very
+confident self matches in imports use `me`. Settings list and delete voices.
+Exclude the entire local `<library>/.notetaker` directory from synchronization.
+Embeddings stay there and never enter LLM prompts. See
+[speakers and privacy](docs/speakers.md) for models, licenses and limitations.
+Diarization reads the complete waveform into RAM, about 230 MB per audio hour
+plus models, after releasing ASR weights.
+
 ## Local transcription
 
 Build both binaries, then download the model (Silero VAD is installed with it):

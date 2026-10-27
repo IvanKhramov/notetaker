@@ -4,7 +4,9 @@ mod index;
 mod model;
 mod storage;
 mod vocabulary;
+mod voices;
 pub use vocabulary::Vocabulary;
+pub use voices::{MeetingVoices, SELF_THRESHOLD, VOICE_MODEL, Voice, VoiceLibrary, cosine};
 
 pub use attachments::{attachment_references, markdown_images};
 pub use index::Hit;

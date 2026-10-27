@@ -104,6 +104,7 @@ pub fn run(args: Args) -> Result<()> {
             PipelineEvent::AutoStopped => {
                 eprintln!("Recording stopped after prolonged silence; final transcription follows.")
             }
+            PipelineEvent::Warning(message) => eprintln!("Warning: {message}"),
             PipelineEvent::Error(error) => eprintln!("Error: {error}"),
             PipelineEvent::CaptureEvent(event) => eprintln!("Capture: {event:?}"),
             PipelineEvent::CaptureIssue(issue) => eprintln!("Incomplete capture: {issue:?}"),

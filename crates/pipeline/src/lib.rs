@@ -1,5 +1,7 @@
 //! Recording continues independently of the single, sequential ASR worker.
 mod asr;
+mod diarization;
+pub use diarization::DiarizationConfig;
 mod audio;
 mod decode;
 mod echo;

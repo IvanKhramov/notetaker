@@ -28,6 +28,9 @@ pub struct Settings {
     pub auto_stop_minutes: u32,
     pub auto_summary: bool,
     pub vocabulary: String,
+    pub diarize: bool,
+    pub speakers: Option<u32>,
+    pub voice_library: bool,
 }
 
 impl Default for Settings {
@@ -49,6 +52,9 @@ impl Default for Settings {
             auto_stop_minutes: 15,
             auto_summary: true,
             vocabulary: String::new(),
+            diarize: true,
+            speakers: None,
+            voice_library: false,
         }
     }
 }
@@ -84,6 +90,10 @@ impl Settings {
         ensure!(
             self.retention_days.is_none_or(|days| days <= 36_500),
             "Срок хранения: 0–36500 дней или навсегда"
+        );
+        ensure!(
+            self.speakers.is_none_or(|n| (1..=32).contains(&n)),
+            "Участников: авто или 1–32"
         );
         validate_hotkey(&self.hotkey)
     }
@@ -242,6 +252,9 @@ mod tests {
     fn existing_settings_get_detection_and_silence_defaults() {
         let settings: Settings = toml::from_str("hotkey = 'Ctrl+Alt+R'").unwrap();
         assert_eq!(settings.theme, crate::theme::Theme::System);
+        assert!(settings.diarize);
+        assert!(!settings.voice_library);
+        assert_eq!(settings.speakers, None);
         assert!(settings.detect_calls);
         assert!(settings.detect_browsers);
         assert_eq!(settings.auto_stop_minutes, 15);

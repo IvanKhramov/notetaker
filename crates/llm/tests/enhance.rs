@@ -450,3 +450,40 @@ fn library_vocabulary_reaches_summary_prompts() {
             && system.contains("werf (верф, вёрф)")
     ));
 }
+
+#[test]
+fn confirmed_speaker_names_reach_prompt_but_suggestions_do_not() {
+    let provider = Fake::new(4096);
+    let mut text = transcript("Обсудим план");
+    text.speaker_suggestions
+        .insert("them".into(), "Саша".into());
+    enhance(
+        &meta(),
+        "",
+        &text,
+        &Template::builtin("general").unwrap(),
+        &provider,
+        &mut |_| {},
+    )
+    .unwrap();
+    assert!(
+        provider.calls.lock().unwrap()[0]
+            .1
+            .contains("them: Обсудим план")
+    );
+    text.rename_speaker("them", "Саша");
+    enhance(
+        &meta(),
+        "",
+        &text,
+        &Template::builtin("general").unwrap(),
+        &provider,
+        &mut |_| {},
+    )
+    .unwrap();
+    assert!(
+        provider.calls.lock().unwrap()[1]
+            .1
+            .contains("Саша: Обсудим план")
+    );
+}

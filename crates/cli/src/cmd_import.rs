@@ -28,6 +28,9 @@ struct Preferences {
     mode: Mode,
     retention_days: Option<u32>,
     auto_summary: bool,
+    diarize: bool,
+    speakers: Option<u32>,
+    voice_library: bool,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -42,6 +45,9 @@ impl Default for Preferences {
             mode: Mode::Local,
             retention_days: Some(7),
             auto_summary: true,
+            diarize: true,
+            speakers: None,
+            voice_library: false,
         }
     }
 }
@@ -70,6 +76,11 @@ pub fn run(args: Args) -> Result<()> {
         mode,
         asr,
         RecordingConfig {
+            diarization: notetaker_pipeline::DiarizationConfig {
+                enabled: settings.diarize,
+                speakers: settings.speakers,
+                voice_library: settings.voice_library,
+            },
             retention: settings
                 .retention_days
                 .map(|days| Duration::from_secs(u64::from(days) * 86400)),
@@ -84,6 +95,7 @@ pub fn run(args: Args) -> Result<()> {
             PipelineEvent::FinalPassProgress { completed, total } => {
                 eprintln!("Импорт: {}%", completed * 100 / total.max(1))
             }
+            PipelineEvent::Warning(message) => eprintln!("Предупреждение: {message}"),
             PipelineEvent::Error(error) => eprintln!("Ошибка: {error}"),
             PipelineEvent::Finished { .. } => break,
             _ => {}

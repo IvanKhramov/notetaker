@@ -82,6 +82,12 @@ pub struct Segment {
 pub struct Transcript {
     pub version: u32,
     pub segments: Vec<Segment>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub speaker_names: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub speaker_suggestions: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_speaker: Option<String>,
 }
 
 impl Default for Transcript {
@@ -89,7 +95,34 @@ impl Default for Transcript {
         Self {
             version: SCHEMA_VERSION,
             segments: Vec::new(),
+            speaker_names: Default::default(),
+            speaker_suggestions: Default::default(),
+            self_speaker: None,
         }
+    }
+}
+
+impl Transcript {
+    pub fn speaker_name<'a>(&'a self, id: &'a str) -> &'a str {
+        self.speaker_names.get(id).map(String::as_str).unwrap_or(id)
+    }
+
+    pub fn rename_speaker(&mut self, id: &str, name: &str) -> bool {
+        let name = name.trim();
+        if name.is_empty() || self.speaker_names.get(id).is_some_and(|n| n == name) {
+            return false;
+        }
+        self.speaker_names.insert(id.into(), name.into());
+        self.speaker_suggestions.remove(id);
+        true
+    }
+
+    pub fn named_text(&self) -> String {
+        self.segments
+            .iter()
+            .map(|s| format!("{}: {}", self.speaker_name(&s.speaker.0), s.text))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 

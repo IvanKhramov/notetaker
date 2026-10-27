@@ -184,6 +184,10 @@ pub enum Command {
         automatic: bool,
     },
     Download(String),
+    Voices {
+        root: PathBuf,
+        delete: Option<String>,
+    },
     Settings {
         settings: Settings,
         llm: LlmSettings,
@@ -243,6 +247,7 @@ pub enum Event {
         path: PathBuf,
         result: Result<notetaker_llm::EnhanceResult, String>,
     },
+    Voices(Result<notetaker_core::VoiceLibrary, String>),
     DownloadProgress(String),
     Downloaded(Result<(), String>),
     SettingsSaved(Result<(Settings, LlmSettings), String>),
@@ -278,6 +283,24 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                     .is_ok_and(|status| status.success())
             })
         });
+        if settings.diarize
+            && !asr_binary().is_ok_and(|binary| {
+                background_process(&binary)
+                    .args(["check-model", "diarization"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .is_ok_and(|s| s.success())
+            })
+        {
+            warnings.push("Для разделения собеседников скачайте модели в настройках. Транскрипт работает и без них.".into());
+        }
+        let mut voice_library_enabled = settings.voice_library;
+        let _ = events.send(Event::Voices(
+            Library::open(&settings.library)
+                .and_then(|l| l.read_voices())
+                .map_err(|e| e.to_string()),
+        ));
         let llm_configured = Config::load().is_ok();
         let _ = events.send(Event::Boot {
             settings,
@@ -343,10 +366,65 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                         result: DocumentData::read(meeting).map_err(error_text),
                     });
                 }
+                Command::Voices { root, delete } => {
+                    let result = (|| -> Result<_> {
+                        let library = Library::open(root)?;
+                        if let Some(name) = delete {
+                            library.delete_voice(&name)?;
+                        }
+                        Ok(library.read_voices()?)
+                    })()
+                    .map_err(error_text);
+                    let _ = events.send(Event::Voices(result));
+                }
                 Command::Save(save) => {
+                    let previous = save
+                        .transcript
+                        .as_ref()
+                        .and_then(|_| save.meeting.read_transcript().ok());
+                    let mut result = save.write();
+                    if save.transcript.is_some()
+                        && !result.failed.transcript
+                        && let Err(error) =
+                            Library::open(save.meeting.path().parent().expect("meeting parent"))
+                                .and_then(|library| library.reindex_incremental())
+                    {
+                        result.errors.push(format!(
+                            "Имена сохранены; не обновлён индекс поиска: {error:#}"
+                        ));
+                    }
+                    if voice_library_enabled
+                        && !result.failed.transcript
+                        && let Some(transcript) = &save.transcript
+                    {
+                        let mut enrollment = transcript.clone();
+                        enrollment.speaker_names.retain(|id, name| {
+                            previous.as_ref().is_some_and(|old| {
+                                old.speaker_names.get(id) != Some(name)
+                                    || (transcript.self_speaker.as_ref() == Some(id)
+                                        && old.self_speaker != transcript.self_speaker)
+                            })
+                        });
+                        if let Err(error) =
+                            Library::open(save.meeting.path().parent().expect("meeting parent"))
+                                .and_then(|library| {
+                                    library.remember_speakers(&save.meeting, &enrollment)
+                                })
+                        {
+                            result
+                                .errors
+                                .push(format!("Не удалось запомнить голос: {error:#}"));
+                        }
+                        let root = save.meeting.path().parent().expect("meeting parent");
+                        let _ = events.send(Event::Voices(
+                            Library::open(root)
+                                .and_then(|l| l.read_voices())
+                                .map_err(|e| e.to_string()),
+                        ));
+                    }
                     let _ = events.send(Event::Saved {
                         path: save.meeting.path().to_owned(),
-                        result: save.write(),
+                        result,
                     });
                 }
                 Command::Inventory => {
@@ -441,6 +519,12 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                         Library::open(&settings.library)?;
                         atomic_write(&notetaker_llm::Config::path()?, &llm_text)?;
                         atomic_write(&Settings::path()?, &toml::to_string_pretty(&settings)?)?;
+                        voice_library_enabled = settings.voice_library;
+                        let _ = events.send(Event::Voices(
+                            Library::open(&settings.library)
+                                .and_then(|l| l.read_voices())
+                                .map_err(|e| e.to_string()),
+                        ));
                         Ok((settings, llm))
                     })()
                     .map_err(error_text);
@@ -551,6 +635,29 @@ impl Asr for AppAsr {
         self.client = Some(client);
         Ok(())
     }
+    fn diarize(
+        &mut self,
+        wav: &Path,
+        speakers: Option<u32>,
+        embeddings: bool,
+    ) -> Result<notetaker_asr_proto::Diarization> {
+        Ok(self
+            .client
+            .as_mut()
+            .context("ASR не запущен")?
+            .diarize(wav, "system", speakers, embeddings)?)
+    }
+    fn embed(
+        &mut self,
+        wav: &Path,
+        ranges: Vec<notetaker_asr_proto::TimeRange>,
+    ) -> Result<Vec<f32>> {
+        Ok(self
+            .client
+            .as_mut()
+            .context("ASR не запущен")?
+            .embed(wav, ranges)?)
+    }
     fn transcribe(
         &mut self,
         input: notetaker_asr_proto::AudioInput,
@@ -620,6 +727,11 @@ fn record(request: RecordRequest, import_file: Option<PathBuf>, events: &Sender<
         asr.preloaded = true;
         let library = Library::open(&request.settings.library)?;
         let config = RecordingConfig {
+            diarization: notetaker_pipeline::DiarizationConfig {
+                enabled: request.settings.diarize,
+                speakers: request.settings.speakers,
+                voice_library: request.settings.voice_library,
+            },
             retention: request
                 .settings
                 .retention_days

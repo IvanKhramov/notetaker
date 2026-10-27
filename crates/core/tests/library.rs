@@ -27,6 +27,9 @@ fn meta(title: &str) -> MeetingMeta {
 fn transcript(text: &str) -> Transcript {
     Transcript {
         version: SCHEMA_VERSION,
+        speaker_names: Default::default(),
+        speaker_suggestions: Default::default(),
+        self_speaker: None,
         segments: vec![
             Segment {
                 id: Uuid::now_v7(),
@@ -477,4 +480,35 @@ fn corrupt_or_incompatible_index_is_discarded_and_rebuilt() {
     drop(connection);
     library.reindex_incremental().unwrap();
     assert_eq!(library.search("recoverable", 10).unwrap().len(), 1);
+}
+
+#[test]
+fn speaker_names_are_optional_searchable_and_invalidate_summary() {
+    let old: Transcript = serde_json::from_str(r#"{"version":1,"segments":[]}"#).unwrap();
+    assert_eq!(old, Transcript::default());
+    assert_eq!(
+        serde_json::to_string(&old).unwrap(),
+        r#"{"version":1,"segments":[]}"#
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let library = Library::open(dir.path()).unwrap();
+    let meeting = library
+        .create_meeting(MeetingMeta::new("Names", chrono::Utc::now()))
+        .unwrap();
+    let mut text = transcript("Обсудим релиз");
+    let stamp = notetaker_core::SummaryStamp::new("", &text, "general", "notes");
+    assert!(text.rename_speaker("future-speaker-42", "  Александра  "));
+    assert!(!text.rename_speaker("future-speaker-42", "Александра"));
+    assert!(!text.rename_speaker("me", " "));
+    assert!(stamp.stale("", &text, "general"));
+    meeting.write_transcript(&text).unwrap();
+    library.reindex_incremental().unwrap();
+    assert_eq!(library.search("Александра", 10).unwrap().len(), 1);
+    let mut loaded = meeting.read_transcript().unwrap();
+    assert_eq!(loaded.speaker_name("future-speaker-42"), "Александра");
+    loaded.rename_speaker("future-speaker-42", "Екатерина");
+    meeting.write_transcript(&loaded).unwrap();
+    library.reindex_incremental().unwrap();
+    assert!(library.search("Александра", 10).unwrap().is_empty());
+    assert_eq!(library.search("Екатерина", 10).unwrap().len(), 1);
 }
