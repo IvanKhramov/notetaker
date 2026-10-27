@@ -3,14 +3,15 @@
 An open-source AI notebook for online meetings, inspired by Granola and written
 in Rust. Windows comes first, with macOS and Linux capture support planned.
 
-**v0.6.0:** Private ICS calendars, participant context, meeting chat with source
-links, read-only local MCP and separate summary/chat models. See
-[calendar setup](docs/calendar.md), [chat and MCP setup](docs/mcp.md), and
-[the project plan](docs/PLAN.md).
+**v0.7.0:** Fast speaker corrections with merge/undo and segment selection,
+speaker timing statistics and a clickable timeline. Export transcripts as
+Markdown, SRT, VTT, CSV or JSON from the app or CLI. Voice-linked renames can
+update previous meetings. See [speaker editing](docs/speakers.md),
+[calendar setup](docs/calendar.md), and [chat and MCP setup](docs/mcp.md).
 
 ## Install
 
-Download `notetaker-0.6.0-windows-x64.zip` from this repository's **Releases**
+Download `notetaker-0.7.0-windows-x64.zip` from this repository's **Releases**
 page and extract it into a folder. Keep all files together and run
 `notetaker-app.exe`. The binaries are unsigned: Windows SmartScreen may warn;
 choose **More info → Run anyway** if you trust the download. A SHA-256 checksum
