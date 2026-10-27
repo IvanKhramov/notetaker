@@ -5,6 +5,7 @@ mod config;
 mod desktop;
 mod detection;
 mod state;
+mod theme;
 mod ui;
 mod worker;
 
@@ -17,6 +18,9 @@ fn main() -> eframe::Result {
                 .with_min_inner_size([720.0, 480.0]),
             ..Default::default()
         },
-        Box::new(|_cc| Ok(Box::new(ui::NotetakerApp::new()))),
+        Box::new(|cc| {
+            theme::install(&cc.egui_ctx);
+            Ok(Box::new(ui::NotetakerApp::new()))
+        }),
     )
 }

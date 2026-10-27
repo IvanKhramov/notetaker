@@ -14,6 +14,7 @@ pub const MODELS: [&str; 2] = ["gigaam-v3", "parakeet-v3"];
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
+    pub theme: crate::theme::Theme,
     pub library: PathBuf,
     pub model: String,
     pub mode: Mode,
@@ -35,6 +36,7 @@ impl Default for Settings {
             .map(|dirs| dirs.document_dir().unwrap_or(dirs.home_dir()).to_owned())
             .unwrap_or_else(|| PathBuf::from("."));
         Self {
+            theme: crate::theme::Theme::System,
             library: documents.join("notetaker"),
             model: MODELS[0].into(),
             mode: Mode::Local,
@@ -206,6 +208,7 @@ mod tests {
     #[test]
     fn existing_settings_get_detection_and_silence_defaults() {
         let settings: Settings = toml::from_str("hotkey = 'Ctrl+Alt+R'").unwrap();
+        assert_eq!(settings.theme, crate::theme::Theme::System);
         assert!(settings.detect_calls);
         assert!(!settings.detect_browsers);
         assert_eq!(settings.auto_stop_minutes, 15);

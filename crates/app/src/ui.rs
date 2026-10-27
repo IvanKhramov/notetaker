@@ -363,6 +363,14 @@ impl NotetakerApp {
         egui::Window::new("Настройки").open(&mut open).default_width(640.0).default_height(600.0).resizable(true).show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 let settings = &mut self.state.settings_draft;
+                ui.horizontal(|ui| {
+                    ui.label("Тема:");
+                    egui::ComboBox::from_id_salt("theme").selected_text(settings.theme.label()).show_ui(ui, |ui| {
+                        for theme in [crate::theme::Theme::System, crate::theme::Theme::Light, crate::theme::Theme::Dark] {
+                            ui.selectable_value(&mut settings.theme, theme, theme.label());
+                        }
+                    });
+                });
                 ui.label("Библиотека (полный путь)");
                 let mut library = settings.library.to_string_lossy().into_owned();
                 if ui.text_edit_singleline(&mut library).changed() { settings.library = library.into(); }
@@ -604,6 +612,7 @@ impl eframe::App for NotetakerApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // eframe calls this even when the root window is hidden in the tray.
         self.state.poll();
+        self.state.settings.theme.apply(ctx);
         #[cfg(windows)]
         self.desktop(ctx);
         if self.state.error != self.last_error {
