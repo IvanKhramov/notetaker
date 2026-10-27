@@ -232,6 +232,7 @@ pub struct AppState {
     prefilled_title: Option<String>,
     selected_event: Option<notetaker_core::calendar::CalendarEvent>,
     pub generation_cancel: notetaker_llm::Cancellation,
+    generation_is_cli: bool,
     pending_summary: Option<PathBuf>,
     pub ready: bool,
     pub settings_pending: bool,
@@ -293,6 +294,7 @@ impl AppState {
             prefilled_title: None,
             selected_event: None,
             generation_cancel: notetaker_llm::Cancellation::default(),
+            generation_is_cli: false,
             pending_summary: None,
             ready: false,
             settings_pending: false,
@@ -589,11 +591,28 @@ impl AppState {
         let Some(document) = self.documents.get_mut(&path) else {
             return;
         };
+        let provider = (|| -> anyhow::Result<_> {
+            let config = notetaker_llm::Config::parse(&self.llm.validate()?)?;
+            config.select_scenario(
+                document.data.meta.mode,
+                notetaker_llm::Scenario::Summary,
+                None,
+            )
+        })();
+        let provider = match provider {
+            Ok(provider) => provider,
+            Err(error) => {
+                self.error = Some(format!("{error:#}"));
+                return;
+            }
+        };
+        self.generation_is_cli = provider.kind.is_cli();
         self.generation_cancel = notetaker_llm::Cancellation::default();
         document.generation = Some(String::new());
         let command = Command::Enhance {
             meeting: document.data.meeting.clone(),
             template: document.template.clone(),
+            provider,
             cancel: self.generation_cancel.clone(),
             automatic,
         };
@@ -601,19 +620,7 @@ impl AppState {
         self.send(command);
     }
     pub fn generation_cancellable(&self) -> bool {
-        self.enhancing
-            .as_ref()
-            .and_then(|path| self.documents.get(path))
-            .is_some_and(|doc| {
-                let id = match doc.data.meta.mode {
-                    notetaker_core::Mode::Local => &self.llm.defaults.local,
-                    notetaker_core::Mode::Hybrid => &self.llm.defaults.hybrid,
-                };
-                self.llm.providers.iter().any(|provider| {
-                    &provider.id == id
-                        && matches!(provider.kind.as_str(), "claude-cli" | "codex-cli")
-                })
-            })
+        self.enhancing.is_some() && self.generation_is_cli
     }
     pub fn download(&mut self, model: String) {
         if self.downloading || self.recording.busy() {
@@ -1099,6 +1106,7 @@ impl AppState {
             }
             Event::Enhanced { path, result } => {
                 self.enhancing = None;
+                self.generation_is_cli = false;
                 if let Some(doc) = self.documents.get_mut(&path) {
                     doc.generation = None;
                     match result {
@@ -1761,6 +1769,46 @@ mod tests {
         doc.template = "general".into();
         assert!(!doc.summary_stale());
     }
+    #[test]
+    fn generation_cancel_uses_the_resolved_summary_provider_snapshot() {
+        let (mut state, commands, _root, path) = fixture();
+        state.documents.get_mut(&path).unwrap().data.meta.mode = notetaker_core::Mode::Hybrid;
+        state.llm.providers.push(crate::config::ProviderSettings {
+            id: "cli".into(),
+            kind: "claude-cli".into(),
+            ..Default::default()
+        });
+        // HTTP default with a CLI scenario, then CLI default with HTTP scenario.
+        for (default, scenario, expected) in [("ollama", "cli", true), ("cli", "ollama", false)] {
+            state.llm.defaults.hybrid = default.into();
+            state.llm.scenarios.summary.provider = scenario.into();
+            state.enhance();
+            assert_eq!(state.generation_cancellable(), expected);
+            let Command::Enhance { provider, .. } = commands.try_recv().unwrap() else {
+                panic!("expected generation");
+            };
+            assert_eq!(provider.id, scenario);
+            state.llm.scenarios.summary.provider = default.into();
+            assert_eq!(state.generation_cancellable(), expected);
+            state.apply(Event::Enhanced {
+                path: path.clone(),
+                result: Err("cancelled".into()),
+            });
+            assert!(!state.generation_cancellable());
+            // The completion event also schedules a library refresh.
+            while commands.try_recv().is_ok() {}
+        }
+        // A cloud summary scenario falls back to the HTTP local default.
+        state.documents.get_mut(&path).unwrap().data.meta.mode = notetaker_core::Mode::Local;
+        state.llm.scenarios.summary.provider = "cli".into();
+        state.enhance();
+        assert!(!state.generation_cancellable());
+        let Command::Enhance { provider, .. } = commands.try_recv().unwrap() else {
+            panic!("expected generation");
+        };
+        assert_eq!(provider.id, "ollama");
+    }
+
     #[test]
     fn auto_summary_waits_for_latest_notes_to_be_saved() {
         let (mut state, commands, _root, path) = fixture();

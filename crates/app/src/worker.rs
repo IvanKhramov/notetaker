@@ -196,6 +196,7 @@ pub enum Command {
     Enhance {
         meeting: Meeting,
         template: String,
+        provider: notetaker_llm::ProviderConfig,
         cancel: Cancellation,
         automatic: bool,
     },
@@ -521,6 +522,7 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                 Command::Enhance {
                     meeting,
                     template,
+                    provider,
                     cancel,
                     automatic,
                 } => {
@@ -531,16 +533,7 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                             let meta = meeting.read_meta()?;
                             let root = path.parent().context("Нет библиотеки")?;
                             let template_data = Template::load(root, &template)?;
-                            let config = Config::load()?;
-                            let provider = create_provider(
-                                config.select_scenario(
-                                    meta.mode,
-                                    notetaker_llm::Scenario::Summary,
-                                    None,
-                                )?,
-                                meta.mode,
-                                cancel,
-                            )?;
+                            let provider = create_provider(provider, meta.mode, cancel)?;
                             let enhance = if automatic {
                                 notetaker_llm::enhance_meeting_if_unedited
                             } else {
