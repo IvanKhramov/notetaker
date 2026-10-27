@@ -2331,6 +2331,8 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "deunicode",
+ "percent-encoding",
+ "pulldown-cmark",
  "rusqlite",
  "serde",
  "serde_json",

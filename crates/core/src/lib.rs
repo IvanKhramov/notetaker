@@ -1,8 +1,10 @@
 //! Meeting files are the source of truth; the SQLite search index is disposable.
+mod attachments;
 mod index;
 mod model;
 mod storage;
 
+pub use attachments::{attachment_references, markdown_images};
 pub use index::Hit;
 pub use model::{
     CaptureIssue, Channel, MeetingMeta, Mode, SCHEMA_VERSION, Segment, Source, SpeakerId,

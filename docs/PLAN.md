@@ -30,6 +30,8 @@
     notes.md           # заметки пользователя
     enhanced.md        # результат LLM, редактируемый
     transcript.json    # {version, segments:[{id, speaker, channel, start_ms, end_ms, text, source: live|final, edited}]}
+    attachments/<uuid-v7>.png  # PNG/JPEG в notes.md: ![](attachments/<uuid-v7>.png)
+    attachments/.trash/       # убранные из заметок файлы, очистка через 30 дней
     audio/mic.opus
     audio/system.opus
 <library>/.notetaker/index.sqlite   # не синхронизируется, пересобирается

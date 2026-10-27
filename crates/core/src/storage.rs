@@ -29,7 +29,7 @@ pub struct Versioned<T> {
 
 // Handles obtained through different Library instances must use the same lock.
 // Weak entries avoid keeping a mutex alive after its last operation completes.
-fn meeting_lock(path: &Path) -> Arc<Mutex<()>> {
+pub(crate) fn meeting_lock(path: &Path) -> Arc<Mutex<()>> {
     static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
     let mut locks = LOCKS
         .get_or_init(Mutex::default)
@@ -118,11 +118,13 @@ impl Library {
         Ok(meetings)
     }
 
-    /// Remove expired audio and failed final-pass scratch, without following symlinks.
-    /// Meetings still being captured must never be swept.
+    /// Remove expired audio, failed final-pass scratch and old attachment trash.
+    /// Attachment retention is independent of audio and active recordings.
+    /// Audio in meetings still being captured must never be swept.
     pub fn sweep_audio(&self, now: DateTime<Utc>) -> Result<Vec<PathBuf>> {
         let mut removed = Vec::new();
         for meeting in self.list_meetings()? {
+            removed.extend(meeting.purge_attachment_trash(now)?);
             let meta = meeting.read_meta()?;
             if meta.ended_at.is_none()
                 || !meta.audio_expires_at.is_some_and(|expires| expires <= now)
@@ -184,7 +186,9 @@ impl Meeting {
     pub fn write_notes(&self, notes: &str) -> Result<()> {
         let lock = meeting_lock(&self.path);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        atomic_write(&self.path.join("notes.md"), notes.as_bytes())
+        atomic_write(&self.path.join("notes.md"), notes.as_bytes())?;
+        self.clean_attachments_after_save(notes);
+        Ok(())
     }
     pub fn read_enhanced(&self) -> Result<String> {
         read_optional(&self.path.join("enhanced.md"))
@@ -251,7 +255,11 @@ impl Meeting {
     fn save_checked(&self, name: &str, bytes: &[u8], expected: Revision) -> Result<Revision> {
         let lock = meeting_lock(&self.path);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        checked_write(&self.path.join(name), bytes, expected)
+        let revision = checked_write(&self.path.join(name), bytes, expected)?;
+        if name == "notes.md" {
+            self.clean_attachments_after_save(&String::from_utf8_lossy(bytes));
+        }
+        Ok(revision)
     }
     /// Serialize read-modify-write across every handle in this process. External
     /// edits made during the closure are detected by the content revision too.
@@ -287,7 +295,7 @@ fn read_optional(path: &Path) -> Result<String> {
     }
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut temporary = NamedTempFile::new_in(path.parent().expect("meeting file has a parent"))?;
     temporary.write_all(bytes)?;
     temporary.as_file().sync_all()?;
