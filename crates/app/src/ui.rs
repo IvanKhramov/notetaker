@@ -133,70 +133,75 @@ impl NotetakerApp {
             });
         let mut start_event = None;
         let mut brief_event = None;
-        egui::CollapsingHeader::new("Сегодня")
-            .default_open(true)
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt("calendar_events")
-                    .max_height(220.0)
-                    .show(ui, |ui| {
-                        let now = chrono::Utc::now();
-                        let events: Vec<_> = self
-                            .state
-                            .calendar_events
-                            .iter()
-                            .filter(|e| {
-                                e.end >= now && e.start <= now + chrono::Duration::hours(12)
-                            })
-                            .collect();
-                        if events.is_empty() {
-                            ui.small("Нет ближайших событий");
-                        }
-                        for event in events.into_iter().take(30) {
-                            ui.label(format!(
-                                "{} · {}",
-                                if event.all_day {
-                                    "Весь день".into()
-                                } else {
-                                    event
-                                        .start
-                                        .with_timezone(&chrono::Local)
-                                        .format("%H:%M")
-                                        .to_string()
-                                },
-                                event.link.title
-                            ));
-                            ui.horizontal_wrapped(|ui| {
-                                if ui
-                                    .add_enabled(
-                                        cfg!(windows)
-                                            && self.state.ready
-                                            && !self.state.recording.busy()
-                                            && !self.state.settings_pending
-                                            && !self.state.downloading,
-                                        egui::Button::new("Начать запись"),
-                                    )
-                                    .clicked()
-                                {
-                                    start_event = Some(event.clone());
-                                }
-                                if ui
-                                    .add_enabled(!self.state.draft_busy, egui::Button::new("Бриф"))
-                                    .clicked()
-                                {
-                                    brief_event = Some(event.clone());
-                                }
-                                if let Some(url) = &event.link.call_url {
-                                    ui.hyperlink_to("Открыть звонок", url);
-                                }
-                            });
-                        }
-                        if self.state.calendar_busy {
-                            ui.spinner();
-                        }
-                        ui.small(&self.state.calendar_status);
-                    });
-            });
+        if !self.state.settings.calendars.is_empty() {
+            egui::CollapsingHeader::new("Ближайшие события")
+                .default_open(true)
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("calendar_events")
+                        .max_height(220.0)
+                        .show(ui, |ui| {
+                            let now = chrono::Utc::now();
+                            let events: Vec<_> = self
+                                .state
+                                .calendar_events
+                                .iter()
+                                .filter(|e| {
+                                    e.end >= now && e.start <= now + chrono::Duration::hours(12)
+                                })
+                                .collect();
+                            if events.is_empty() {
+                                ui.small("Нет ближайших событий");
+                            }
+                            for event in events.into_iter().take(30) {
+                                ui.label(format!(
+                                    "{} · {}",
+                                    if event.all_day {
+                                        "Весь день".into()
+                                    } else {
+                                        event
+                                            .start
+                                            .with_timezone(&chrono::Local)
+                                            .format("%H:%M")
+                                            .to_string()
+                                    },
+                                    event.link.title
+                                ));
+                                ui.horizontal_wrapped(|ui| {
+                                    if ui
+                                        .add_enabled(
+                                            cfg!(windows)
+                                                && self.state.ready
+                                                && !self.state.recording.busy()
+                                                && !self.state.settings_pending
+                                                && !self.state.downloading,
+                                            egui::Button::new("Начать запись"),
+                                        )
+                                        .clicked()
+                                    {
+                                        start_event = Some(event.clone());
+                                    }
+                                    if ui
+                                        .add_enabled(
+                                            !self.state.draft_busy,
+                                            egui::Button::new("Бриф"),
+                                        )
+                                        .clicked()
+                                    {
+                                        brief_event = Some(event.clone());
+                                    }
+                                    if let Some(url) = &event.link.call_url {
+                                        ui.hyperlink_to("Открыть звонок", url);
+                                    }
+                                });
+                            }
+                            if self.state.calendar_busy {
+                                ui.spinner();
+                            }
+                            ui.small(&self.state.calendar_status);
+                        });
+                });
+        }
         if let Some(event) = brief_event {
             self.state.prepare_brief(event);
         }
@@ -1156,7 +1161,10 @@ impl NotetakerApp {
                     self.state.settings_draft.calendars.retain(|s| s.id != id);
                     self.state.calendar_secrets.remove(&id);
                 }
-                if ui.add_enabled(cfg!(windows), egui::Button::new("Добавить календарь")).clicked() {
+                let connect = if self.state.settings_draft.calendars.is_empty() {
+                    ui.add_enabled(cfg!(windows), egui::Link::new("Подключить календарь")).clicked()
+                } else { ui.add_enabled(cfg!(windows), egui::Button::new("Добавить календарь")).clicked() };
+                if connect {
                     self.state.settings_draft.calendars.push(notetaker_llm::calendar::Subscription { id: format!("calendar-{}", uuid::Uuid::now_v7()), name: "Календарь".into() });
                 }
                 if ui.add_enabled(!self.state.calendar_busy, egui::Button::new("Обновить календари")).clicked() { self.state.refresh_calendar(); }
