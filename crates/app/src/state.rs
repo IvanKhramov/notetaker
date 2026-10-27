@@ -144,6 +144,7 @@ pub struct SummaryStatus {
 }
 
 pub struct Document {
+    pub speaker_ui: crate::speakers::SpeakerUi,
     pub attachments_pending: usize,
     pub notes_cursor: Option<std::ops::Range<usize>>,
     pub inserted_cursor: Option<usize>,
@@ -163,6 +164,7 @@ impl Document {
             .clone()
             .unwrap_or_else(|| "general".into());
         Self {
+            speaker_ui: Default::default(),
             attachments_pending: 0,
             notes_cursor: None,
             inserted_cursor: None,
@@ -199,7 +201,8 @@ impl Document {
         stale
     }
     fn save(&mut self) -> Option<Save> {
-        if self.saving || self.attachments_pending > 0 || !self.dirty.any() {
+        if self.saving || self.speaker_ui.busy || self.attachments_pending > 0 || !self.dirty.any()
+        {
             return None;
         }
         let save = Save {
@@ -396,10 +399,42 @@ impl AppState {
             self.send(Command::Save(Box::new(save)));
         }
     }
+    pub fn edit_speakers(&mut self, edit: notetaker_core::SpeakerEdit) {
+        let Some(path) = self.selected.clone() else {
+            return;
+        };
+        if self
+            .documents
+            .get(&path)
+            .is_none_or(|doc| doc.saving || doc.speaker_ui.busy || doc.attachments_pending > 0)
+            || self.documents.values().any(|doc| doc.speaker_ui.busy)
+            || self.recording.busy()
+            || self.enhancing.is_some()
+            || self.settings_pending
+        {
+            return;
+        }
+        self.flush();
+        let document = self.documents.get_mut(&path).expect("selected document");
+        document.speaker_ui.busy = true;
+        let command = Command::EditSpeakers {
+            meeting: document.data.meeting.clone(),
+            expected: document.data.transcript.clone(),
+            edit,
+        };
+        if self.tx.send(command).is_err() {
+            self.documents
+                .get_mut(&path)
+                .expect("selected document")
+                .speaker_ui
+                .busy = false;
+            self.error = Some("Фоновый поток завершился; перезапустите приложение".into());
+        }
+    }
     pub fn unsaved(&self) -> bool {
-        self.documents
-            .values()
-            .any(|doc| doc.saving || doc.dirty.any() || doc.attachments_pending > 0)
+        self.documents.values().any(|doc| {
+            doc.saving || doc.speaker_ui.busy || doc.dirty.any() || doc.attachments_pending > 0
+        })
     }
     pub fn prefill_call_title(&mut self) {
         if self.title.trim().is_empty()
@@ -744,6 +779,7 @@ impl AppState {
                 || self.pending_summary.as_ref() == Some(path)
                 || doc.dirty.any()
                 || doc.saving
+                || doc.speaker_ui.busy
                 || doc.attachments_pending > 0
         });
     }
@@ -969,10 +1005,57 @@ impl AppState {
                     }
                 }
             }
+            Event::SpeakersEdited { path, result, data } => {
+                if let Some(document) = self.documents.get_mut(&path) {
+                    document.speaker_ui.busy = false;
+                    if let Some(data) = data {
+                        if !document.dirty.transcript {
+                            document.data.transcript = data.transcript;
+                            document.data.revisions.transcript = data.revisions.transcript;
+                        }
+                        if !document.dirty.notes {
+                            document.data.notes = data.notes;
+                            document.data.revisions.notes = data.revisions.notes;
+                        }
+                        if !document.dirty.enhanced {
+                            document.data.enhanced = data.enhanced;
+                            document.data.revisions.enhanced = data.revisions.enhanced;
+                        }
+                        document.data.meta = data.meta;
+                        document.changed();
+                    }
+                    match &result {
+                        Ok(result) => {
+                            document.speaker_ui.undo = result.undo.clone();
+                        }
+                        Err(error) => {
+                            self.error = Some(error.clone());
+                            self.exit_requested = false;
+                        }
+                    }
+                }
+                if let Ok(result) = result {
+                    for other in result.renamed_meetings {
+                        if other != path
+                            && self
+                                .documents
+                                .get(&other)
+                                .is_some_and(|doc| !doc.saving && !doc.dirty.any())
+                        {
+                            let document = self.documents.remove(&other).expect("cached meeting");
+                            if self.selected.as_ref() == Some(&other) && self.loading.insert(other)
+                            {
+                                self.send(Command::Load(document.data.meeting));
+                            }
+                        }
+                    }
+                }
+                self.refresh();
+            }
             Event::Exported(result) => match result {
                 Ok(path) => self
                     .warnings
-                    .push(format!("Конспект сохранён: {}", path.display())),
+                    .push(format!("Экспорт сохранён: {}", path.display())),
                 Err(error) => self.error = Some(error),
             },
             Event::Inventory(result) => {
@@ -1378,6 +1461,82 @@ mod tests {
         state.selected = Some(path.clone());
         (state, commands, root, path)
     }
+    #[test]
+    fn speaker_actions_flush_text_before_edit_and_keep_failed_unsaved_notes() {
+        let (mut state, commands, _root, path) = fixture();
+        let document = state.documents.get_mut(&path).unwrap();
+        document.data.notes = "Новые заметки".into();
+        document.dirty.notes = true;
+        let edit = notetaker_core::SpeakerEdit::Rename {
+            speaker: "s1".into(),
+            name: "Анна".into(),
+            is_me: false,
+            everywhere: false,
+        };
+        state.edit_speakers(edit.clone());
+        assert!(matches!(commands.try_recv().unwrap(), Command::Save(_)));
+        assert!(matches!(
+            commands.try_recv().unwrap(),
+            Command::EditSpeakers { .. }
+        ));
+        assert!(state.documents[&path].speaker_ui.busy);
+        assert!(state.unsaved());
+        state.edit_speakers(edit);
+        assert!(commands.try_recv().is_err());
+        // A failed notes save must not prevent reloading the changed transcript.
+        let document = state.documents.get_mut(&path).unwrap();
+        document.saving = false;
+        document.dirty.notes = true;
+        let mut data = DocumentData::read(document.data.meeting.clone()).unwrap();
+        data.transcript.rename_speaker("s1", "Анна");
+        state.apply(Event::SpeakersEdited {
+            path: path.clone(),
+            data: Some(Box::new(data)),
+            result: Ok(notetaker_core::SpeakerEditResult {
+                undo: None,
+                renamed_meetings: Vec::new(),
+            }),
+        });
+        let document = &state.documents[&path];
+        assert!(!document.speaker_ui.busy);
+        assert_eq!(document.data.notes, "Новые заметки");
+        assert!(document.dirty.notes);
+        assert_eq!(document.data.transcript.speaker_name("s1"), "Анна");
+    }
+
+    #[test]
+    fn propagation_reloads_a_meeting_opened_while_the_action_was_running() {
+        let (mut state, commands, root, path) = fixture();
+        let library = notetaker_core::Library::open(root.path()).unwrap();
+        let other = library
+            .create_meeting(notetaker_core::MeetingMeta::new(
+                "Other",
+                chrono::Utc::now(),
+            ))
+            .unwrap();
+        let other_path = other.path().to_owned();
+        state.documents.insert(
+            other_path.clone(),
+            Document::new(DocumentData::read(other).unwrap()),
+        );
+        state.selected = Some(other_path.clone());
+        state.documents.get_mut(&path).unwrap().speaker_ui.busy = true;
+        state.poll();
+        assert!(state.documents.contains_key(&path));
+        state.apply(Event::SpeakersEdited {
+            path,
+            data: None,
+            result: Ok(notetaker_core::SpeakerEditResult {
+                undo: None,
+                renamed_meetings: vec![other_path.clone()],
+            }),
+        });
+        assert!(!state.documents.contains_key(&other_path));
+        assert!(
+            matches!(commands.try_recv().unwrap(),Command::Load(meeting) if meeting.path() == other_path)
+        );
+    }
+
     #[test]
     fn attachment_import_blocks_autosave_exit_and_eviction_until_reference_is_inserted() {
         let (mut state, commands, _root, path) = fixture();

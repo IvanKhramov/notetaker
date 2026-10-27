@@ -187,6 +187,16 @@ pub enum Command {
     },
     Load(Meeting),
     Save(Box<Save>),
+    EditSpeakers {
+        meeting: Meeting,
+        expected: Transcript,
+        edit: notetaker_core::SpeakerEdit,
+    },
+    ExportTranscript {
+        meeting: Meeting,
+        transcript: Transcript,
+        format: notetaker_core::ExportFormat,
+    },
     Inventory,
     Record(RecordRequest),
     Import {
@@ -246,6 +256,11 @@ pub enum Event {
     Saved {
         path: PathBuf,
         result: SaveResult,
+    },
+    SpeakersEdited {
+        path: PathBuf,
+        result: Result<notetaker_core::SpeakerEditResult, String>,
+        data: Option<Box<DocumentData>>,
     },
     Inventory(Result<Inventory, String>),
     Started {
@@ -447,10 +462,6 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                     let _ = events.send(Event::Voices(result));
                 }
                 Command::Save(save) => {
-                    let previous = save
-                        .transcript
-                        .as_ref()
-                        .and_then(|_| save.meeting.read_transcript().ok());
                     let mut result = save.write();
                     if save.transcript.is_some()
                         && !result.failed.transcript
@@ -462,39 +473,57 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                             "Имена сохранены; не обновлён индекс поиска: {error:#}"
                         ));
                     }
-                    if voice_library_enabled
-                        && !result.failed.transcript
-                        && let Some(transcript) = &save.transcript
-                    {
-                        let mut enrollment = transcript.clone();
-                        enrollment.speaker_names.retain(|id, name| {
-                            previous.as_ref().is_some_and(|old| {
-                                old.speaker_names.get(id) != Some(name)
-                                    || (transcript.self_speaker.as_ref() == Some(id)
-                                        && old.self_speaker != transcript.self_speaker)
-                            })
-                        });
-                        if let Err(error) =
-                            Library::open(save.meeting.path().parent().expect("meeting parent"))
-                                .and_then(|library| {
-                                    library.remember_speakers(&save.meeting, &enrollment)
-                                })
-                        {
-                            result
-                                .errors
-                                .push(format!("Не удалось запомнить голос: {error:#}"));
-                        }
-                        let root = save.meeting.path().parent().expect("meeting parent");
-                        let _ = events.send(Event::Voices(
-                            Library::open(root)
-                                .and_then(|l| l.read_voices())
-                                .map_err(|e| e.to_string()),
-                        ));
-                    }
                     let _ = events.send(Event::Saved {
                         path: save.meeting.path().to_owned(),
                         result,
                     });
+                }
+                Command::EditSpeakers {
+                    meeting,
+                    expected,
+                    edit,
+                } => {
+                    let library = Library::open(meeting.path().parent().expect("meeting parent"));
+                    let result = library
+                        .as_ref()
+                        .map_err(|e| e.to_string())
+                        .and_then(|library| {
+                            library
+                                .edit_speakers(&meeting, &expected, edit, voice_library_enabled)
+                                .map_err(|e| e.to_string())
+                        });
+                    let data = DocumentData::read(meeting.clone()).ok().map(Box::new);
+                    if voice_library_enabled && let Ok(library) = library {
+                        let _ = events.send(Event::Voices(
+                            library.read_voices().map_err(|e| e.to_string()),
+                        ));
+                    }
+                    let _ = events.send(Event::SpeakersEdited {
+                        path: meeting.path().to_owned(),
+                        result,
+                        data,
+                    });
+                }
+                Command::ExportTranscript {
+                    meeting,
+                    transcript,
+                    format,
+                } => {
+                    let result = (|| -> Result<PathBuf> {
+                        let text = transcript.export(format)?;
+                        let path = meeting.path().join(format!(
+                            "transcript-{}.{}",
+                            Utc::now().format("%Y%m%d-%H%M%S-%f"),
+                            format.extension()
+                        ));
+                        let mut temporary = tempfile::NamedTempFile::new_in(meeting.path())?;
+                        temporary.write_all(text.as_bytes())?;
+                        temporary.as_file().sync_all()?;
+                        temporary.persist_noclobber(&path).map_err(|e| e.error)?;
+                        Ok(path)
+                    })()
+                    .map_err(error_text);
+                    let _ = events.send(Event::Exported(result));
                 }
                 Command::Inventory => {
                     let _ = events.send(Event::Inventory(inventory().map_err(error_text)));

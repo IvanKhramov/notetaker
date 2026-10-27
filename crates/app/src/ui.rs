@@ -321,11 +321,19 @@ impl NotetakerApp {
                 document.data.meta.title.clone(),
             );
         }
+        let global_allowed = !self.state.unsaved();
+        let speaker_busy = self.state.documents.values().any(|doc| doc.speaker_ui.busy);
         let Some(document) = self.state.documents.get_mut(&path) else {
             ui.spinner();
             return;
         };
         ui.heading(RichText::new(&document.data.meta.title).strong());
+        if speaker_busy {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Сохраняем спикеров…");
+            });
+        }
         if let Some(event) = &document.data.meta.calendar_event {
             ui.horizontal_wrapped(|ui| {
                 for attendee in &event.attendees {
@@ -422,7 +430,12 @@ impl NotetakerApp {
                     document,
                     &path,
                     true,
-                    self.state.settings.voice_library,
+                    self.state
+                        .settings
+                        .voice_library
+                        .then_some(&self.state.voices),
+                    false,
+                    false,
                 );
             });
             self.state.attach(images);
@@ -439,6 +452,34 @@ impl NotetakerApp {
         );
         let mut enhance = update_summary;
         let mut export = None;
+        let mut speaker_edit = None;
+        let speaker_editable = !locked
+            && !document.saving
+            && !speaker_busy
+            && document.attachments_pending == 0
+            && self.state.enhancing.is_none()
+            && !self.state.settings_pending;
+        ui.add_enabled_ui(!locked && !speaker_busy, |ui| {
+            ui.menu_button("Экспорт", |ui| {
+                for (format, label) in [
+                    (notetaker_core::ExportFormat::Md, "Транскрипт Markdown"),
+                    (notetaker_core::ExportFormat::Srt, "Субтитры SRT"),
+                    (notetaker_core::ExportFormat::Vtt, "Субтитры VTT"),
+                    (notetaker_core::ExportFormat::Csv, "Реплики CSV"),
+                    (notetaker_core::ExportFormat::Json, "Журнал таймингов JSON"),
+                ] {
+                    if ui.button(label).clicked() {
+                        export = Some(Command::ExportTranscript {
+                            meeting: document.data.meeting.clone(),
+                            transcript: document.data.transcript.clone(),
+                            format,
+                        });
+                        ui.close();
+                    }
+                }
+                ui.weak("Копия сохраняется в папке встречи");
+            });
+        });
         if self.state.tab == Tab::Enhanced {
             egui::Panel::bottom("summary_actions")
                 .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(0, 10)))
@@ -497,6 +538,7 @@ impl NotetakerApp {
                     });
                 });
         }
+        ui.add_enabled_ui(!speaker_busy, |ui| {
         match self.state.tab {
             Tab::Notes => {
                 ui.checkbox(&mut self.notes_preview, "Просмотр Markdown");
@@ -557,13 +599,16 @@ impl NotetakerApp {
                         }
                     });
             }
-            Tab::Transcript => transcript_view(
-                ui,
-                document,
-                &path,
-                locked,
-                self.state.settings.voice_library,
-            ),
+            Tab::Transcript => {
+                speaker_edit = transcript_view(
+                    ui, document, &path, locked, self.state.settings.voice_library.then_some(&self.state.voices),
+                    speaker_editable, global_allowed,
+                );
+            }
+        }
+        });
+        if let Some(edit) = speaker_edit {
+            self.state.edit_speakers(edit);
         }
         self.state.attach(images);
         if enhance {
@@ -1398,87 +1443,70 @@ fn transcript_view(
     document: &mut Document,
     path: &std::path::Path,
     live: bool,
-    voices: bool,
-) {
+    voices: Option<&notetaker_core::VoiceLibrary>,
+    editable: bool,
+    global_allowed: bool,
+) -> Option<notetaker_core::SpeakerEdit> {
     let p = Palette::of(ui);
     let mut edits = Vec::new();
-    let mut rename = None;
+    let mut action = None;
+    if !live {
+        ui.add_enabled_ui(editable, |ui| {
+            action = crate::speakers::controls(
+                ui,
+                &document.data.transcript,
+                &document.data.meta,
+                &mut document.speaker_ui,
+                voices,
+                global_allowed,
+            );
+        });
+    }
+    let mut selected = None;
+    let mut scrolled = false;
     egui::ScrollArea::vertical()
         .id_salt(("transcript", path))
         .stick_to_bottom(live)
         .show(ui, |ui| {
-            for segment in &document.data.transcript.segments {
+            for (index, segment) in document.data.transcript.segments.iter().enumerate() {
                 let me = segment.speaker.0 == "me"
                     || document.data.transcript.self_speaker.as_ref() == Some(&segment.speaker.0);
                 let width = (ui.available_width() * 0.90).max(1.0);
-                ui.push_id(segment.id, |ui| {
-                    ui.with_layout(
-                        if me {
-                            egui::Layout::top_down(egui::Align::RIGHT)
-                        } else {
-                            egui::Layout::top_down(egui::Align::LEFT)
-                        },
-                        |ui| {
-                            let id = &segment.speaker.0;
-                            let transcript = &document.data.transcript;
-                            let suggestion = transcript.speaker_suggestions.get(id);
-                            let label = suggestion.map_or_else(
-                                || {
-                                    match transcript.speaker_name(id) {
-                                        "me" => "Я",
-                                        "them" => "Собеседники",
-                                        name => name,
-                                    }
-                                    .to_owned()
-                                },
-                                |name| format!("{name}?"),
-                            );
-                            ui.horizontal(|ui| {
-                                if live {
-                                    ui.label(RichText::new(label).size(12.0).color(p.muted));
-                                } else {
-                                    ui.menu_button(label, |ui| {
-                                        if let Some(name) = suggestion
-                                            && ui.button(format!("Подтвердить: {name}")).clicked()
-                                        {
-                                            rename = Some((id.clone(), name.clone(), false));
-                                            ui.close();
-                                        }
-                                        if let Some(event) = &document.data.meta.calendar_event {
-                                            for attendee in &event.attendees {
-                                                if ui.button(attendee.label()).clicked() {
-                                                    rename = Some((
-                                                        id.clone(),
-                                                        attendee.label().to_owned(),
-                                                        false,
-                                                    ));
-                                                    ui.close();
-                                                }
+                let response = ui
+                    .push_id(segment.id, |ui| {
+                        ui.with_layout(
+                            if me {
+                                egui::Layout::top_down(egui::Align::RIGHT)
+                            } else {
+                                egui::Layout::top_down(egui::Align::LEFT)
+                            },
+                            |ui| {
+                                ui.horizontal(|ui| {
+                                    if live {
+                                        ui.label(
+                                            egui::RichText::new(
+                                                document
+                                                    .data
+                                                    .transcript
+                                                    .speaker_name(&segment.speaker.0),
+                                            )
+                                            .color(crate::speakers::color(&segment.speaker.0)),
+                                        );
+                                    } else {
+                                        ui.add_enabled_ui(editable, |ui| {
+                                            if let Some(rename) = crate::speakers::rename_menu(
+                                                ui,
+                                                &document.data.transcript,
+                                                &document.data.meta,
+                                                &segment.speaker.0,
+                                                voices,
+                                                global_allowed,
+                                            ) {
+                                                action = Some(rename);
                                             }
-                                        }
-                                        let key = ui.make_persistent_id(("speaker-name", path, id));
-                                        let mut name = ui
-                                            .data_mut(|data| data.get_temp::<String>(key))
-                                            .unwrap_or_else(|| transcript.speaker_name(id).into());
-                                        ui.text_edit_singleline(&mut name);
-                                        ui.data_mut(|data| data.insert_temp(key, name.clone()));
-                                        if ui.button("Назвать").clicked() {
-                                            rename = Some((id.clone(), name, false));
-                                            ui.close();
-                                        }
-                                        if voices && ui.button("Это я").clicked() {
-                                            let name = transcript
-                                                .speaker_names
-                                                .get(id)
-                                                .cloned()
-                                                .unwrap_or_else(|| "Я".into());
-                                            rename = Some((id.clone(), name, true));
-                                            ui.close();
-                                        }
-                                    });
-                                }
-                                ui.label(
-                                    RichText::new(format!(
+                                        });
+                                    }
+                                    let label = format!(
                                         "{}{}",
                                         timestamp(segment.start_ms),
                                         if segment.edited {
@@ -1486,53 +1514,76 @@ fn transcript_view(
                                         } else {
                                             ""
                                         }
-                                    ))
-                                    .size(12.0)
-                                    .color(p.muted),
-                                );
-                            });
-                            egui::Frame::new()
-                                .fill(if me { p.me } else { p.soft })
-                                .corner_radius(10)
-                                .inner_margin(10)
-                                .show(ui, |ui| {
-                                    ui.set_max_width(width);
-                                    if live {
-                                        ui.add(egui::Label::new(&segment.text).wrap());
+                                    );
+                                    if ui
+                                        .add_enabled(
+                                            !live && editable,
+                                            egui::Button::selectable(
+                                                document.speaker_ui.selected.contains(&segment.id),
+                                                RichText::new(label).size(12.0).color(p.muted),
+                                            ),
+                                        )
+                                        .clicked()
+                                    {
+                                        selected = Some(index);
+                                    }
+                                });
+                                egui::Frame::new()
+                                    .fill(if document.speaker_ui.selected.contains(&segment.id) {
+                                        ui.visuals().selection.bg_fill
+                                    } else if me {
+                                        p.me
                                     } else {
-                                        let mut text = segment.text.clone();
-                                        if ui
-                                            .add(
+                                        p.soft
+                                    })
+                                    .corner_radius(10)
+                                    .inner_margin(10)
+                                    .show(ui, |ui| {
+                                        ui.set_max_width(width);
+                                        if live {
+                                            ui.add(egui::Label::new(&segment.text).wrap());
+                                        } else {
+                                            let mut text = segment.text.clone();
+                                            let response = ui.add_enabled(
+                                                editable,
                                                 egui::TextEdit::multiline(&mut text)
                                                     .frame(egui::Frame::NONE)
                                                     .desired_width(width)
                                                     .desired_rows(1),
-                                            )
-                                            .changed()
-                                        {
-                                            edits.push((segment.id, text));
+                                            );
+                                            if response.changed() {
+                                                edits.push((segment.id, text));
+                                            }
+                                            if response.clicked() {
+                                                selected = Some(index);
+                                            }
                                         }
-                                    }
-                                });
-                        },
-                    );
-                });
+                                    });
+                            },
+                        );
+                    })
+                    .response;
+                if document.speaker_ui.scroll_to == Some(segment.id) {
+                    response.scroll_to_me(Some(egui::Align::Center));
+                    scrolled = true;
+                }
                 ui.add_space(8.0);
             }
             if document.data.transcript.segments.is_empty() {
                 ui.weak("Текст появится здесь");
             }
         });
-    if let Some((id, name, is_me)) = rename {
-        let transcript = &mut document.data.transcript;
-        let changed = transcript.rename_speaker(&id, &name);
-        if is_me {
-            transcript.self_speaker = Some(id);
-        }
-        if changed || is_me {
-            document.dirty.transcript = true;
-            document.changed();
-        }
+    if scrolled {
+        document.speaker_ui.scroll_to = None;
+    }
+    if let Some(index) = selected {
+        let modifiers = ui.input(|input| input.modifiers);
+        document.speaker_ui.select(
+            &document.data.transcript,
+            index,
+            modifiers.shift,
+            modifiers.ctrl || modifiers.command,
+        );
     }
     for (id, text) in edits {
         if edit_segment(&mut document.data.transcript, id, text) {
@@ -1540,6 +1591,7 @@ fn transcript_view(
             document.changed();
         }
     }
+    action
 }
 
 #[cfg(test)]
@@ -1591,6 +1643,7 @@ mod tests {
             .unwrap();
         let path = meeting.path().to_owned();
         let mut document = Document {
+            speaker_ui: Default::default(),
             data: crate::worker::DocumentData::read(meeting).unwrap(),
             attachments_pending: 0,
             notes_cursor: None,

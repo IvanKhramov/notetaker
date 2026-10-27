@@ -7,6 +7,7 @@ mod config;
 #[cfg(windows)]
 mod desktop;
 mod detection;
+mod speakers;
 mod state;
 mod theme;
 mod ui;
