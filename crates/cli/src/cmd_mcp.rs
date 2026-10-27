@@ -516,6 +516,60 @@ mod tests {
         );
     }
     #[test]
+    fn people_merges_do_not_reveal_local_identity_keys_or_aliases() {
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open(root.path()).unwrap();
+        let local = library
+            .create_meeting(MeetingMeta::new("SECRET", chrono::Utc::now()))
+            .unwrap();
+        let mut transcript = local.read_transcript().unwrap();
+        transcript.rename_speaker("s1", "SECRET PERSON");
+        local.write_transcript(&transcript).unwrap();
+        let mut meta = MeetingMeta::new("Public", chrono::Utc::now());
+        meta.mode = Mode::Hybrid;
+        let public = library.create_meeting(meta).unwrap();
+        let mut transcript = public.read_transcript().unwrap();
+        transcript.rename_speaker("s1", "Public Person");
+        public.write_transcript(&transcript).unwrap();
+        let people = library.people(false, "", "").unwrap();
+        let private_person = people.iter().find(|p| p.name == "SECRET PERSON").unwrap();
+        let public_person = people.iter().find(|p| p.name == "Public Person").unwrap();
+        let mut edits = library.read_people_edits().unwrap();
+        edits.merge(public_person, private_person);
+        library.write_people_edits(&edits).unwrap();
+        let server = Server {
+            library,
+            exclude_local: true,
+        };
+        assert!(
+            !server
+                .call("list_people", json!({}))
+                .unwrap()
+                .to_string()
+                .to_lowercase()
+                .contains("secret")
+        );
+        assert!(
+            !server
+                .call("get_person", json!({"person":"Public Person"}))
+                .unwrap()
+                .to_string()
+                .to_lowercase()
+                .contains("secret")
+        );
+        let mut edits = notetaker_core::PeopleEdits::default();
+        edits.merge(private_person, public_person);
+        server.library.write_people_edits(&edits).unwrap();
+        assert!(
+            !server
+                .call("list_people", json!({}))
+                .unwrap()
+                .to_string()
+                .to_lowercase()
+                .contains("secret")
+        );
+    }
+    #[test]
     fn tasks_recheck_source_privacy() {
         let root = tempfile::tempdir().unwrap();
         let library = Library::open(root.path()).unwrap();

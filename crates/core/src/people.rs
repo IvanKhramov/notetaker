@@ -297,6 +297,24 @@ impl Library {
             }
         }
         let mut edits = self.read_people_edits()?;
+        if exclude_local {
+            // An explicit merge can point at an identity seen only in Local.
+            // Do not reveal that target key or old source aliases through MCP.
+            let keys: BTreeSet<_> = observations.iter().map(|p| p.id.clone()).collect();
+            let names: BTreeSet<_> = observations
+                .iter()
+                .flat_map(|p| p.aliases.iter().chain(std::iter::once(&p.name)))
+                .map(|name| normalized(name))
+                .collect();
+            edits
+                .merges
+                .retain(|source, target| keys.contains(source) && keys.contains(target));
+            edits.names.retain(|key, _| keys.contains(key));
+            edits.aliases.retain(|key, aliases| {
+                aliases.retain(|name| names.contains(&normalized(name)));
+                keys.contains(key)
+            });
+        }
         if !exclude_local {
             for voice in self.read_voices()?.voices {
                 observations.extend(observation(&voice.name, "", voice.id.as_deref()));
