@@ -214,7 +214,7 @@ impl Meeting {
         let lock = meeting_lock(&self.path);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         atomic_write(&self.path.join("notes.md"), notes.as_bytes())?;
-        self.clean_attachments_after_save(notes);
+        self.clean_attachments_after_save();
         Ok(())
     }
     pub fn read_enhanced(&self) -> Result<String> {
@@ -223,7 +223,9 @@ impl Meeting {
     pub fn write_enhanced(&self, enhanced: &str) -> Result<()> {
         let lock = meeting_lock(&self.path);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        atomic_write(&self.path.join("enhanced.md"), enhanced.as_bytes())
+        atomic_write(&self.path.join("enhanced.md"), enhanced.as_bytes())?;
+        self.clean_attachments_after_save();
+        Ok(())
     }
 
     pub fn read_transcript(&self) -> Result<Transcript> {
@@ -283,8 +285,8 @@ impl Meeting {
         let lock = meeting_lock(&self.path);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         let revision = checked_write(&self.path.join(name), bytes, expected)?;
-        if name == "notes.md" {
-            self.clean_attachments_after_save(&String::from_utf8_lossy(bytes));
+        if matches!(name, "notes.md" | "enhanced.md") {
+            self.clean_attachments_after_save();
         }
         Ok(revision)
     }

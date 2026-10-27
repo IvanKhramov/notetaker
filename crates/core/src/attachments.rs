@@ -43,11 +43,11 @@ pub fn attachment_references(notes: &str) -> BTreeSet<String> {
                 Event::Start(Tag::Image { dest_url, .. } | Tag::Link { dest_url, .. }) => dest_url,
                 _ => return None,
             };
-            let destination = percent_encoding::percent_decode_str(&destination)
+            let destination = destination.split(['#', '?']).next()?;
+            let destination = percent_encoding::percent_decode_str(destination)
                 .decode_utf8()
                 .ok()?;
-            let destination = destination.split(['#', '?']).next()?;
-            let destination = destination.strip_prefix("./").unwrap_or(destination);
+            let destination = destination.strip_prefix("./").unwrap_or(&destination);
             let name = destination.strip_prefix("attachments/")?;
             if name.is_empty() || name.starts_with('.') || name.contains(['/', '\\']) {
                 return None;
@@ -111,21 +111,36 @@ impl Meeting {
         Ok(relative)
     }
 
-    pub(crate) fn clean_attachments_after_save(&self, notes: &str) {
+    pub(crate) fn clean_attachments_after_save(&self) {
         // The note revision is committed even if ancillary cleanup fails.
         if let Err(error) =
-            self.reconcile_attachments(notes, DateTime::<Utc>::from(std::time::SystemTime::now()))
+            self.reconcile_attachments(DateTime::<Utc>::from(std::time::SystemTime::now()))
         {
             tracing::warn!(path = %self.path.display(), %error, "attachment cleanup failed");
         }
     }
 
-    fn reconcile_attachments(&self, notes: &str, now: DateTime<Utc>) -> Result<()> {
+    fn markdown_attachment_references(&self) -> Result<BTreeSet<String>> {
+        let mut references = BTreeSet::new();
+        // All Markdown we write lives directly in the meeting: notes, enhanced,
+        // exported summaries/chats and conflict copies must preserve attachments.
+        for entry in fs::read_dir(&self.path)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if entry.path().extension().is_some_and(|ext| ext == "md") {
+                let path = self.source_path(&name.to_string_lossy())?;
+                references.extend(attachment_references(&fs::read_to_string(path)?));
+            }
+        }
+        Ok(references)
+    }
+
+    fn reconcile_attachments(&self, now: DateTime<Utc>) -> Result<()> {
         let folder = self.path.join("attachments");
         if !directory(&folder)? {
             return Ok(());
         }
-        let references = attachment_references(notes);
+        let references = self.markdown_attachment_references()?;
         let trash = folder.join(".trash");
         let has_trash = directory(&trash)?;
         // Undo after an autosave can reintroduce a reference that was just trashed.
@@ -187,6 +202,9 @@ impl Meeting {
         if !directory(&folder)? || !directory(&trash)? {
             return Ok(Vec::new());
         }
+        // Re-read current Markdown under the meeting lock, even when no notes
+        // were saved since an external edit or export reintroduced a reference.
+        let references = self.markdown_attachment_references()?;
         let mut removed = Vec::new();
         let cutoff = (now - Duration::days(30)).timestamp_millis();
         for entry in fs::read_dir(trash)? {
@@ -194,12 +212,20 @@ impl Meeting {
             if !entry.file_type()?.is_file() {
                 continue;
             }
-            let expired = entry
-                .file_name()
-                .to_str()
-                .and_then(|name| name.split_once('-'))
-                .and_then(|(timestamp, _)| timestamp.parse::<i64>().ok())
-                .is_some_and(|timestamp| timestamp < cutoff);
+            let name = entry.file_name();
+            let Some((timestamp, original)) = name.to_str().and_then(|name| name.split_once('-'))
+            else {
+                continue;
+            };
+            if references.contains(&format!("attachments/{original}")) {
+                if !folder.join(original).exists() {
+                    fs::rename(entry.path(), folder.join(original))?;
+                }
+                continue;
+            }
+            let expired = timestamp
+                .parse::<i64>()
+                .is_ok_and(|timestamp| timestamp < cutoff);
             if expired {
                 fs::remove_file(entry.path())?;
                 removed.push(entry.path());
@@ -269,18 +295,63 @@ mod tests {
 ![](https://example.org/attachments/e.png) ![](attachments/../notes.md)
 ![](attachments/.trash/a.png) ![](attachments/sub/e.png)
 ![](<attachments/e%20f.png>) ![](attachments/a.png#fragment)
+![](attachments/hash%23tag.png) ![](attachments/query%3Fmark.png)
 "#;
         assert_eq!(
             attachment_references(notes),
-            ["a.png", "b.jpg", "c.png", "d.png", "e f.png"]
-                .map(|name| format!("attachments/{name}"))
-                .into()
+            [
+                "a.png",
+                "b.jpg",
+                "c.png",
+                "d.png",
+                "e f.png",
+                "hash#tag.png",
+                "query?mark.png"
+            ]
+            .map(|name| format!("attachments/{name}"))
+            .into()
         );
         let images = markdown_images("до ![alt](attachments/a.png) после");
         assert_eq!(
             &"до ![alt](attachments/a.png) после"[images[0].0.clone()],
             "![alt](attachments/a.png)"
         );
+    }
+
+    #[test]
+    fn enhanced_and_export_references_survive_cleanup_and_expired_trash() {
+        let now = DateTime::<Utc>::from(std::time::SystemTime::now());
+        let temp = tempfile::tempdir().unwrap();
+        let library = Library::open(temp.path()).unwrap();
+        for name in ["enhanced.md", "summary-export.md", "chat-export.md"] {
+            let meeting = library.create_meeting(MeetingMeta::new(name, now)).unwrap();
+            let image = meeting.add_attachment(b"image", "png").unwrap();
+            let markdown = format!("![]({image})");
+            fs::write(meeting.path.join(name), &markdown).unwrap();
+            meeting.write_notes("").unwrap();
+            assert!(meeting.path.join(&image).exists(), "{name}");
+            fs::write(meeting.path.join(name), "").unwrap();
+            meeting.write_notes("").unwrap();
+            assert!(!meeting.path.join(&image).exists());
+            // An external editor/export can restore a reference without autosave.
+            fs::write(meeting.path.join(name), markdown).unwrap();
+            assert!(
+                meeting
+                    .purge_attachment_trash(now + Duration::days(31))
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(meeting.path.join(&image).exists(), "{name}");
+            fs::write(meeting.path.join(name), "").unwrap();
+            meeting.write_notes("").unwrap();
+            assert_eq!(
+                meeting
+                    .purge_attachment_trash(now + Duration::days(31))
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
     }
 
     #[test]
