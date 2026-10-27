@@ -53,12 +53,47 @@ pub const SILERO: ModelManifest = ModelManifest {
     files: &["silero_vad.onnx"],
 };
 
+pub const PYANNOTE: ModelManifest = ModelManifest {
+    id: "pyannote-3.0",
+    url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2",
+    sha256: "24615ee884c897d9d2ba09bb4d30da6bb1b15e685065962db5b02e76e4996488",
+    size: 6_958_444,
+    directory: "sherpa-onnx-pyannote-segmentation-3-0",
+    files: &["model.int8.onnx", "LICENSE"],
+};
+pub const ERES2NET: ModelManifest = ModelManifest {
+    id: "eres2net-base",
+    url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
+    sha256: "1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b",
+    size: 39_593_761,
+    directory: "",
+    files: &["3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"],
+};
+
+pub fn check(id: &str) -> Result<()> {
+    let root = models_dir()?;
+    if id == "diarization" {
+        installed(&root, &PYANNOTE)?;
+        installed(&root, &ERES2NET)?;
+    } else {
+        installed(&root, manifest(id)?)?;
+        if id == GIGAAM.id || id == PARAKEET.id {
+            installed(&root, &SILERO)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn manifest(id: &str) -> Result<&'static ModelManifest> {
     match id {
         "gigaam-v3" => Ok(&GIGAAM),
         "parakeet-v3" => Ok(&PARAKEET),
         "silero-vad" => Ok(&SILERO),
-        _ => bail!("unknown model {id:?}; choose gigaam-v3, parakeet-v3 or silero-vad"),
+        "pyannote-3.0" => Ok(&PYANNOTE),
+        "eres2net-base" => Ok(&ERES2NET),
+        _ => bail!(
+            "unknown model {id:?}; choose gigaam-v3, parakeet-v3, silero-vad, pyannote-3.0 or eres2net-base"
+        ),
     }
 }
 
@@ -168,11 +203,15 @@ fn download_one(root: &Path, model: &ModelManifest) -> Result<()> {
 }
 
 pub fn download(id: &str) -> Result<()> {
-    let model = manifest(id)?;
     let root = models_dir()?;
     fs::create_dir_all(&root)?;
+    if id == "diarization" {
+        download_one(&root, &PYANNOTE)?;
+        return download_one(&root, &ERES2NET);
+    }
+    let model = manifest(id)?;
     download_one(&root, model)?;
-    if id != SILERO.id {
+    if id == GIGAAM.id || id == PARAKEET.id {
         download_one(&root, &SILERO)?;
     }
     Ok(())

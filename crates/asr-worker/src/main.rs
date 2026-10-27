@@ -1,4 +1,5 @@
 //! Isolated speech recognition process. stdout is exclusively JSON lines.
+mod diarization;
 mod models;
 mod recognizer;
 
@@ -21,15 +22,10 @@ fn run() -> Result<()> {
     match args.as_slice() {
         [] => serve(&mut io::stdin().lock(), &mut io::stdout().lock()),
         [command, id] if command == "download" => models::download(id),
-        [command, id] if command == "check-model" => {
-            let root = models::models_dir()?;
-            models::installed(&root, models::manifest(id)?)?;
-            models::installed(&root, &models::SILERO)?;
-            Ok(())
-        }
+        [command, id] if command == "check-model" => models::check(id),
         [flag] if flag == "--help" || flag == "-h" => {
             eprintln!(
-                "Usage: notetaker-asr [download <gigaam-v3|parakeet-v3|silero-vad> | check-model <model_id>]\nWithout arguments: JSON-lines worker on stdin/stdout."
+                "Usage: notetaker-asr [download <gigaam-v3|parakeet-v3|silero-vad|diarization> | check-model <model_id>]\nWithout arguments: JSON-lines worker on stdin/stdout."
             );
             Ok(())
         }
@@ -86,6 +82,26 @@ fn serve(input: &mut impl BufRead, output: &mut impl Write) -> Result<()> {
                         },
                     }
                 })
+            }
+            Request::Diarize {
+                id,
+                wav_path,
+                channel: _,
+                speakers,
+                embeddings,
+            } => {
+                recognizer = None;
+                diarization::diarize(&wav_path, speakers, embeddings)
+                    .map(|result| Response::Diarized { id, result })
+            }
+            Request::Embed {
+                id,
+                wav_path,
+                ranges,
+            } => {
+                recognizer = None;
+                diarization::embed(&wav_path, &ranges)
+                    .map(|embedding| Response::Embedded { id, embedding })
             }
             Request::Transcribe {
                 id,

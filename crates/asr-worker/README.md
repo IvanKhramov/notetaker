@@ -23,3 +23,17 @@ Model integration tests are opt-in and serialize model use:
 ```sh
 NOTETAKER_MODELS_DIR=/path/to/models cargo test -p notetaker-asr-worker --test real_models -j 2 -- --ignored --nocapture
 ```
+
+`download diarization` installs pyannote 3.0 int8 + ERes2Net base, separately
+from ASR. `check-model diarization` checks both without loading weights.
+`diarize {id, wav_path, channel, speakers: null|1..32, embeddings: bool}` returns
+`diarized {id, result: {turns: [{start_ms, end_ms, speaker}], embeddings: {id: [...]}}}`.
+`embed {id, wav_path, ranges: [{start_ms, end_ms}]}` returns `embedded {id, embedding}`.
+Both accept mono 16 kHz f32/i16 WAV; error replies preserve request ids.
+These requests unload ASR weights; load an ASR model again before transcribing.
+Speaker vectors are optional and never passed to the GUI inside transcripts.
+See [speaker documentation](../../docs/speakers.md) for storage and licenses.
+
+```sh
+NOTETAKER_MODELS_DIR=/path/to/models cargo test -p notetaker-asr-worker --test diarization -- --ignored --nocapture
+```

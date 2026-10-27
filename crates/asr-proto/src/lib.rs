@@ -70,13 +70,29 @@ pub enum Request {
         channel: String,
         offset_ms: u64,
     },
+    Diarize {
+        id: String,
+        wav_path: PathBuf,
+        channel: String,
+        #[serde(default)]
+        speakers: Option<u32>,
+        #[serde(default)]
+        embeddings: bool,
+    },
+    Embed {
+        id: String,
+        wav_path: PathBuf,
+        ranges: Vec<TimeRange>,
+    },
     Shutdown,
 }
 
 impl Request {
     pub fn id(&self) -> Option<&str> {
         match self {
-            Self::Transcribe { id, .. } => Some(id),
+            Self::Transcribe { id, .. } | Self::Diarize { id, .. } | Self::Embed { id, .. } => {
+                Some(id)
+            }
             _ => None,
         }
     }
@@ -87,6 +103,25 @@ pub struct Segment {
     pub start_ms: u64,
     pub end_ms: u64,
     pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimeRange {
+    pub start_ms: u64,
+    pub end_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpeakerTurn {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub speaker: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Diarization {
+    pub turns: Vec<SpeakerTurn>,
+    pub embeddings: std::collections::BTreeMap<String, Vec<f32>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -102,6 +137,14 @@ pub enum Response {
     Segments {
         id: String,
         segments: Vec<Segment>,
+    },
+    Diarized {
+        id: String,
+        result: Diarization,
+    },
+    Embedded {
+        id: String,
+        embedding: Vec<f32>,
     },
     /// Samples processed, from 0 to 1; emitted while transcribing speech chunks.
     Progress {
@@ -178,6 +221,21 @@ mod tests {
                 channel: "system".into(),
                 offset_ms: 0,
             },
+            Request::Diarize {
+                id: "d".into(),
+                wav_path: "two.wav".into(),
+                channel: "system".into(),
+                speakers: Some(2),
+                embeddings: true,
+            },
+            Request::Embed {
+                id: "e".into(),
+                wav_path: "mic.wav".into(),
+                ranges: vec![TimeRange {
+                    start_ms: 0,
+                    end_ms: 2000,
+                }],
+            },
             Request::Shutdown,
         ];
         for request in requests {
@@ -207,6 +265,21 @@ mod tests {
                     end_ms: 456,
                     text: "Привет!".into(),
                 }],
+            },
+            Response::Diarized {
+                id: "d".into(),
+                result: Diarization {
+                    turns: vec![SpeakerTurn {
+                        start_ms: 0,
+                        end_ms: 1000,
+                        speaker: "s1".into(),
+                    }],
+                    embeddings: std::collections::BTreeMap::from([("s1".into(), vec![1.0, 0.0])]),
+                },
+            },
+            Response::Embedded {
+                id: "e".into(),
+                embedding: vec![1.0, 0.0],
             },
             Response::Error {
                 id: None,

@@ -34,3 +34,23 @@ fn model_check_requires_complete_asr_and_vad_installation() {
     assert!(!check(root.path(), "parakeet-v3"));
     assert!(!check(root.path(), "../gigaam-v3"));
 }
+
+#[test]
+fn diarization_check_needs_both_models_and_no_asr_or_vad() {
+    let root = tempfile::tempdir().unwrap();
+    assert!(!check(root.path(), "diarization"));
+    let segmentation = root.path().join("pyannote-3.0");
+    fs::create_dir(&segmentation).unwrap();
+    for file in ["model.int8.onnx", "LICENSE"] {
+        fs::write(segmentation.join(file), []).unwrap();
+    }
+    assert!(!check(root.path(), "diarization"));
+    let embedding = root.path().join("eres2net-base");
+    fs::create_dir(&embedding).unwrap();
+    fs::write(
+        embedding.join("3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"),
+        [],
+    )
+    .unwrap();
+    assert!(check(root.path(), "diarization"));
+}

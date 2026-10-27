@@ -250,6 +250,48 @@ impl AsrClient {
         }
     }
 
+    pub fn diarize(
+        &mut self,
+        wav_path: &Path,
+        channel: &str,
+        speakers: Option<u32>,
+        embeddings: bool,
+    ) -> Result<crate::Diarization, ClientError> {
+        self.send(&Request::Diarize {
+            id: "diarize".into(),
+            wav_path: wav_path.into(),
+            channel: channel.into(),
+            speakers,
+            embeddings,
+        })?;
+        match self.receive()? {
+            Response::Diarized { id, result } if id == "diarize" => Ok(result),
+            Response::Error { message, .. } => Err(ClientError::Worker(message)),
+            response => Err(ClientError::Protocol(format!(
+                "expected diarized, got {response:?}"
+            ))),
+        }
+    }
+
+    pub fn embed(
+        &mut self,
+        wav_path: &Path,
+        ranges: Vec<crate::TimeRange>,
+    ) -> Result<Vec<f32>, ClientError> {
+        self.send(&Request::Embed {
+            id: "embed".into(),
+            wav_path: wav_path.into(),
+            ranges,
+        })?;
+        match self.receive()? {
+            Response::Embedded { id, embedding } if id == "embed" => Ok(embedding),
+            Response::Error { message, .. } => Err(ClientError::Worker(message)),
+            response => Err(ClientError::Protocol(format!(
+                "expected embedded, got {response:?}"
+            ))),
+        }
+    }
+
     pub fn shutdown(mut self) -> Result<(), ClientError> {
         self.send(&Request::Shutdown)?;
         self.requests.take();
