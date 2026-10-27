@@ -79,6 +79,27 @@ To choose a particular microphone or shorten the fallback wait:
 .\notetaker.exe probe --seconds 20 --pid 1234 --silence-seconds 3 --mic-id '<device-id>' --out .\probe-custom
 ```
 
+## Kontur Talk and Yandex Telemost
+
+For the desktop apps, check **Task Manager > Details** and note the exact exe
+names for Контур.Толк and Яндекс Телемост. The built-in Telemost/Kontur aliases
+are best-effort guesses, not confirmed executable names. Add the actual names in
+**Настройки > Свои приложения для звонков**, one exe per line, without paths.
+They supplement the built-in list and work when
+**Предлагать для любых приложений с микрофоном** is disabled (it defaults to on).
+System processes, notetaker itself and Windows Sound Recorder are excluded.
+
+Test both desktop apps and browser calls on ktalk.ru, telemost.yandex.ru and
+telemost.360.yandex.ru. After the start delay, check the service/browser name in
+the prompt and the suggested meeting title. Window titles are best-effort hints:
+only visible top-level windows in the microphone owner's process tree are read;
+an inactive call tab may not be identifiable. Multiple different call windows
+suppress the ambiguous title. A manually entered title takes precedence.
+
+Browser process loopback captures **all tabs in the selected browser process
+tree**, not only the detected meeting. Endpoint fallback captures all sound on
+the selected output device. Confirm remote speech in both modes.
+
 ## Check fallback and failure behavior
 
 - With process capture selected, endpoint samples are monitored concurrently.
