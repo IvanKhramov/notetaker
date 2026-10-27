@@ -189,6 +189,37 @@ impl Library {
         Ok(result)
     }
 
+    pub(crate) fn indexed_people(&self, exclude_local: bool) -> Result<Vec<crate::Person>> {
+        let connection = self.open_index()?;
+        let mut statement =
+            connection.prepare("SELECT path, stamp, item FROM people_sources ORDER BY path")?;
+        let mut rows = statement.query([])?;
+        let mut result = Vec::new();
+        while let Some(row) = rows.next()? {
+            let path = PathBuf::from(row.get::<_, String>(0)?);
+            if path.parent() != Some(self.root()) {
+                continue;
+            }
+            let meeting = Meeting { path };
+            if meeting.validate_source_paths().is_err() {
+                continue;
+            }
+            let Ok(meta) = meeting.read_meta() else {
+                continue;
+            };
+            if exclude_local && meta.mode == crate::Mode::Local {
+                continue;
+            }
+            if source_stamp(&meeting)? != row.get::<_, String>(1)? {
+                continue;
+            }
+            result.extend(serde_json::from_str::<Vec<crate::Person>>(
+                &row.get::<_, String>(2)?,
+            )?);
+        }
+        Ok(result)
+    }
+
     fn open_index(&self) -> Result<Connection> {
         let path = self.index_path();
         fs::create_dir_all(path.parent().expect("index has a parent"))?;
@@ -209,6 +240,7 @@ impl Library {
         if full {
             transaction.execute("DELETE FROM meetings", [])?;
             transaction.execute("DELETE FROM tasks", [])?;
+            transaction.execute("DELETE FROM people_sources", [])?;
         }
         let mut existing: HashMap<String, String> = {
             let mut statement = transaction.prepare("SELECT path, stamp FROM meetings")?;
@@ -231,21 +263,31 @@ impl Library {
                 let meta = meeting.read_meta()?;
                 let notes = meeting.read_notes()?;
                 let enhanced = meeting.read_enhanced()?;
-                let transcript = meeting.read_transcript()?.named_text();
-                Ok(Some((stamp, meta, notes, enhanced, transcript)))
+                let transcript = meeting.read_transcript()?;
+                let people = crate::people::meeting_people(&meta, &transcript);
+                Ok(Some((
+                    stamp,
+                    meta,
+                    notes,
+                    enhanced,
+                    transcript.named_text(),
+                    people,
+                )))
             })();
-            let (stamp, meta, notes, enhanced, transcript) = match contents {
+            let (stamp, meta, notes, enhanced, transcript, people) = match contents {
                 Ok(Some(contents)) => contents,
                 Ok(None) => continue,
                 Err(error) => {
                     tracing::warn!(%path, %error, "skipping invalid meeting during indexing");
                     transaction.execute("DELETE FROM meetings WHERE path = ?1", [path])?;
                     transaction.execute("DELETE FROM tasks WHERE path = ?1", [path])?;
+                    transaction.execute("DELETE FROM people_sources WHERE path = ?1", [path])?;
                     continue;
                 }
             };
             transaction.execute("DELETE FROM meetings WHERE path = ?1", [path])?;
             transaction.execute("DELETE FROM tasks WHERE path = ?1", [path])?;
+            transaction.execute("DELETE FROM people_sources WHERE path = ?1", [path])?;
             for mut task in crate::parse_tasks(
                 &enhanced,
                 meta.started_at.with_timezone(&chrono::Local).date_naive(),
@@ -258,6 +300,10 @@ impl Library {
                     params![path, task.line as i64, serde_json::to_string(&task)?],
                 )?;
             }
+            transaction.execute(
+                "INSERT INTO people_sources (path, stamp, item) VALUES (?1, ?2, ?3)",
+                params![path, stamp, serde_json::to_string(&people)?],
+            )?;
             transaction.execute(
                 "INSERT INTO meetings (meeting_id, path, stamp, title, notes, enhanced, transcript)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -275,6 +321,7 @@ impl Library {
         for path in existing.keys() {
             transaction.execute("DELETE FROM meetings WHERE path = ?1", [path])?;
             transaction.execute("DELETE FROM tasks WHERE path = ?1", [path])?;
+            transaction.execute("DELETE FROM people_sources WHERE path = ?1", [path])?;
         }
         transaction.commit()?;
         Ok(())
@@ -298,13 +345,14 @@ fn connect_index(path: &Path) -> Result<Connection> {
     let connection = Connection::open(path)?;
     connection.busy_timeout(Duration::from_secs(5))?;
     let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version != 2 {
+    if version != 3 {
         connection.execute_batch(
-            "DROP TABLE IF EXISTS meetings; DROP TABLE IF EXISTS tasks; PRAGMA user_version = 2;",
+            "DROP TABLE IF EXISTS meetings; DROP TABLE IF EXISTS tasks; DROP TABLE IF EXISTS people_sources; PRAGMA user_version = 3;",
         )?;
     }
     connection.execute_batch(
-        "CREATE TABLE IF NOT EXISTS tasks (path TEXT NOT NULL, line INTEGER NOT NULL, item TEXT NOT NULL, PRIMARY KEY(path, line));
+        "CREATE TABLE IF NOT EXISTS people_sources (path TEXT PRIMARY KEY, stamp TEXT NOT NULL, item TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS tasks (path TEXT NOT NULL, line INTEGER NOT NULL, item TEXT NOT NULL, PRIMARY KEY(path, line));
         CREATE VIRTUAL TABLE IF NOT EXISTS meetings USING fts5(
             meeting_id UNINDEXED, path UNINDEXED, stamp UNINDEXED,
             title, notes, enhanced, transcript,
@@ -312,6 +360,7 @@ fn connect_index(path: &Path) -> Result<Connection> {
         );",
     )?;
     connection.prepare("SELECT path, line, item FROM tasks LIMIT 0")?;
+    connection.prepare("SELECT path, stamp, item FROM people_sources LIMIT 0")?;
     connection.prepare(
         "SELECT meeting_id, path, stamp, title, notes, enhanced, transcript FROM meetings LIMIT 0",
     )?;

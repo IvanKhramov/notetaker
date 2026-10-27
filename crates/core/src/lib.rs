@@ -1,6 +1,12 @@
 //! Meeting files are the source of truth; the SQLite search index is disposable.
 mod attachments;
 mod brief;
+mod people;
+pub use people::{PeopleEdits, Person, resolve_people};
+mod relationships;
+pub use relationships::{CarryOver, MeetingSummary, PersonPage, Series, decisions};
+mod digest;
+pub use digest::{Digest, DigestFilter, DigestPeriod};
 pub mod calendar;
 mod export;
 mod identity;
@@ -56,3 +62,6 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod relationships_tests;

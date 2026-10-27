@@ -15,6 +15,8 @@ pub struct Task {
     pub line: usize,
     pub text: String,
     pub owner: String,
+    #[serde(default)]
+    pub requester: String,
     pub due_text: String,
     pub due: Option<NaiveDate>,
     pub completed: bool,
@@ -75,6 +77,26 @@ pub fn parse_tasks(text: &str, date: NaiveDate) -> Vec<Task> {
         }
         // Accept a typographic dash in input without emitting it in our assets.
         let normalized = body.replace(['\u{2013}', '\u{2014}'], "-");
+        let mut requester = String::new();
+        let normalized = normalized
+            .split(" | ")
+            .filter(|field| {
+                let lower = field.trim().to_lowercase();
+                if ["поручил:", "попросил:", "requester:", "assigned by:"]
+                    .iter()
+                    .any(|label| lower.starts_with(label))
+                {
+                    requester = field
+                        .split_once(':')
+                        .map(|(_, name)| name.trim().to_owned())
+                        .unwrap_or_default();
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" | ");
         let mut fields: Vec<_> = normalized.split(" - ").map(str::trim).collect();
         if fields.len() == 1 {
             fields = normalized.split(" | ").map(str::trim).collect();
@@ -115,6 +137,7 @@ pub fn parse_tasks(text: &str, date: NaiveDate) -> Vec<Task> {
             line: index + 1,
             text: title,
             owner,
+            requester,
             due: resolve_due(&due_text, date),
             due_text,
             completed,
