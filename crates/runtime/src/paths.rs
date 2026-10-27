@@ -26,7 +26,8 @@ mod tests {
         std::os::unix::fs::symlink(package.join("notetaker"), &alias).unwrap();
         assert_eq!(
             super::sibling(&alias, "notetaker-asr").unwrap(),
-            package.join("notetaker-asr")
+            // macOS temp dirs live behind the /var -> /private/var symlink.
+            package.canonicalize().unwrap().join("notetaker-asr")
         );
     }
 }
