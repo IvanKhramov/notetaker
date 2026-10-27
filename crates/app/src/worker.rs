@@ -152,12 +152,31 @@ impl Save {
 pub struct RecordRequest {
     pub settings: Settings,
     pub title: String,
+    pub brief: Option<Box<notetaker_llm::Brief>>,
     pub event: Option<notetaker_core::calendar::CalendarEvent>,
     pub process_id: Option<u32>,
     pub app: Option<String>,
 }
 
 pub enum Command {
+    Tasks {
+        root: PathBuf,
+    },
+    ToggleTask {
+        meeting: Meeting,
+        task: notetaker_core::Task,
+        completed: bool,
+    },
+    Brief {
+        root: PathBuf,
+        event: notetaker_core::calendar::CalendarEvent,
+        cancel: Cancellation,
+    },
+    Followup {
+        meeting: Meeting,
+        kind: notetaker_llm::FollowupKind,
+        cancel: Cancellation,
+    },
     Calendar {
         subscriptions: Vec<notetaker_llm::calendar::Subscription>,
         timezone: String,
@@ -224,6 +243,19 @@ pub enum Command {
 // Rare worker-to-UI messages; boxing variants buys nothing measurable.
 #[allow(clippy::large_enum_variant)]
 pub enum Event {
+    Tasks {
+        root: PathBuf,
+        result: Result<Vec<notetaker_core::Task>, String>,
+    },
+    TaskToggled {
+        path: PathBuf,
+        result: Result<Box<DocumentData>, String>,
+    },
+    Brief(Result<notetaker_llm::Brief, String>),
+    Followup {
+        path: PathBuf,
+        result: Result<String, String>,
+    },
     Calendar {
         generation: u64,
         result: Result<Vec<notetaker_core::calendar::CalendarEvent>, String>,
@@ -350,6 +382,61 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
         });
         for command in rx {
             match command {
+                Command::Tasks { root } => {
+                    let result = (|| -> Result<_> {
+                        let library = Library::open(&root)?;
+                        library.reindex_incremental()?;
+                        Ok(library.list_tasks(None, None, false)?)
+                    })()
+                    .map_err(error_text);
+                    let _ = events.send(Event::Tasks { root, result });
+                }
+                Command::ToggleTask {
+                    meeting,
+                    task,
+                    completed,
+                } => {
+                    let path = meeting.path().to_owned();
+                    let result = (|| -> Result<_> {
+                        meeting.toggle_task(&task, completed)?;
+                        Ok(Box::new(DocumentData::read(meeting)?))
+                    })()
+                    .map_err(error_text);
+                    let _ = events.send(Event::TaskToggled { path, result });
+                }
+                Command::Brief {
+                    root,
+                    event,
+                    cancel,
+                } => {
+                    let events = events.clone();
+                    thread::spawn(move || {
+                        let result = (|| -> Result<_> {
+                            let library = Library::open(root)?;
+                            let config = Config::load().ok();
+                            notetaker_llm::brief(&library, &event, config.as_ref(), cancel)
+                        })()
+                        .map_err(error_text);
+                        let _ = events.send(Event::Brief(result));
+                    });
+                }
+                Command::Followup {
+                    meeting,
+                    kind,
+                    cancel,
+                } => {
+                    let events = events.clone();
+                    thread::spawn(move || {
+                        let path = meeting.path().to_owned();
+                        let result = Config::load()
+                            .and_then(|config| {
+                                notetaker_llm::followup(&meeting, kind, &config, cancel)
+                            })
+                            .map_err(error_text);
+                        let _ = events.send(Event::Followup { path, result });
+                    });
+                }
+
                 Command::Calendar {
                     subscriptions,
                     timezone,
@@ -447,7 +534,11 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                     let path = meeting.path().to_owned();
                     let _ = events.send(Event::Loaded {
                         path,
-                        result: DocumentData::read(meeting).map_err(error_text),
+                        result: (|| -> Result<_> {
+                            default_self_name(&meeting, &Settings::load()?.user_name)?;
+                            DocumentData::read(meeting)
+                        })()
+                        .map_err(error_text),
                     });
                 }
                 Command::Voices { root, delete } => {
@@ -539,6 +630,7 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                             RecordRequest {
                                 settings,
                                 title: String::new(),
+                                brief: None,
                                 event: None,
                                 process_id: None,
                                 app: None,
@@ -559,6 +651,7 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                     thread::spawn(move || {
                         let path = meeting.path().to_owned();
                         let result: Result<_> = (|| {
+                            default_self_name(&meeting, &Settings::load()?.user_name)?;
                             let meta = meeting.read_meta()?;
                             let root = path.parent().context("Нет библиотеки")?;
                             let template_data = Template::load(root, &template)?;
@@ -873,7 +966,15 @@ fn record(request: RecordRequest, import_file: Option<PathBuf>, events: &Sender<
             })?;
             let sources: [Box<dyn AudioSource + Send>; 2] = [Box::new(mic), Box::new(system)];
             let mut meta = MeetingMeta::new(request.title, Utc::now());
-            meta.mode = request.settings.mode;
+            meta.mode = if request
+                .brief
+                .as_ref()
+                .is_some_and(|brief| brief.mode == notetaker_core::Mode::Local)
+            {
+                notetaker_core::Mode::Local
+            } else {
+                request.settings.mode
+            };
             meta.app = request.app;
             if let Some(event) = &request.event {
                 notetaker_core::calendar::link_meeting(&mut meta, event, true);
@@ -881,6 +982,15 @@ fn record(request: RecordRequest, import_file: Option<PathBuf>, events: &Sender<
             RecordingSession::start_with_asr(library.clone(), meta, sources, asr, config)?
         };
         let meeting = session.meeting().clone();
+        if let Some(brief) = &request.brief {
+            let notes = meeting.load_notes()?;
+            let text = format!(
+                "{}\n<details>\n<summary>Бриф перед встречей</summary>\n\n{}\n\n</details>\n",
+                notes.value, brief.text
+            );
+            meeting.save_notes(&text, notes.revision)?;
+        }
+
         path = Some(meeting.path().to_owned());
         meeting_for_reload = Some(meeting.clone());
         let document = DocumentData::read(meeting)?;
@@ -902,6 +1012,10 @@ fn record(request: RecordRequest, import_file: Option<PathBuf>, events: &Sender<
             }
         }
         session.wait()?;
+        default_self_name(
+            &meeting_for_reload.clone().context("Нет встречи")?,
+            &request.settings.user_name,
+        )?;
         library.reindex_incremental()?;
         Ok(())
     })();
@@ -913,6 +1027,18 @@ fn record(request: RecordRequest, import_file: Option<PathBuf>, events: &Sender<
         document,
         error: result.err().map(error_text),
     });
+}
+
+fn default_self_name(meeting: &Meeting, name: &str) -> Result<()> {
+    if name.trim().is_empty() {
+        return Ok(());
+    }
+    let loaded = meeting.load_transcript()?;
+    let mut transcript = loaded.value;
+    if transcript.default_self_name(name) {
+        meeting.save_transcript(&transcript, loaded.revision)?;
+    }
+    Ok(())
 }
 
 pub fn asr_binary() -> Result<PathBuf> {
@@ -956,6 +1082,24 @@ fn download(model: &str, events: &Sender<Event>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn configured_self_name_does_not_replace_confirmed_name() {
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open(root.path()).unwrap();
+        let meeting = library
+            .create_meeting(MeetingMeta::new("Names", Utc::now()))
+            .unwrap();
+        default_self_name(&meeting, "Иван").unwrap();
+        assert_eq!(
+            meeting.read_transcript().unwrap().speaker_names["me"],
+            "Иван"
+        );
+        default_self_name(&meeting, "Игорь").unwrap();
+        assert_eq!(
+            meeting.read_transcript().unwrap().speaker_names["me"],
+            "Иван"
+        );
+    }
     #[test]
     fn stale_ui_save_keeps_external_files_and_reloads_conflicts() {
         let root = tempfile::tempdir().unwrap();

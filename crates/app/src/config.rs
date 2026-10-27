@@ -14,6 +14,9 @@ pub const MODELS: [&str; 2] = ["gigaam-v3", "parakeet-v3"];
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
+    pub user_name: String,
+    /// Aliases separated by commas, semicolons or newlines.
+    pub user_aliases: String,
     pub theme: crate::theme::Theme,
     pub library: PathBuf,
     pub model: String,
@@ -48,6 +51,8 @@ impl Default for Settings {
             .map(|dirs| dirs.document_dir().unwrap_or(dirs.home_dir()).to_owned())
             .unwrap_or_else(|| PathBuf::from("."));
         Self {
+            user_name: String::new(),
+            user_aliases: String::new(),
             theme: crate::theme::Theme::System,
             library: documents.join("notetaker"),
             model: MODELS[0].into(),

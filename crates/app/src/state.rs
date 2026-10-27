@@ -226,6 +226,21 @@ pub struct AppState {
     llm_configured: bool,
     pub connections: crate::ai::Connections,
     pub chat: crate::chat::Panel,
+    pub tasks_open: bool,
+    pub tasks: Vec<notetaker_core::Task>,
+    pub tasks_busy: bool,
+    pub task_target: Option<(PathBuf, usize)>,
+    pub brief: Option<notetaker_llm::Brief>,
+    pub brief_open: bool,
+    pub save_brief: bool,
+    pub draft_busy: bool,
+    pub draft_cancel: notetaker_llm::Cancellation,
+    pub followup_open: bool,
+    pub followup_text: String,
+    pub followup_path: Option<PathBuf>,
+    pub followup_kind: notetaker_llm::FollowupKind,
+    pub calendar_reminder: Option<notetaker_core::calendar::CalendarEvent>,
+    reminded_events: HashSet<(String, chrono::DateTime<chrono::Utc>)>,
     pub calendar_events: Vec<notetaker_core::calendar::CalendarEvent>,
     pub calendar_secrets: HashMap<String, String>,
     pub calendar_busy: bool,
@@ -288,6 +303,21 @@ impl AppState {
             llm_configured: false,
             connections: crate::ai::Connections::default(),
             chat: Default::default(),
+            tasks_open: false,
+            tasks: Vec::new(),
+            tasks_busy: false,
+            task_target: None,
+            brief: None,
+            brief_open: false,
+            save_brief: true,
+            draft_busy: false,
+            draft_cancel: Default::default(),
+            followup_open: false,
+            followup_text: String::new(),
+            followup_path: None,
+            followup_kind: notetaker_llm::FollowupKind::Team,
+            calendar_reminder: None,
+            reminded_events: HashSet::new(),
             calendar_events: Vec::new(),
             calendar_secrets: HashMap::new(),
             calendar_busy: false,
@@ -384,6 +414,7 @@ impl AppState {
     pub fn select(&mut self, meeting: Meeting) {
         self.flush();
         let path = meeting.path().to_owned();
+        self.tasks_open = false;
         self.selected = Some(path.clone());
         if !self.documents.contains_key(&path) && self.loading.insert(path) {
             self.send(Command::Load(meeting));
@@ -527,6 +558,17 @@ impl AppState {
         self.send(Command::Record(RecordRequest {
             settings,
             title,
+            brief: self
+                .brief
+                .clone()
+                .filter(|brief| {
+                    self.save_brief
+                        && event.as_ref().is_some_and(|event| {
+                            event.link.uid == brief.event.link.uid
+                                && event.start == brief.event.start
+                        })
+                })
+                .map(Box::new),
             event,
             process_id: self.process_id,
             app,
@@ -547,6 +589,103 @@ impl AppState {
         self.record_model = self.settings.model.clone();
         self.record_mode = self.settings.mode;
         self.start_recording();
+    }
+    pub fn refresh_tasks(&mut self) {
+        if self.tasks_busy || !self.ready || self.settings_pending {
+            return;
+        }
+        self.tasks_busy = true;
+        self.send(Command::Tasks {
+            root: self.settings.library.clone(),
+        });
+    }
+    pub fn toggle_task(&mut self, task: notetaker_core::Task, completed: bool) {
+        if self.unsaved() || self.tasks_busy || self.enhancing.is_some() || self.recording.busy() {
+            return;
+        }
+        let meeting = notetaker_core::Library::open(&self.settings.library)
+            .and_then(|library| task.meeting(&library));
+        let meeting = match meeting {
+            Ok(meeting) => meeting,
+            Err(error) => {
+                self.error = Some(error.to_string());
+                return;
+            }
+        };
+        self.tasks_busy = true;
+        self.send(Command::ToggleTask {
+            meeting,
+            task,
+            completed,
+        });
+    }
+    pub fn open_task(&mut self, task: &notetaker_core::Task) {
+        // Task source paths have already been checked by the index reader.
+        if let Ok(library) = notetaker_core::Library::open(&self.settings.library)
+            && let Ok(meeting) = task.meeting(&library)
+        {
+            self.select(meeting);
+            self.tab = Tab::Enhanced;
+            self.task_target = Some((task.path.clone(), task.line));
+        }
+    }
+    pub fn prepare_brief(&mut self, event: notetaker_core::calendar::CalendarEvent) {
+        if self.draft_busy || self.settings_pending || !self.ready {
+            return;
+        }
+        self.brief = None;
+        self.brief_open = true;
+        self.draft_busy = true;
+        self.draft_cancel = Default::default();
+        self.send(Command::Brief {
+            root: self.settings.library.clone(),
+            event,
+            cancel: self.draft_cancel.clone(),
+        });
+    }
+    pub fn prepare_followup(&mut self) {
+        if self.draft_busy
+            || self.unsaved()
+            || self.settings_pending
+            || self.recording.busy()
+            || self.enhancing.is_some()
+        {
+            return;
+        }
+        let Some(document) = self
+            .followup_path
+            .as_ref()
+            .and_then(|path| self.documents.get(path))
+        else {
+            return;
+        };
+        if document.data.enhanced.trim().is_empty() {
+            return;
+        }
+        let meeting = document.data.meeting.clone();
+        self.followup_path = Some(meeting.path().to_owned());
+        self.followup_text.clear();
+        self.draft_busy = true;
+        self.draft_cancel = Default::default();
+        self.send(Command::Followup {
+            meeting,
+            kind: self.followup_kind,
+            cancel: self.draft_cancel.clone(),
+        });
+    }
+    pub fn save_followup(&mut self) {
+        let Some(path) = &self.followup_path else {
+            return;
+        };
+        if let Some(document) = self.documents.get_mut(path) {
+            document.data.notes.push_str(&format!(
+                "\n\n## Черновик сообщения\n\n{}\n",
+                self.followup_text
+            ));
+            document.dirty.notes = true;
+            document.changed();
+            self.flush();
+        }
     }
     pub fn refresh_calendar(&mut self) {
         if self.calendar_busy {
@@ -671,6 +810,7 @@ impl AppState {
         if self.recording.busy()
             || self.enhancing.is_some()
             || self.chat.busy
+            || self.draft_busy
             || self.unsaved()
             || self.settings_pending
         {
@@ -699,6 +839,7 @@ impl AppState {
     pub fn exit(&mut self) {
         self.exit_requested = true;
         self.chat.cancel.cancel();
+        self.draft_cancel.cancel();
         self.recording.request_stop();
         self.flush();
     }
@@ -707,6 +848,7 @@ impl AppState {
             && !self.recording.busy()
             && self.enhancing.is_none()
             && !self.chat.busy
+            && !self.draft_busy
             && !self.downloading
             && !self.unsaved()
             && !self.settings_pending
@@ -725,6 +867,28 @@ impl AppState {
             ));
         }
         self.poll_detection();
+        let now = chrono::Utc::now();
+        if self
+            .calendar_reminder
+            .as_ref()
+            .is_some_and(|event| event.start < now)
+        {
+            self.calendar_reminder = None;
+        }
+        if self.calendar_reminder.is_none() {
+            for event in &self.calendar_events {
+                if !event.all_day
+                    && event.start > now
+                    && event.start <= now + chrono::Duration::minutes(5)
+                    && self
+                        .reminded_events
+                        .insert((event.link.uid.clone(), event.start))
+                {
+                    self.calendar_reminder = Some(event.clone());
+                    break;
+                }
+            }
+        }
         if self.ready
             && !self.settings.calendars.is_empty()
             && !self.exit_requested
@@ -830,6 +994,47 @@ impl AppState {
     }
     fn apply(&mut self, event: Event) {
         match event {
+            Event::Tasks { root, result } => {
+                self.tasks_busy = false;
+                if root == self.settings.library {
+                    match result {
+                        Ok(tasks) => self.tasks = tasks,
+                        Err(error) => self.error = Some(error),
+                    }
+                }
+            }
+            Event::TaskToggled { path, result } => {
+                self.tasks_busy = false;
+                match result {
+                    Ok(data) => {
+                        if let Some(document) = self.documents.get_mut(&path) {
+                            if !document.dirty.enhanced && !document.saving {
+                                document.data.enhanced = data.enhanced;
+                                document.data.revisions.enhanced = data.revisions.enhanced;
+                            }
+                        } else {
+                            self.documents.insert(path, Document::new(*data));
+                        }
+                    }
+                    Err(error) => self.error = Some(error),
+                }
+                self.refresh_tasks();
+            }
+            Event::Brief(result) => {
+                self.draft_busy = false;
+                match result {
+                    Ok(brief) => self.brief = Some(brief),
+                    Err(error) => self.error = Some(error),
+                }
+            }
+            Event::Followup { path, result } => {
+                self.draft_busy = false;
+                self.followup_path = Some(path);
+                match result {
+                    Ok(text) => self.followup_text = text,
+                    Err(error) => self.error = Some(error),
+                }
+            }
             Event::Calendar { generation, result } => {
                 if generation == self.calendar_generation {
                     self.calendar_busy = false;
@@ -1239,6 +1444,8 @@ impl AppState {
                         let changed_library = self.settings.library != settings.library;
                         self.calendar_secrets.clear();
                         self.calendar_events.clear();
+                        self.calendar_reminder = None;
+                        self.reminded_events.clear();
                         self.calendar_busy = false;
                         self.calendar_generation += 1;
                         self.calendar_checked = None;
@@ -1258,6 +1465,10 @@ impl AppState {
                         self.llm_draft = llm;
                         if changed_library {
                             self.chat = Default::default();
+                            self.tasks.clear();
+                            self.brief = None;
+                            self.followup_text.clear();
+                            self.followup_path = None;
                             self.selected = None;
                             self.documents.clear();
                             self.rows.clear();
@@ -1314,6 +1525,22 @@ pub fn edit_segment(transcript: &mut Transcript, id: Uuid, text: String) -> bool
 mod tests {
     use super::*;
     use notetaker_core::{Segment, Source, SpeakerId};
+    #[test]
+    fn task_result_preserves_concurrent_notes_edit() {
+        let (mut state, _, _root, path) = fixture();
+        let document = state.documents.get_mut(&path).unwrap();
+        document.data.notes = "Новая заметка".into();
+        document.dirty.notes = true;
+        let mut data = DocumentData::read(document.data.meeting.clone()).unwrap();
+        data.enhanced = "- [x] Сделать".into();
+        state.apply(Event::TaskToggled {
+            path: path.clone(),
+            result: Ok(Box::new(data)),
+        });
+        assert_eq!(state.documents[&path].data.notes, "Новая заметка");
+        assert!(state.documents[&path].dirty.notes);
+        assert_eq!(state.documents[&path].data.enhanced, "- [x] Сделать");
+    }
     #[test]
     fn import_locks_recording_and_reuses_final_summary_flow() {
         let (mut state, commands, _root, path) = fixture();
@@ -2035,6 +2262,39 @@ mod calendar_tests {
             organizer: None,
         });
         (state, commands)
+    }
+    #[test]
+    fn brief_save_requires_opt_in_and_matching_occurrence() {
+        for (save, shift, expected) in [(true, 0, true), (false, 0, false), (true, 1, false)] {
+            let (mut state, commands) = fixture();
+            let mut event = state.calendar_events[0].clone();
+            event.start += chrono::Duration::days(shift);
+            state.brief = Some(notetaker_llm::Brief {
+                event,
+                text: "Local context".into(),
+                mode: notetaker_core::Mode::Local,
+                warning: None,
+            });
+            state.save_brief = save;
+            state.start_recording();
+            let Command::Record(request) = commands.try_recv().unwrap() else {
+                panic!("record expected")
+            };
+            assert_eq!(request.brief.is_some(), expected);
+        }
+    }
+    #[test]
+    fn calendar_reminds_once_per_occurrence() {
+        let (mut state, _) = fixture();
+        state.calendar_events[0].start = chrono::Utc::now() + chrono::Duration::minutes(4);
+        state.poll();
+        assert!(state.calendar_reminder.is_some());
+        state.calendar_reminder = None;
+        state.poll();
+        assert!(state.calendar_reminder.is_none());
+        state.calendar_events[0].start += chrono::Duration::seconds(1);
+        state.poll();
+        assert!(state.calendar_reminder.is_some());
     }
     #[test]
     fn manual_call_prefill_and_explicit_event_preserve_title_rules() {

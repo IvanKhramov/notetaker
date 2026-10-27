@@ -26,6 +26,10 @@ pub struct NotetakerApp {
     show_import: bool,
     import_path: String,
     show_settings: bool,
+    tasks_all: bool,
+    tasks_mine: bool,
+    tasks_person: String,
+    tasks_by_meeting: bool,
     toasts: VecDeque<(Instant, String)>,
     main_rect: Option<egui::Rect>,
     #[cfg(windows)]
@@ -47,6 +51,10 @@ impl NotetakerApp {
             show_import: false,
             import_path: String::new(),
             show_settings: false,
+            tasks_all: false,
+            tasks_mine: false,
+            tasks_person: String::new(),
+            tasks_by_meeting: false,
             toasts: VecDeque::new(),
             main_rect: None,
             #[cfg(windows)]
@@ -83,6 +91,13 @@ impl NotetakerApp {
         if ui.button("Спросить").clicked() {
             self.state.chat.open(None, String::new());
         }
+        if ui
+            .selectable_label(self.state.tasks_open, "Задачи")
+            .clicked()
+        {
+            self.state.tasks_open = true;
+            self.state.refresh_tasks();
+        }
         let search = ui.add(
             egui::TextEdit::singleline(&mut self.state.query)
                 .id_salt("library_search")
@@ -117,6 +132,7 @@ impl NotetakerApp {
                 }
             });
         let mut start_event = None;
+        let mut brief_event = None;
         egui::CollapsingHeader::new("Сегодня")
             .default_open(true)
             .show(ui, |ui| {
@@ -164,6 +180,12 @@ impl NotetakerApp {
                                 {
                                     start_event = Some(event.clone());
                                 }
+                                if ui
+                                    .add_enabled(!self.state.draft_busy, egui::Button::new("Бриф"))
+                                    .clicked()
+                                {
+                                    brief_event = Some(event.clone());
+                                }
                                 if let Some(url) = &event.link.call_url {
                                     ui.hyperlink_to("Открыть звонок", url);
                                 }
@@ -175,6 +197,9 @@ impl NotetakerApp {
                         ui.small(&self.state.calendar_status);
                     });
             });
+        if let Some(event) = brief_event {
+            self.state.prepare_brief(event);
+        }
         if let Some(event) = start_event {
             self.state.start_event(event);
         }
@@ -257,6 +282,126 @@ impl NotetakerApp {
             self.state.select(meeting);
         }
     }
+    fn draft_panels(&mut self, root: &mut egui::Ui) {
+        let ctx = root.ctx().clone();
+        if let Some(event) = self.state.calendar_reminder.clone() {
+            egui::Window::new("Скоро встреча")
+                .anchor(egui::Align2::RIGHT_BOTTOM, [-16.0, -16.0])
+                .collapsible(false)
+                .show(&ctx, |ui| {
+                    ui.label(format!(
+                        "{} в {}",
+                        event.link.title,
+                        event.start.with_timezone(&chrono::Local).format("%H:%M")
+                    ));
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(!self.state.draft_busy, egui::Button::new("Бриф"))
+                            .clicked()
+                        {
+                            self.state.prepare_brief(event.clone());
+                            self.state.calendar_reminder = None;
+                        }
+                        if ui.button("Закрыть").clicked() {
+                            self.state.calendar_reminder = None;
+                        }
+                    });
+                });
+        }
+        if self.state.brief_open {
+            egui::Panel::right("premeeting_brief")
+                .resizable(true)
+                .default_size(380.0)
+                .show(root, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.heading("Бриф");
+                        if ui.button("Закрыть").clicked() {
+                            self.state.brief_open = false;
+                        }
+                    });
+                    ui.checkbox(
+                        &mut self.state.save_brief,
+                        "Добавить в заметки при начале записи",
+                    );
+                    if self.state.draft_busy {
+                        ui.spinner();
+                        if ui.button("Отменить").clicked() {
+                            self.state.draft_cancel.cancel();
+                        }
+                    }
+                    if let Some(brief) = &self.state.brief {
+                        ui.strong(&brief.event.link.title);
+                        if brief.mode == Mode::Local {
+                            ui.small("Local: новая запись с этим брифом будет Local");
+                        }
+                        if let Some(warning) = &brief.warning {
+                            ui.small(warning);
+                        }
+                        egui::ScrollArea::vertical()
+                            .id_salt("brief_text")
+                            .show(ui, |ui| {
+                                CommonMarkViewer::new().show(ui, &mut self.cache, &brief.text);
+                            });
+                    }
+                });
+        }
+        if self.state.followup_open {
+            let mut open = true;
+            egui::Window::new("Черновик сообщения")
+                .open(&mut open)
+                .default_size([650.0, 500.0])
+                .show(&ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(
+                            &mut self.state.followup_kind,
+                            notetaker_llm::FollowupKind::Team,
+                            "В команду",
+                        );
+                        ui.selectable_value(
+                            &mut self.state.followup_kind,
+                            notetaker_llm::FollowupKind::Client,
+                            "Клиенту",
+                        );
+                        if ui
+                            .add_enabled(
+                                !self.state.draft_busy && !self.state.unsaved(),
+                                egui::Button::new("Создать черновик"),
+                            )
+                            .clicked()
+                        {
+                            self.state.prepare_followup();
+                        }
+                    });
+                    if self.state.draft_busy {
+                        ui.spinner();
+                        if ui.button("Отменить").clicked() {
+                            self.state.draft_cancel.cancel();
+                        }
+                    }
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.state.followup_text)
+                            .desired_rows(18)
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.button("Копировать").clicked() {
+                            ctx.copy_text(self.state.followup_text.clone());
+                        }
+                        if ui
+                            .add_enabled(
+                                !self.state.draft_busy
+                                    && !self.state.followup_text.trim().is_empty(),
+                                egui::Button::new("Сохранить в заметку"),
+                            )
+                            .clicked()
+                        {
+                            self.state.save_followup();
+                        }
+                    });
+                });
+            self.state.followup_open = open;
+        }
+    }
     fn recording_bar(&mut self, ui: &mut egui::Ui) {
         let p = Palette::of(ui);
         theme::bar(p).show(ui, |ui| {
@@ -293,6 +438,156 @@ impl NotetakerApp {
             });
         });
     }
+    fn tasks_screen(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Задачи");
+        ui.horizontal_wrapped(|ui| {
+            ui.selectable_value(&mut self.tasks_all, false, "Открытые");
+            ui.selectable_value(&mut self.tasks_all, true, "Все");
+            ui.checkbox(&mut self.tasks_mine, "Мои");
+            ui.checkbox(&mut self.tasks_by_meeting, "По встречам");
+            if ui
+                .add_enabled(!self.state.tasks_busy, egui::Button::new("Обновить"))
+                .clicked()
+            {
+                self.state.refresh_tasks();
+            }
+        });
+        let mut people: Vec<_> = self
+            .state
+            .tasks
+            .iter()
+            .map(|task| task.owner.clone())
+            .filter(|s| !s.is_empty())
+            .collect();
+        people.sort();
+        people.dedup();
+        egui::ComboBox::from_id_salt("task_person")
+            .selected_text(if self.tasks_person.is_empty() {
+                "Все ответственные"
+            } else {
+                &self.tasks_person
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.tasks_person, String::new(), "Все ответственные");
+                for person in people {
+                    ui.selectable_value(&mut self.tasks_person, person.clone(), person);
+                }
+            });
+        if self.tasks_mine
+            && self.state.settings.user_name.trim().is_empty()
+            && self.state.settings.user_aliases.trim().is_empty()
+        {
+            ui.label("Укажите «Как вас зовут» в настройках");
+        }
+        let names: Vec<_> = std::iter::once(self.state.settings.user_name.as_str())
+            .chain(self.state.settings.user_aliases.split([',', ';', '\n']))
+            .collect();
+        let mut tasks: Vec<_> = self
+            .state
+            .tasks
+            .iter()
+            .filter(|task| {
+                (self.tasks_all || !task.completed)
+                    && (self.tasks_person.is_empty()
+                        || notetaker_core::person_matches(&task.owner, &self.tasks_person))
+                    && (!self.tasks_mine
+                        || names
+                            .iter()
+                            .any(|name| notetaker_core::person_matches(&task.owner, name)))
+            })
+            .collect();
+        let group = |task: &notetaker_core::Task| {
+            if self.tasks_by_meeting {
+                task.meeting_title.clone()
+            } else if task.owner.is_empty() {
+                "Без ответственного".into()
+            } else {
+                task.owner.clone()
+            }
+        };
+        tasks.sort_by_key(|task| {
+            (
+                group(task),
+                self.tasks_by_meeting.then(|| task.path.clone()),
+                task.due.is_none(),
+                task.due,
+                task.path.clone(),
+                task.line,
+            )
+        });
+        let can_toggle = !self.state.tasks_busy
+            && !self.state.unsaved()
+            && !self.state.recording.busy()
+            && self.state.enhancing.is_none();
+        let mut toggle = None;
+        let mut open = None;
+        egui::ScrollArea::vertical()
+            .id_salt("all_tasks")
+            .show(ui, |ui| {
+                let mut previous = None;
+                for task in tasks {
+                    let title = group(task);
+                    let key = (
+                        title.clone(),
+                        self.tasks_by_meeting.then(|| task.path.clone()),
+                    );
+                    if previous.as_ref() != Some(&key) {
+                        ui.add_space(12.0);
+                        ui.strong(&title);
+                        previous = Some(key);
+                    }
+                    ui.push_id((&task.path, task.line), |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            let mut completed = task.completed;
+                            if ui
+                                .add_enabled(
+                                    can_toggle,
+                                    egui::Checkbox::without_text(&mut completed),
+                                )
+                                .changed()
+                            {
+                                toggle = Some((task.clone(), completed));
+                            }
+                            let overdue = !task.completed
+                                && task
+                                    .due
+                                    .is_some_and(|date| date < chrono::Local::now().date_naive());
+                            let label = RichText::new(&task.text);
+                            if ui
+                                .link(if overdue {
+                                    label.color(egui::Color32::RED)
+                                } else {
+                                    label
+                                })
+                                .clicked()
+                            {
+                                open = Some(task.clone());
+                            }
+                            ui.small(format!(
+                                "{} · {} · {}:{}",
+                                task.owner,
+                                task.due.map_or_else(
+                                    || task.due_text.clone(),
+                                    |date| date.format("%d.%m.%Y").to_string()
+                                ),
+                                task.meeting_title,
+                                task.line
+                            ));
+                        });
+                    });
+                }
+                if self.state.tasks_busy {
+                    ui.spinner();
+                }
+            });
+        if let Some((task, completed)) = toggle {
+            self.state.toggle_task(task, completed);
+        }
+        if let Some(task) = open {
+            self.enhanced_preview = false;
+            self.state.open_task(&task);
+        }
+    }
     fn meeting(&mut self, ui: &mut egui::Ui) {
         let Some(path) = self.state.selected.clone() else {
             ui.add_space(60.0);
@@ -321,6 +616,27 @@ impl NotetakerApp {
                 document.data.meta.title.clone(),
             );
         }
+        if self
+            .state
+            .documents
+            .get(&path)
+            .is_some_and(|doc| !doc.data.enhanced.trim().is_empty())
+            && ui
+                .add_enabled(
+                    can_enhance && !self.state.draft_busy,
+                    egui::Button::new("Черновик сообщения"),
+                )
+                .clicked()
+        {
+            self.state.followup_open = true;
+            self.state.followup_path = Some(path.clone());
+        }
+        let target_line = self
+            .state
+            .task_target
+            .as_ref()
+            .filter(|(target, _)| target == &path)
+            .map(|(_, line)| *line);
         let global_allowed = !self.state.unsaved();
         let speaker_busy = self.state.documents.values().any(|doc| doc.speaker_ui.busy);
         let Some(document) = self.state.documents.get_mut(&path) else {
@@ -584,18 +900,21 @@ impl NotetakerApp {
                                 &path,
                                 &mut self.image_viewer,
                             );
-                        } else if ui
-                            .add(
-                                egui::TextEdit::multiline(&mut document.data.enhanced)
-                                    .id_salt(("enhanced_edit", &path))
-                                    .frame(egui::Frame::NONE)
-                                    .desired_width(f32::INFINITY)
-                                    .desired_rows(24),
-                            )
-                            .changed()
-                        {
-                            document.dirty.enhanced = true;
-                            document.changed();
+                        } else {
+                            let id = egui::Id::unique(("enhanced_edit", &path));
+                            let cursor = target_line.map(|line|document.data.enhanced.split_inclusive('\n').take(line.saturating_sub(1)).map(|line|line.chars().count()).sum::<usize>());
+                            if let Some(cursor) = cursor {
+                                let mut state = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
+                                state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(cursor))));
+                                state.store(ui.ctx(), id);
+                            }
+                            let output = egui::TextEdit::multiline(&mut document.data.enhanced).id(id).frame(egui::Frame::NONE).desired_width(f32::INFINITY).desired_rows(24).show(ui);
+                            if let Some(cursor) = cursor {
+                                output.response.request_focus();
+                                ui.scroll_to_rect(output.galley.pos_from_cursor(egui::text::CCursor::new(cursor)).translate(output.galley_pos.to_vec2()), Some(egui::Align::Center));
+                                self.state.task_target = None;
+                            }
+                            if output.response.changed() { document.dirty.enhanced = true; document.changed(); }
                         }
                     });
             }
@@ -725,6 +1044,11 @@ impl NotetakerApp {
                         }
                     });
                 });
+                ui.label("Как вас зовут");
+                ui.text_edit_singleline(&mut settings.user_name);
+                ui.label("Алиасы (через запятую)");
+                ui.text_edit_singleline(&mut settings.user_aliases);
+                ui.small("Для фильтра «Мои» и имени собственного спикера по умолчанию.");
                 ui.label("Библиотека (полный путь)");
                 let mut library = settings.library.to_string_lossy().into_owned();
                 if ui.text_edit_singleline(&mut library).changed() { settings.library = library.into(); }
@@ -1162,10 +1486,17 @@ impl eframe::App for NotetakerApp {
                 .frame(egui::Frame::new().fill(p.bg).inner_margin(16))
                 .show(ui, |ui| self.recording_bar(ui));
         }
+        self.draft_panels(ui);
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(p.bg).inner_margin(24))
             .show(ui, |ui| {
-                ui.add_enabled_ui(!self.state.settings_pending, |ui| self.meeting(ui));
+                ui.add_enabled_ui(!self.state.settings_pending, |ui| {
+                    if self.state.tasks_open {
+                        self.tasks_screen(ui);
+                    } else {
+                        self.meeting(ui);
+                    }
+                });
             });
         if let Some(uri) = self.image_viewer.clone() {
             let mut open = true;
