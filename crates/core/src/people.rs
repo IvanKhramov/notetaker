@@ -61,6 +61,17 @@ pub struct PeopleEdits {
 }
 impl PeopleEdits {
     pub fn merge(&mut self, from: &Person, into: &Person) {
+        self.names
+            .entry(into.id.clone())
+            .or_insert_with(|| into.name.clone());
+        self.aliases
+            .entry(into.id.clone())
+            .or_default()
+            .extend(from.aliases.iter().cloned().chain([from.name.clone()]));
+        for key in from.identities.iter().chain(&into.identities) {
+            self.hidden.remove(key);
+        }
+        self.set_hidden(into, into.hidden);
         for key in &from.identities {
             self.merges.insert(key.clone(), into.id.clone());
         }
@@ -68,6 +79,15 @@ impl PeopleEdits {
             if *target == from.id {
                 target.clone_from(&into.id);
             }
+        }
+    }
+    pub fn set_hidden(&mut self, person: &Person, hidden: bool) {
+        self.hidden.remove(&person.id);
+        for key in &person.identities {
+            self.hidden.remove(key);
+        }
+        if hidden {
+            self.hidden.insert(person.id.clone());
         }
     }
     pub fn rename(&mut self, person: &Person, name: &str) {

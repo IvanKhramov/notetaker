@@ -263,3 +263,32 @@ fn carry_insertion_is_explicit_revision_checked_and_preserves_local_policy() {
     assert!(next.read_notes().unwrap().contains("LOCAL TASK"));
     assert!(next.read_notes().unwrap().ends_with("Внешняя правка"));
 }
+
+#[test]
+fn user_edits_follow_a_new_email_and_can_be_unhidden() {
+    let dir = tempfile::tempdir().unwrap();
+    let library = Library::open(dir.path()).unwrap();
+    add(&library, "Без календаря", -1, None, "Анна", "", None);
+    let person = library.people(false, "", "").unwrap().pop().unwrap();
+    let mut edits = library.read_people_edits().unwrap();
+    edits.rename(&person, "Анна Новая");
+    edits.set_hidden(&person, true);
+    library.write_people_edits(&edits).unwrap();
+    add(
+        &library,
+        "С календарём",
+        0,
+        Some("uid"),
+        "Анна",
+        "a@x",
+        None,
+    );
+    let people = library.people(false, "", "").unwrap();
+    assert_eq!(people.len(), 1);
+    assert_eq!(people[0].name, "Анна Новая");
+    assert!(people[0].hidden);
+    assert_eq!(people[0].id, "email:a@x");
+    edits.set_hidden(&people[0], false);
+    library.write_people_edits(&edits).unwrap();
+    assert!(!library.people(false, "", "").unwrap()[0].hidden);
+}

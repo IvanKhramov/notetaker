@@ -473,11 +473,7 @@ impl Panel {
                     })
                     .clicked()
                 {
-                    if page.person.hidden {
-                        edits.hidden.remove(&page.person.id);
-                    } else {
-                        edits.hidden.insert(page.person.id.clone());
-                    }
+                    edits.set_hidden(&page.person, !page.person.hidden);
                     changed = Some(edits.clone());
                 }
                 egui::ComboBox::from_id_salt("merge-person")
