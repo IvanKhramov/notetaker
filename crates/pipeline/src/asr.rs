@@ -63,7 +63,7 @@ impl AsrConfig {
             path.into()
         } else {
             let name = format!("notetaker-asr{}", std::env::consts::EXE_SUFFIX);
-            let exe = std::env::current_exe()?;
+            let exe = notetaker_runtime::paths::executable()?;
             let sibling = exe.with_file_name(&name);
             let parent = exe.parent().and_then(|p| p.parent()).map(|p| p.join(&name));
             if sibling.is_file() {

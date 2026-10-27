@@ -39,7 +39,7 @@ impl CancellationHandle {
 
 /// Owns and reaps a worker. Dropping the client also terminates a stuck worker.
 /// One deadline covers serialization, stdin writes and all responses (including
-/// progress). stderr is inherited, never parsed as JSON.
+/// progress). stderr is drained into privacy-filtered diagnostics, never JSON.
 /// No ML dependency is linked into the caller.
 pub struct AsrClient {
     child: Child,
@@ -61,8 +61,15 @@ impl AsrClient {
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(if notetaker_runtime::diagnostics::enabled() {
+                Stdio::piped()
+            } else {
+                Stdio::inherit()
+            })
             .spawn()?;
+        if let Some(stderr) = child.stderr.take() {
+            notetaker_runtime::diagnostics::capture_stderr(stderr);
+        }
         let mut stdin = child.stdin.take().expect("piped stdin");
         let (requests_tx, requests_rx) = mpsc::channel();
         let (written_tx, written) = mpsc::sync_channel(1);

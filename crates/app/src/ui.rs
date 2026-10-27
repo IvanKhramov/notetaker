@@ -32,6 +32,7 @@ pub struct NotetakerApp {
     tasks_by_meeting: bool,
     toasts: VecDeque<(Instant, String, Option<std::path::PathBuf>)>,
     main_rect: Option<egui::Rect>,
+    maintenance: crate::maintenance::Maintenance,
     #[cfg(windows)]
     desktop: Option<crate::desktop::Desktop>,
     #[cfg(windows)]
@@ -57,6 +58,7 @@ impl NotetakerApp {
             tasks_by_meeting: false,
             toasts: VecDeque::new(),
             main_rect: None,
+            maintenance: Default::default(),
             #[cfg(windows)]
             desktop: None,
             #[cfg(windows)]
@@ -1103,6 +1105,7 @@ impl NotetakerApp {
         egui::Window::new("Настройки").open(&mut open).default_width(640.0).default_height(600.0).resizable(true).show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 let settings = &mut self.state.settings_draft;
+                self.maintenance.settings(ui, settings);
                 ui.horizontal(|ui| {
                     ui.label("Тема:");
                     egui::ComboBox::from_id_salt("theme").selected_text(settings.theme.label()).show_ui(ui, |ui| {
@@ -1464,6 +1467,9 @@ impl NotetakerApp {
             }
         }
         if let Some(desktop) = &mut self.desktop {
+            if desktop.set_recording(self.state.recording.busy()).is_err() {
+                notetaker_runtime::diagnostics::event("tray icon update failed");
+            }
             if self.applied_hotkey != self.state.settings.hotkey {
                 self.applied_hotkey = self.state.settings.hotkey.clone();
                 if let Err(error) = desktop.set_hotkey(&self.applied_hotkey) {
@@ -1492,6 +1498,19 @@ impl eframe::App for NotetakerApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // eframe calls this even when the root window is hidden in the tray.
         self.state.poll();
+        if self.maintenance.tick(
+            ctx,
+            self.state.ready && self.state.settings.check_updates,
+            !self.state.ready
+                || self.state.recording.busy()
+                || self.state.downloading
+                || self.state.settings_pending
+                || self.state.enhancing.is_some()
+                || self.state.chat.busy
+                || self.state.unsaved(),
+        ) {
+            self.state.exit();
+        }
         self.state.settings.theme.apply(ctx);
         ctx.input(|input| {
             if !input.viewport().minimized.unwrap_or(false)
@@ -1531,6 +1550,16 @@ impl eframe::App for NotetakerApp {
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.maintenance.dialogs(
+            &ctx,
+            !self.state.ready
+                || self.state.recording.busy()
+                || self.state.downloading
+                || self.state.settings_pending
+                || self.state.enhancing.is_some()
+                || self.state.chat.busy
+                || self.state.unsaved(),
+        );
         let dropped = ctx.input_mut(|input| std::mem::take(&mut input.raw.dropped_files));
         if self.show_import {
             if let Some(file) = dropped.first() {

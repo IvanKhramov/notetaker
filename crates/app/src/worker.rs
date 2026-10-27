@@ -1063,8 +1063,10 @@ pub fn asr_binary() -> Result<PathBuf> {
         ensure!(path.is_file(), "NOTETAKER_ASR_BIN не указывает на файл");
         return Ok(path);
     }
-    let path = std::env::current_exe()?
-        .with_file_name(format!("notetaker-asr{}", std::env::consts::EXE_SUFFIX));
+    let path = notetaker_runtime::paths::current_sibling(&format!(
+        "notetaker-asr{}",
+        std::env::consts::EXE_SUFFIX
+    ))?;
     ensure!(
         path.is_file(),
         "Не найден {}. Поместите notetaker-asr рядом с приложением (соберите notetaker-asr-worker).",
@@ -1082,7 +1084,9 @@ fn download(model: &str, events: &Sender<Event>) -> Result<()> {
     let stderr = process.stderr.take().context("Нет stderr загрузчика")?;
     let read_result = (|| -> Result<()> {
         for line in BufReader::new(stderr).lines() {
-            let _ = events.send(Event::DownloadProgress(line?));
+            let line = line?;
+            notetaker_runtime::diagnostics::worker_stderr(&line);
+            let _ = events.send(Event::DownloadProgress(line));
         }
         Ok(())
     })();

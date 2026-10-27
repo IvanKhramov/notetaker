@@ -41,6 +41,7 @@ pub struct Settings {
     pub calendars: Vec<notetaker_llm::calendar::Subscription>,
     pub calendar_timezone: String,
     pub mcp_exclude_local: bool,
+    pub check_updates: bool,
 }
 
 impl Default for Settings {
@@ -72,6 +73,7 @@ impl Default for Settings {
             calendars: Vec::new(),
             calendar_timezone: "Europe/Moscow".into(),
             mcp_exclude_local: true,
+            check_updates: true,
         }
     }
 }
@@ -303,6 +305,7 @@ mod tests {
         assert!(!settings.voice_library);
         assert_eq!(settings.speakers, None);
         assert!(settings.detect_calls);
+        assert!(settings.check_updates);
         assert!(settings.detect_browsers);
         assert!(settings.detect_any_microphone);
         assert!(settings.call_apps.is_empty());

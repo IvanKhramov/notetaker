@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+notetaker-runtime = { path = "../runtime" }
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["now"] }
 hound = "3.5"

@@ -37,7 +37,7 @@ fn worker_binary() -> Result<PathBuf> {
         return Ok(path.into());
     }
     let name = format!("notetaker-asr{}", std::env::consts::EXE_SUFFIX);
-    let sibling = std::env::current_exe()?.with_file_name(&name);
+    let sibling = notetaker_runtime::paths::current_sibling(&name)?;
     Ok(if sibling.is_file() {
         sibling
     } else {

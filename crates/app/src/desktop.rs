@@ -16,7 +16,8 @@ pub enum Action {
     Quit,
 }
 pub struct Desktop {
-    _tray: TrayIcon,
+    tray: TrayIcon,
+    recording: bool,
     manager: GlobalHotKeyManager,
     hotkey: Option<HotKey>,
     events: Receiver<Action>,
@@ -28,20 +29,13 @@ impl Desktop {
         let toggle = MenuItem::new("Начать / остановить запись", true, None);
         let quit = MenuItem::new("Выход", true, None);
         menu.append_items(&[&show, &toggle, &quit])?;
-        let rgba: Vec<u8> = (0..32 * 32)
-            .flat_map(|i| {
-                let x = i % 32;
-                let y = i / 32;
-                if (6..26).contains(&x) && (6..26).contains(&y) {
-                    [44, 180, 120, 255]
-                } else {
-                    [0, 0, 0, 0]
-                }
-            })
-            .collect();
         let tray = TrayIconBuilder::new()
             .with_tooltip("notetaker")
-            .with_icon(Icon::from_rgba(rgba, 32, 32)?)
+            .with_icon(Icon::from_rgba(
+                crate::icon::image(false).into_raw(),
+                32,
+                32,
+            )?)
             .with_menu(Box::new(menu))
             .build()?;
         let manager = GlobalHotKeyManager::new()?;
@@ -86,7 +80,8 @@ impl Desktop {
             }
         }));
         Ok(Self {
-            _tray: tray,
+            tray,
+            recording: false,
             manager,
             hotkey: None,
             events,
@@ -106,6 +101,17 @@ impl Desktop {
     }
     pub fn poll(&self) -> Vec<Action> {
         self.events.try_iter().collect()
+    }
+    pub fn set_recording(&mut self, recording: bool) -> Result<()> {
+        if self.recording != recording {
+            self.tray.set_icon(Some(Icon::from_rgba(
+                crate::icon::image(recording).into_raw(),
+                32,
+                32,
+            )?))?;
+            self.recording = recording;
+        }
+        Ok(())
     }
 }
 impl Drop for Desktop {

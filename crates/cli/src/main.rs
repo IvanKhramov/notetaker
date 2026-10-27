@@ -7,6 +7,7 @@ mod cmd_mcp;
 mod cmd_probe;
 mod cmd_record;
 mod cmd_tasks;
+mod cmd_self_update;
 mod cmd_transcribe;
 mod cmd_watch;
 
@@ -23,6 +24,8 @@ struct Args {
 enum Command {
     /// List action items across meetings.
     Tasks(cmd_tasks::Args),
+    #[command(hide = true)]
+    SelfUpdateApply(cmd_self_update::Args),
     /// Read-only MCP server over stdio.
     Mcp(cmd_mcp::Options),
     /// Export a transcript or speaker timing log to stdout.
@@ -44,6 +47,7 @@ enum Command {
 fn main() -> anyhow::Result<()> {
     match Args::parse().command {
         Command::Tasks(args) => cmd_tasks::run(args),
+        Command::SelfUpdateApply(args) => cmd_self_update::run(args),
         Command::Mcp(args) => cmd_mcp::run(args),
         Command::Export(args) => cmd_export::run(args),
         Command::Import(args) => cmd_import::run(args),
