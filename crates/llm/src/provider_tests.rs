@@ -35,6 +35,8 @@ impl Mock {
                     Err(error) => panic!("mock server did not receive a request: {error}"),
                 }
             };
+            // Windows sockets inherit non-blocking mode from the listener.
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
