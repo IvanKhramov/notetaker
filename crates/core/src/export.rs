@@ -108,3 +108,62 @@ impl Transcript {
         Ok(output)
     }
 }
+
+impl crate::Meeting {
+    pub fn export_summary(&self, text: &str) -> Result<std::path::PathBuf> {
+        self.write_export("summary.md", text)
+    }
+    pub fn export_transcript(
+        &self,
+        transcript: &Transcript,
+        format: ExportFormat,
+    ) -> Result<std::path::PathBuf> {
+        self.write_export(
+            &format!("transcript.{}", format.extension()),
+            &transcript.export(format)?,
+        )
+    }
+    fn write_export(&self, suffix: &str, text: &str) -> Result<std::path::PathBuf> {
+        // The folder name is immutable even when the meeting title changes.
+        let folder = self
+            .path()
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+        let slug = folder.splitn(3, '_').nth(2).unwrap_or(&folder);
+        let path = self.path().join(format!("{slug}.{suffix}"));
+        crate::storage::atomic_write(&path, text.as_bytes())?;
+        Ok(path)
+    }
+}
+
+#[cfg(test)]
+mod file_tests {
+    #[test]
+    fn export_replaces_the_same_file_per_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = crate::Library::open(dir.path()).unwrap();
+        let meeting = library
+            .create_meeting(crate::MeetingMeta::new("Example", chrono::Utc::now()))
+            .unwrap();
+        let first = meeting.export_summary("old").unwrap();
+        assert_eq!(first, meeting.export_summary("new").unwrap());
+        assert_eq!(std::fs::read_to_string(first).unwrap(), "new");
+        let transcript = crate::Transcript::default();
+        let srt = meeting
+            .export_transcript(&transcript, crate::ExportFormat::Srt)
+            .unwrap();
+        assert_eq!(
+            srt,
+            meeting
+                .export_transcript(&transcript, crate::ExportFormat::Srt)
+                .unwrap()
+        );
+        assert!(
+            srt.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with(".transcript.srt")
+        );
+    }
+}

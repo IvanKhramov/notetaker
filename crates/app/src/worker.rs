@@ -2,7 +2,7 @@
 //! own threads. The UI never waits for a worker or owns a RecordingSession.
 use std::{
     fs,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader},
     path::{Path, PathBuf},
     process::{Command as Process, Stdio},
     sync::mpsc::{self, Receiver, Sender},
@@ -195,8 +195,9 @@ pub enum Command {
         inputs: Vec<ImageInput>,
         anchor: InsertAt,
     },
+    Reveal(PathBuf),
     Export {
-        folder: PathBuf,
+        meeting: Meeting,
         text: String,
     },
     List {
@@ -269,6 +270,7 @@ pub enum Event {
         results: Vec<Result<String, String>>,
     },
     Exported(Result<PathBuf, String>),
+    Revealed(Result<(), String>),
     Boot {
         settings: Settings,
         llm: LlmSettings,
@@ -503,19 +505,13 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                         results,
                     });
                 }
-                Command::Export { folder, text } => {
-                    let result = (|| -> Result<PathBuf> {
-                        let path = folder.join(format!(
-                            "summary-{}.md",
-                            Utc::now().format("%Y%m%d-%H%M%S-%f")
-                        ));
-                        let mut file = fs::File::create_new(&path)?;
-                        file.write_all(text.as_bytes())?;
-                        file.sync_all()?;
-                        Ok(path)
-                    })()
-                    .map_err(error_text);
-                    let _ = events.send(Event::Exported(result));
+                Command::Reveal(path) => {
+                    let _ = events.send(Event::Revealed(reveal_file(&path).map_err(error_text)));
+                }
+                Command::Export { meeting, text } => {
+                    let _ = events.send(Event::Exported(
+                        meeting.export_summary(&text).map_err(|e| e.to_string()),
+                    ));
                 }
                 Command::List {
                     root,
@@ -600,20 +596,9 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                     transcript,
                     format,
                 } => {
-                    let result = (|| -> Result<PathBuf> {
-                        let text = transcript.export(format)?;
-                        let path = meeting.path().join(format!(
-                            "transcript-{}.{}",
-                            Utc::now().format("%Y%m%d-%H%M%S-%f"),
-                            format.extension()
-                        ));
-                        let mut temporary = tempfile::NamedTempFile::new_in(meeting.path())?;
-                        temporary.write_all(text.as_bytes())?;
-                        temporary.as_file().sync_all()?;
-                        temporary.persist_noclobber(&path).map_err(|e| e.error)?;
-                        Ok(path)
-                    })()
-                    .map_err(error_text);
+                    let result = meeting
+                        .export_transcript(&transcript, format)
+                        .map_err(|e| e.to_string());
                     let _ = events.send(Event::Exported(result));
                 }
                 Command::Inventory => {
@@ -1027,6 +1012,31 @@ fn record(request: RecordRequest, import_file: Option<PathBuf>, events: &Sender<
         document,
         error: result.err().map(error_text),
     });
+}
+
+fn reveal_file(path: &Path) -> Result<()> {
+    #[cfg(windows)]
+    let mut command = {
+        let mut command = Process::new("explorer.exe");
+        command.arg(format!("/select,{}", path.display()));
+        command
+    };
+    #[cfg(not(windows))]
+    let mut command = {
+        #[cfg(target_os = "macos")]
+        let mut command = Process::new("open");
+        #[cfg(not(target_os = "macos"))]
+        let mut command = Process::new("xdg-open");
+        command.arg(path.parent().context("Нет папки файла")?);
+        command
+    };
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("Не удалось открыть папку")?;
+    Ok(())
 }
 
 fn default_self_name(meeting: &Meeting, name: &str) -> Result<()> {

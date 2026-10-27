@@ -281,6 +281,7 @@ pub struct AppState {
     pub download_messages: VecDeque<String>,
     pub error: Option<String>,
     pub warnings: Vec<String>,
+    pub exported: VecDeque<PathBuf>,
     pub status: String,
     pub exit_requested: bool,
     tx: Sender<Command>,
@@ -358,6 +359,7 @@ impl AppState {
             download_messages: VecDeque::new(),
             error: None,
             warnings: Vec::new(),
+            exported: VecDeque::new(),
             status: "Открываем библиотеку…".into(),
             exit_requested: false,
             tx,
@@ -1257,10 +1259,9 @@ impl AppState {
                 }
                 self.refresh();
             }
+            Event::Revealed(result) => { if let Err(error) = result { self.error = Some(error); } }
             Event::Exported(result) => match result {
-                Ok(path) => self
-                    .warnings
-                    .push(format!("Экспорт сохранён: {}", path.display())),
+                Ok(path) => self.exported.push_back(path),
                 Err(error) => self.error = Some(error),
             },
             Event::Inventory(result) => {

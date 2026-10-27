@@ -30,7 +30,7 @@ pub struct NotetakerApp {
     tasks_mine: bool,
     tasks_person: String,
     tasks_by_meeting: bool,
-    toasts: VecDeque<(Instant, String)>,
+    toasts: VecDeque<(Instant, String, Option<std::path::PathBuf>)>,
     main_rect: Option<egui::Rect>,
     #[cfg(windows)]
     desktop: Option<crate::desktop::Desktop>,
@@ -777,6 +777,19 @@ impl NotetakerApp {
             && !self.state.settings_pending;
         ui.add_enabled_ui(!locked && !speaker_busy, |ui| {
             ui.menu_button("Экспорт", |ui| {
+                if ui
+                    .add_enabled(
+                        !document.data.enhanced.is_empty(),
+                        egui::Button::new("Конспект Markdown"),
+                    )
+                    .clicked()
+                {
+                    export = Some(Command::Export {
+                        meeting: document.data.meeting.clone(),
+                        text: document.data.enhanced.clone(),
+                    });
+                    ui.close();
+                }
                 for (format, label) in [
                     (notetaker_core::ExportFormat::Md, "Транскрипт Markdown"),
                     (notetaker_core::ExportFormat::Srt, "Субтитры SRT"),
@@ -793,7 +806,7 @@ impl NotetakerApp {
                         ui.close();
                     }
                 }
-                ui.weak("Копия сохраняется в папке встречи");
+                ui.weak("Файл в папке встречи обновляется при повторном экспорте");
             });
         });
         if self.state.tab == Tab::Enhanced {
@@ -840,14 +853,10 @@ impl NotetakerApp {
                                 );
                             }
                             ui.add_enabled_ui(document.generation.is_none(), |ui| {
-                                if theme::button(ui, "Сохранить .md", ButtonStyle::Primary)
-                                    .on_hover_text("Сохранить копию конспекта в папку встречи")
+                                if theme::button(ui, "Показать в папке", ButtonStyle::Secondary)
                                     .clicked()
                                 {
-                                    export = Some(Command::Export {
-                                        folder: path.clone(),
-                                        text: document.data.enhanced.clone(),
-                                    });
+                                    export = Some(Command::Reveal(path.join("enhanced.md")));
                                 }
                             });
                         });
@@ -947,10 +956,18 @@ impl NotetakerApp {
             if self.toasts.len() == 5 {
                 self.toasts.pop_front();
             }
-            self.toasts.push_back((Instant::now(), text));
+            self.toasts.push_back((Instant::now(), text, None));
+        }
+        for path in self.state.exported.drain(..) {
+            if self.toasts.len() == 5 {
+                self.toasts.pop_front();
+            }
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            self.toasts
+                .push_back((Instant::now(), format!("Файл обновлён: {name}"), Some(path)));
         }
         self.toasts
-            .retain(|(at, _)| at.elapsed() < Duration::from_secs(6));
+            .retain(|(at, _, _)| at.elapsed() < Duration::from_secs(6));
         if self.toasts.is_empty() && self.state.error.is_none() {
             return;
         }
@@ -959,10 +976,19 @@ impl NotetakerApp {
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 ui.set_width(340.0);
-                for (_, text) in &self.toasts {
+                let mut reveal = None;
+                for (_, text, path) in &self.toasts {
                     theme::bar(Palette::of(ui)).show(ui, |ui| {
                         ui.label(text);
+                        if let Some(path) = path
+                            && ui.button("Показать в папке").clicked()
+                        {
+                            reveal = Some(path.clone());
+                        }
                     });
+                }
+                if let Some(path) = reveal {
+                    self.state.send(Command::Reveal(path));
                 }
                 if let Some(error) = self.state.error.clone() {
                     theme::bar(Palette::of(ui)).show(ui, |ui| {
