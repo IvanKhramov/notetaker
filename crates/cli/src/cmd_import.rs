@@ -109,7 +109,7 @@ pub fn run(args: Args) -> Result<()> {
             let template = Template::load(library.root(), "general")?;
             let config = Config::load()?;
             let provider = create_provider(
-                config.select(mode, None)?.clone(),
+                config.select_scenario(mode, notetaker_llm::Scenario::Summary, None)?,
                 mode,
                 Cancellation::default(),
             )?;

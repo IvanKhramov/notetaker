@@ -37,7 +37,11 @@ pub fn run(args: Args) -> Result<()> {
     let template = Template::load(library.root(), template_id)?;
     let config = Config::load()?;
     let provider = create_provider(
-        config.select(meta.mode, args.provider.as_deref())?.clone(),
+        config.select_scenario(
+            meta.mode,
+            notetaker_llm::Scenario::Summary,
+            args.provider.as_deref(),
+        )?,
         meta.mode,
         Cancellation::default(),
     )?;

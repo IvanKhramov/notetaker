@@ -2,6 +2,7 @@
 
 mod cmd_enhance;
 mod cmd_import;
+mod cmd_mcp;
 mod cmd_probe;
 mod cmd_record;
 mod cmd_transcribe;
@@ -18,6 +19,8 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Read-only MCP server over stdio.
+    Mcp(cmd_mcp::Options),
     /// Import audio or video and create a meeting with a final transcript.
     Import(cmd_import::Args),
     /// Watch microphone usage and print call hints on Windows.
@@ -34,6 +37,7 @@ enum Command {
 
 fn main() -> anyhow::Result<()> {
     match Args::parse().command {
+        Command::Mcp(args) => cmd_mcp::run(args),
         Command::Import(args) => cmd_import::run(args),
         Command::Watch(args) => cmd_watch::run(args),
         Command::Probe(args) => cmd_probe::run(args),

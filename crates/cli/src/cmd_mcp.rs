@@ -1,0 +1,345 @@
+//! A small read-only MCP stdio server; stdout contains JSON-RPC messages only.
+use std::{
+    fs,
+    io::{BufRead, Write},
+    path::PathBuf,
+};
+
+use anyhow::{Context, Result, ensure};
+use clap::Args;
+use notetaker_core::{Library, Meeting, Mode};
+use serde::Deserialize;
+use serde_json::{Value, json};
+
+#[derive(Args)]
+pub struct Options {
+    #[arg(long)]
+    library: Option<PathBuf>,
+}
+#[derive(Deserialize)]
+struct Preferences {
+    library: Option<PathBuf>,
+    #[serde(default = "exclude_local")]
+    mcp_exclude_local: bool,
+}
+fn exclude_local() -> bool {
+    true
+}
+
+pub fn run(options: Options) -> Result<()> {
+    let settings = directories::ProjectDirs::from("", "", "notetaker")
+        .context("Нет каталога настроек")?
+        .config_dir()
+        .join("app.toml");
+    let prefs: Preferences = match fs::read_to_string(settings) {
+        Ok(text) => toml::from_str(&text).context("Некорректный app.toml; MCP не запущен")?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Preferences {
+            library: None,
+            mcp_exclude_local: true,
+        },
+        Err(error) => return Err(error.into()),
+    };
+    let root = options.library.or(prefs.library).unwrap_or_else(|| {
+        let home = directories::UserDirs::new();
+        home.as_ref()
+            .map(|d| d.document_dir().unwrap_or(d.home_dir()).to_owned())
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("notetaker")
+    });
+    let server = Server {
+        library: Library::open(root)?,
+        exclude_local: prefs.mcp_exclude_local,
+    };
+    serve(&server, std::io::stdin().lock(), std::io::stdout().lock())
+}
+
+struct Server {
+    library: Library,
+    exclude_local: bool,
+}
+impl Server {
+    fn allowed(&self, meeting: &Meeting) -> Result<bool> {
+        // No arbitrary paths or symlinks outside the configured library.
+        let path = meeting.path().canonicalize()?;
+        Ok(path.parent() == Some(self.library.root())
+            && (!self.exclude_local || meeting.read_meta()?.mode != Mode::Local))
+    }
+    fn call(&self, name: &str, args: Value) -> Result<Value> {
+        match name {
+            "search_meetings" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    query: String,
+                    #[serde(default = "ten")]
+                    limit: usize,
+                }
+                let input: Input = serde_json::from_value(args)?;
+                ensure!(input.query.len() <= 16_384, "Слишком длинный запрос");
+                self.library.reindex_incremental()?;
+                let hits = self.library.retrieve(
+                    &input.query,
+                    input.limit.min(100),
+                    self.exclude_local,
+                )?;
+                let available = self.library.list_meetings()?;
+                let mut result = Vec::new();
+                for hit in hits {
+                    if let Some(meeting) = available.iter().find(|m| m.path() == hit.path)
+                        && self.allowed(meeting)?
+                    {
+                        result.push(
+                            json!({"id":hit.meeting_id,"title":hit.title,"snippet":hit.snippet}),
+                        );
+                    }
+                }
+                Ok(json!(result))
+            }
+            "list_recent" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    #[serde(default = "ten")]
+                    n: usize,
+                }
+                let input: Input = serde_json::from_value(args)?;
+                let mut result = Vec::new();
+                for meeting in self.library.list_meetings()? {
+                    if !self.allowed(&meeting)? {
+                        continue;
+                    }
+                    let meta = meeting.read_meta()?;
+                    result.push((
+                        meta.started_at,
+                        json!({"id":meta.id,"title":meta.title,"started_at":meta.started_at}),
+                    ));
+                }
+                result.sort_by_key(|(date, _)| std::cmp::Reverse(*date));
+                result.truncate(input.n.min(100));
+                Ok(json!(
+                    result.into_iter().map(|(_, row)| row).collect::<Vec<_>>()
+                ))
+            }
+            "get_meeting" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Input {
+                    id: Option<String>,
+                    path: Option<PathBuf>,
+                }
+                let input: Input = serde_json::from_value(args)?;
+                ensure!(
+                    input.id.is_some() != input.path.is_some(),
+                    "Укажите id или path"
+                );
+                let requested_path = input
+                    .path
+                    .map(|p| {
+                        if p.is_absolute() {
+                            p
+                        } else {
+                            self.library.root().join(p)
+                        }
+                    })
+                    .map(fs::canonicalize)
+                    .transpose()
+                    .ok()
+                    .flatten();
+                for meeting in self.library.list_meetings()? {
+                    if !self.allowed(&meeting)? {
+                        continue;
+                    }
+                    let meta = meeting.read_meta()?;
+                    if input.id.as_deref() == Some(&meta.id.to_string())
+                        || requested_path.as_deref() == Some(meeting.path())
+                    {
+                        // Check privacy again immediately before reading content.
+                        ensure!(self.allowed(&meeting)?, "Встреча недоступна");
+                        return Ok(
+                            json!({"meta":meta,"notes":meeting.read_notes()?,"summary":meeting.read_enhanced()?,"transcript":meeting.read_transcript()?.named_text()}),
+                        );
+                    }
+                }
+                anyhow::bail!("Встреча не найдена или недоступна по политике MCP")
+            }
+            _ => anyhow::bail!("Неизвестный инструмент"),
+        }
+    }
+}
+fn ten() -> usize {
+    10
+}
+fn tools() -> Value {
+    json!({"tools":[
+        {"name":"search_meetings","description":"Поиск встреч по словам, BM25. Local-встречи скрыты по настройке.","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer","minimum":0,"maximum":100}},"required":["query"],"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}},
+        {"name":"get_meeting","description":"Заметки, конспект и транскрипт с именами. Укажите id или path внутри библиотеки.","inputSchema":{"type":"object","properties":{"id":{"type":"string"},"path":{"type":"string"}},"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}},
+        {"name":"list_recent","description":"Последние доступные встречи.","inputSchema":{"type":"object","properties":{"n":{"type":"integer","minimum":0,"maximum":100}},"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}}
+    ]})
+}
+fn error(id: Value, code: i32, message: &str) -> Value {
+    json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}})
+}
+fn handle(server: &Server, request: Value, initialized: &mut bool) -> Option<Value> {
+    if request.get("jsonrpc") != Some(&json!("2.0"))
+        || !request["method"].is_string()
+        || request
+            .get("id")
+            .is_some_and(|id| !id.is_string() && !id.is_number() && !id.is_null())
+    {
+        return Some(error(Value::Null, -32600, "Invalid Request"));
+    }
+    let method = request["method"].as_str().unwrap();
+    let id = request.get("id")?.clone(); // Notifications never produce responses.
+    let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
+    if !params.is_object() {
+        return Some(error(id, -32602, "Invalid params"));
+    }
+    let result = match method {
+        "initialize" => {
+            let version = params["protocolVersion"]
+                .as_str()
+                .filter(|version| ["2024-11-05", "2025-03-26", "2025-06-18"].contains(version))
+                .unwrap_or("2025-06-18");
+            *initialized = true;
+            json!({"protocolVersion":version,"capabilities":{"tools":{}},"serverInfo":{"name":"notetaker","version":env!("CARGO_PKG_VERSION")}})
+        }
+        "ping" => json!({}),
+        _ if !*initialized => return Some(error(id, -32002, "Server not initialized")),
+        "tools/list" => tools(),
+        "tools/call" => {
+            let Some(name) = params["name"].as_str() else {
+                return Some(error(id, -32602, "Missing tool name"));
+            };
+            if !["search_meetings", "get_meeting", "list_recent"].contains(&name) {
+                return Some(error(id, -32602, "Unknown tool"));
+            }
+            let args = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            match server.call(name, args) {
+                Ok(data) => {
+                    json!({"content":[{"type":"text","text":data.to_string()}],"isError":false})
+                }
+                Err(error_value) if error_value.downcast_ref::<serde_json::Error>().is_some() => {
+                    return Some(error(id, -32602, "Invalid tool arguments"));
+                }
+                // Do not expose filesystem errors or file content in protocol errors.
+                Err(_) => {
+                    json!({"content":[{"type":"text","text":"Не удалось прочитать встречу: проверьте аргументы, библиотеку и политику Local в настройках MCP."}],"isError":true})
+                }
+            }
+        }
+        _ => return Some(error(id, -32601, "Method not found")),
+    };
+    Some(json!({"jsonrpc":"2.0","id":id,"result":result}))
+}
+fn serve(server: &Server, mut input: impl BufRead, mut output: impl Write) -> Result<()> {
+    let mut initialized = false;
+    loop {
+        let mut line = Vec::new();
+        let count =
+            std::io::Read::take(&mut input, 1024 * 1024 + 1).read_until(b'\n', &mut line)?;
+        if count == 0 {
+            break;
+        }
+        ensure!(count <= 1024 * 1024, "MCP request exceeds 1 MiB");
+        let response = match serde_json::from_slice(&line) {
+            Ok(request) => handle(server, request, &mut initialized),
+            Err(_) => Some(error(Value::Null, -32700, "Parse error")),
+        };
+        if let Some(response) = response {
+            serde_json::to_writer(&mut output, &response)?;
+            output.write_all(b"\n")?;
+            output.flush()?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notetaker_core::{Channel, MeetingMeta, Segment, Source, SpeakerId, Transcript};
+    use std::io::Cursor;
+    #[test]
+    fn json_rpc_roundtrip_and_privacy_for_all_tools() {
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open(root.path()).unwrap();
+        let now = chrono::Utc::now();
+        let local = library
+            .create_meeting(MeetingMeta::new("SECRET", now))
+            .unwrap();
+        local.write_notes("секрет Kubernetes").unwrap();
+        let mut meta = MeetingMeta::new("План", now);
+        meta.mode = Mode::Hybrid;
+        let public = library.create_meeting(meta).unwrap();
+        public.write_notes("Kubernetes").unwrap();
+        let mut transcript = Transcript::default();
+        transcript.rename_speaker("s1", "Иван");
+        transcript.segments.push(Segment {
+            id: public.read_meta().unwrap().id,
+            speaker: SpeakerId("s1".into()),
+            channel: Channel::System,
+            start_ms: 0,
+            end_ms: 1000,
+            text: "Готово".into(),
+            source: Source::Final,
+            edited: false,
+        });
+        public.write_transcript(&transcript).unwrap();
+        let id = public.read_meta().unwrap().id;
+        let hidden = local.read_meta().unwrap().id;
+        let requests = [
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}),
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_meetings","arguments":{"query":"Kubernetes"}}}),
+            json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_recent"}}),
+            json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"get_meeting","arguments":{"id":id}}}),
+            json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"get_meeting","arguments":{"id":hidden}}}),
+            json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"get_meeting","arguments":{"path":local.path()}}}),
+            json!({"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"get_meeting","arguments":{"path":"../outside"}}}),
+            json!({"jsonrpc":"2.0","id":9,"method":"bad"}),
+        ];
+        let input = requests
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n{bad}\n";
+        let mut output = Vec::new();
+        let server = Server {
+            library,
+            exclude_local: true,
+        };
+        serve(&server, Cursor::new(input), &mut output).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(!text.contains("SECRET"));
+        let responses: Vec<Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(responses.len(), 10);
+        assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 3);
+        for response in &responses[2..5] {
+            assert_eq!(response["result"]["isError"], false);
+        }
+        assert!(
+            responses[4]["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Иван: Готово")
+        );
+        for response in &responses[5..8] {
+            assert_eq!(response["result"]["isError"], true);
+        }
+        assert_eq!(responses[8]["error"]["code"], -32601);
+        assert_eq!(responses[9]["error"]["code"], -32700);
+        let server = Server {
+            exclude_local: false,
+            ..server
+        };
+        assert!(server.call("get_meeting", json!({"id":hidden})).is_ok());
+    }
+}
