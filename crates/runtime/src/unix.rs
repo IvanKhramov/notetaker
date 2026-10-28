@@ -106,8 +106,18 @@ impl Instance {
                 let mut quitters = Vec::new();
                 while !state.stop.load(Ordering::Acquire) {
                     while let Ok((mut stream, _)) = listener.accept() {
-                        let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
-                        let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
+                        // Accepted sockets inherit O_NONBLOCK on macOS. Wait for a
+                        // client that connects before it has written its command.
+                        if stream.set_nonblocking(false).is_err()
+                            || stream
+                                .set_read_timeout(Some(Duration::from_millis(100)))
+                                .is_err()
+                            || stream
+                                .set_write_timeout(Some(Duration::from_millis(100)))
+                                .is_err()
+                        {
+                            continue;
+                        }
                         let mut command = [0];
                         if stream.read_exact(&mut command).is_ok() {
                             match command[0] {
@@ -171,12 +181,30 @@ impl Instance {
             .read_exact(&mut reply)
             .context("Приложение не завершилось")?;
         match reply[0] {
-            b'X' => Ok(()),
+            b'X' => {
+                // The server sends X from Drop before its lock File is closed.
+                // Do not let an updater relaunch against the exiting instance.
+                wait_for_unlock(directory, Duration::from_secs(2))
+            }
             b'B' => bail!("Приложение занято записью или чистовым проходом"),
             _ => bail!("Неизвестный ответ notetaker"),
         }
     }
 }
+fn wait_for_unlock(directory: &Path, timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if lock(directory)?.is_some() {
+            return Ok(());
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "Приложение не освободило блокировку"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 impl Drop for Instance {
     fn drop(&mut self) {
         self.signals.stop.store(true, Ordering::Release);
@@ -317,7 +345,40 @@ mod tests {
         wait(&instance.signals.quit);
         drop(instance);
         request.join().unwrap().unwrap();
+        let relaunched = Instance::acquire_in(dir.path()).unwrap().unwrap();
+        drop(relaunched);
         Instance::request_quit_in(dir.path()).unwrap();
+    }
+    #[test]
+    fn accepts_commands_written_after_connect() {
+        let dir = tempfile::tempdir().unwrap();
+        let instance = Instance::acquire_in(dir.path()).unwrap().unwrap();
+        let mut stream = connect(dir.path()).unwrap();
+        // Let the nonblocking listener accept before the command arrives.
+        thread::sleep(Duration::from_millis(50));
+        stream.write_all(b"S").unwrap();
+        wait(&instance.signals.show);
+    }
+    #[test]
+    fn quit_ack_waits_for_lock_release_before_relaunch() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = lock(dir.path()).unwrap().unwrap();
+        let listener = UnixListener::bind(dir.path().join("instance.sock")).unwrap();
+        let path = dir.path().to_owned();
+        let request = thread::spawn(move || {
+            Instance::request_quit_in(&path).unwrap();
+            Instance::acquire_in(&path).unwrap().unwrap()
+        });
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut command = [0];
+        stream.read_exact(&mut command).unwrap();
+        assert_eq!(command, *b"Q");
+        stream.write_all(b"X").unwrap();
+        thread::sleep(Duration::from_millis(50));
+        assert!(!request.is_finished());
+        assert!(wait_for_unlock(dir.path(), Duration::from_millis(20)).is_err());
+        drop(file);
+        drop(request.join().unwrap());
     }
     #[test]
     fn plist_escapes_paths() {
