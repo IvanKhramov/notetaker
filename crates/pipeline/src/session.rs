@@ -26,6 +26,8 @@ use crate::{
 
 #[derive(Clone, Debug)]
 pub struct RecordingConfig {
+    pub folder: Option<String>,
+    pub mode_override: Option<notetaker_core::Mode>,
     pub chunks: ChunkConfig,
     pub diarization: crate::DiarizationConfig,
     /// Total queued/in-flight audio seconds across both channels, not wall time.
@@ -40,6 +42,8 @@ pub struct RecordingConfig {
 impl Default for RecordingConfig {
     fn default() -> Self {
         Self {
+            folder: None,
+            mode_override: None,
             chunks: ChunkConfig::default(),
             diarization: crate::DiarizationConfig::default(),
             max_live_lag: Duration::from_secs(60),
@@ -122,6 +126,10 @@ impl RecordingSession {
                 .into(),
         );
         meta.mode = mode;
+        library.inherit_folder(&mut meta, config.folder.as_deref())?;
+        if let Some(mode) = config.mode_override {
+            meta.mode = mode;
+        }
         let meeting = library.create_meeting(meta)?;
         let (events_tx, events) = mpsc::channel();
         let stop = StopHandle(Arc::new(AtomicBool::new(false)));

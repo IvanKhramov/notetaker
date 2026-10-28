@@ -228,6 +228,7 @@ pub struct AppState {
     pub(crate) llm_configured: bool,
     pub connections: crate::ai::Connections,
     pub chat: crate::chat::Panel,
+    pub folder_filter: Option<String>,
     pub tasks_open: bool,
     pub tasks: Vec<notetaker_core::Task>,
     pub tasks_busy: bool,
@@ -281,6 +282,7 @@ pub struct AppState {
     pub title: String,
     pub record_model: String,
     pub record_mode: notetaker_core::Mode,
+    pub record_mode_edited: bool,
     pub process_id: Option<u32>,
     pub templates: Vec<String>,
     pub enhancing: Option<PathBuf>,
@@ -314,6 +316,7 @@ impl AppState {
             llm_configured: false,
             connections: crate::ai::Connections::default(),
             chat: Default::default(),
+            folder_filter: None,
             tasks_open: false,
             tasks: Vec::new(),
             tasks_busy: false,
@@ -367,6 +370,7 @@ impl AppState {
             title: String::new(),
             record_model: settings.model,
             record_mode: settings.mode,
+            record_mode_edited: false,
             process_id: None,
             templates: vec!["general".into()],
             enhancing: None,
@@ -484,6 +488,7 @@ impl AppState {
         self.flush();
         let path = meeting.path().to_owned();
         self.tasks_open = false;
+        self.refresh_tasks();
         self.selected = Some(path.clone());
         if !self.documents.contains_key(&path) && self.loading.insert(path) {
             self.send(Command::Load(meeting));
@@ -561,6 +566,7 @@ impl AppState {
                 self.process_id = Some(pid);
                 self.record_model = self.settings.model.clone();
                 self.record_mode = self.settings.mode;
+                self.record_mode_edited = false;
                 self.start_recording_with_app(Some(notetaker_detect::DetectedCall {
                     app,
                     pid,
@@ -605,6 +611,8 @@ impl AppState {
         let mut settings = self.settings.clone();
         settings.model = self.record_model.clone();
         settings.mode = self.record_mode;
+        settings.folder_mode_override = self.record_mode_edited.then_some(self.record_mode);
+        settings.folder = self.folder_filter.clone().filter(|s| !s.is_empty());
         let event = self.selected_event.take().or_else(|| {
             notetaker_core::calendar::overlapping(&self.calendar_events, chrono::Utc::now())
                 .cloned()
@@ -663,6 +671,7 @@ impl AppState {
         self.selected_event = Some(event);
         self.record_model = self.settings.model.clone();
         self.record_mode = self.settings.mode;
+        self.record_mode_edited = false;
         self.start_recording();
     }
     pub fn refresh_tasks(&mut self) {
@@ -809,6 +818,8 @@ impl AppState {
         let mut settings = self.settings.clone();
         settings.model = self.record_model.clone();
         settings.mode = self.record_mode;
+        settings.folder_mode_override = self.record_mode_edited.then_some(self.record_mode);
+        settings.folder = self.folder_filter.clone().filter(|s| !s.is_empty());
         self.recording = Recording {
             phase: Phase::Starting,
             importing: true,

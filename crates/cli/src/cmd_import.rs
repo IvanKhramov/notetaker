@@ -18,6 +18,8 @@ pub struct Args {
     pub mode: Option<String>,
     #[arg(long)]
     pub no_summary: bool,
+    #[arg(long)]
+    pub folder: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -67,10 +69,17 @@ pub fn run(args: Args) -> Result<()> {
         Err(error) => return Err(error.into()),
     };
     let library = Library::open(args.library.unwrap_or(settings.library))?;
+    let folder_defaults = args
+        .folder
+        .as_ref()
+        .and_then(|name| library.load_folders().ok()?.value.get(name).cloned());
     let mut asr = AsrConfig::new(args.model.unwrap_or(settings.model))?;
     asr.provider = settings.asr_acceleration;
     asr.num_threads = settings.asr_threads;
     asr.vocabulary = Vocabulary::load(library.root())?;
+    if let Some(defaults) = &folder_defaults {
+        asr.vocabulary.merge(&defaults.vocabulary);
+    }
     let mode = match args.mode.as_deref() {
         Some("hybrid") => Mode::Hybrid,
         Some("local") => Mode::Local,
@@ -82,9 +91,13 @@ pub fn run(args: Args) -> Result<()> {
         mode,
         asr,
         RecordingConfig {
+            folder: args.folder,
+            mode_override: args.mode.as_ref().map(|_| mode),
             diarization: notetaker_pipeline::DiarizationConfig {
                 enabled: settings.diarize,
-                speakers: settings.speakers,
+                speakers: folder_defaults
+                    .and_then(|d| d.speaker_hint)
+                    .or(settings.speakers),
                 voice_library: settings.voice_library,
             },
             retention: settings
@@ -118,7 +131,10 @@ pub fn run(args: Args) -> Result<()> {
     println!("{}", meeting.path().display());
     if settings.auto_summary && !args.no_summary && !cancel.is_cancelled() {
         let summary = (|| -> Result<()> {
-            let template = Template::load(library.root(), "general")?;
+            let meta = meeting.read_meta()?;
+            let mode = meta.mode;
+            let template_id = meta.template.as_deref().unwrap_or("general");
+            let template = Template::load(library.root(), template_id)?;
             let config = Config::load()?;
             let provider = create_provider(
                 config.select_scenario(mode, notetaker_llm::Scenario::Summary, None)?,
@@ -127,7 +143,7 @@ pub fn run(args: Args) -> Result<()> {
             )?;
             let result = enhance_meeting_if_unedited(
                 &meeting,
-                "general",
+                template_id,
                 &template,
                 provider.as_ref(),
                 &mut |_| {},

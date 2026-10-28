@@ -15,6 +15,8 @@ pub struct Args {
     library: PathBuf,
     #[arg(long)]
     title: String,
+    #[arg(long)]
+    folder: Option<String>,
     #[arg(long, default_value = "gigaam-v3", value_parser = ["auto", "gigaam-v3", "parakeet-v3"])]
     model: String,
     #[arg(long, conflicts_with = "app", value_parser = clap::value_parser!(u32).range(1..))]
@@ -37,6 +39,7 @@ pub fn run(args: Args) -> Result<()> {
     let library = Library::open(&args.library)?;
     let mut meta = MeetingMeta::new(&args.title, Utc::now());
     meta.app = args.app.clone();
+    let defaults = library.inherit_folder(&mut meta, args.folder.as_deref())?;
     let sources: [Box<dyn AudioSource + Send>; 2] = if args.from_files.is_empty() {
         let process_id = match &args.app {
             Some(app) => Some(crate::cmd_probe::select_app(&inventory()?, app)?),
@@ -67,12 +70,20 @@ pub fn run(args: Args) -> Result<()> {
         .context("retention too large")?;
     let mut asr = AsrConfig::new(args.model)?;
     asr.vocabulary = notetaker_core::Vocabulary::load(library.root())?;
+    if let Some(defaults) = &defaults {
+        asr.vocabulary.merge(&defaults.vocabulary);
+    }
     let session = RecordingSession::start(
         library,
         meta,
         sources,
         asr,
         RecordingConfig {
+            folder: args.folder,
+            diarization: notetaker_pipeline::DiarizationConfig {
+                speakers: defaults.and_then(|d| d.speaker_hint),
+                ..Default::default()
+            },
             retention: Some(Duration::from_secs(retention)),
             auto_stop_after_silence: (args.auto_stop_silence_seconds != 0)
                 .then(|| Duration::from_secs(args.auto_stop_silence_seconds)),

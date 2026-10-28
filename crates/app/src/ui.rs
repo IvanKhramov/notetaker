@@ -26,6 +26,8 @@ struct Toast {
 pub struct NotetakerApp {
     state: AppState,
     people: crate::people::Panel,
+    organization: crate::organization::Panel,
+    trackers: crate::trackers::Panel,
     cache: CommonMarkCache,
     image_viewer: Option<String>,
     notes_preview: bool,
@@ -55,6 +57,8 @@ impl NotetakerApp {
         Self {
             state: AppState::new(),
             people: crate::people::Panel::default(),
+            organization: Default::default(),
+            trackers: Default::default(),
             cache: CommonMarkCache::default(),
             image_viewer: None,
             notes_preview: false,
@@ -117,6 +121,7 @@ impl NotetakerApp {
             self.state.refresh_tasks();
         }
         self.people.sidebar(ui, &mut self.state);
+        self.organization.sidebar(ui, &mut self.state);
         let search = ui.add(
             egui::TextEdit::singleline(&mut self.state.query)
                 .id_salt("library_search")
@@ -258,6 +263,9 @@ impl NotetakerApp {
             .show(ui, |ui| {
                 let mut previous = None;
                 for row in &self.state.rows {
+                    if !self.organization.visible(&row.meta, &self.state) {
+                        continue;
+                    }
                     let start = row.meta.started_at.with_timezone(&chrono::Local);
                     let date = start.date_naive();
                     if previous != Some(date) {
@@ -269,7 +277,8 @@ impl NotetakerApp {
                         );
                         previous = Some(date);
                     }
-                    let selected = self.state.selected.as_deref() == Some(row.meeting.path());
+                    let selected = self.state.selected.as_deref() == Some(row.meeting.path())
+                        || self.organization.selected(row.meeting.path());
                     let recording = self.state.recording.phase == Phase::Recording
                         && self.state.recording.path.as_deref() == Some(row.meeting.path());
                     let response = egui::Frame::new()
@@ -315,15 +324,14 @@ impl NotetakerApp {
                             });
                         })
                         .response;
-                    if ui
+                    let response = ui
                         .interact(
                             response.rect,
                             response.id.with("select"),
-                            egui::Sense::click(),
+                            egui::Sense::click_and_drag(),
                         )
-                        .on_hover_text(&row.snippet)
-                        .clicked()
-                    {
+                        .on_hover_text(&row.snippet);
+                    if self.organization.row(ui, &response, &row.meeting) {
                         select = Some((row.meeting.clone(), row.anchor.clone()));
                     }
                 }
@@ -584,7 +592,8 @@ impl NotetakerApp {
             .tasks
             .iter()
             .filter(|task| {
-                (self.tasks_all || !task.completed)
+                self.organization.task_visible(&task.path, &self.state)
+                    && (self.tasks_all || !task.completed)
                     && (self.tasks_person.is_empty()
                         || notetaker_core::person_matches(&task.owner, &self.tasks_person))
                     && (!self.tasks_mine
@@ -616,6 +625,7 @@ impl NotetakerApp {
             && !self.state.unsaved()
             && !self.state.recording.busy()
             && self.state.enhancing.is_none();
+        let mut send_task = None;
         let mut toggle = None;
         let mut open = None;
         egui::ScrollArea::vertical()
@@ -644,6 +654,18 @@ impl NotetakerApp {
                                 .changed()
                             {
                                 toggle = Some((task.clone(), completed));
+                            }
+                            if let Some(url) = &task.issue_url {
+                                ui.hyperlink_to("В трекере", url);
+                            } else if !task.completed
+                                && ui
+                                    .add_enabled(
+                                        can_toggle,
+                                        egui::Button::new("Отправить в трекер"),
+                                    )
+                                    .clicked()
+                            {
+                                send_task = Some(task.clone());
                             }
                             let overdue = !task.completed
                                 && task
@@ -677,6 +699,9 @@ impl NotetakerApp {
                     ui.spinner();
                 }
             });
+        if let Some(task) = send_task {
+            self.trackers.prepare(ui.ctx(), &self.state, vec![task]);
+        }
         if let Some((task, completed)) = toggle {
             self.state.toggle_task(task, completed);
         }
@@ -686,6 +711,8 @@ impl NotetakerApp {
         }
     }
     fn meeting(&mut self, ui: &mut egui::Ui) {
+        self.organization.meeting(ui, &mut self.state);
+        self.trackers.meeting(ui, &self.state);
         let Some(path) = self.state.selected.clone() else {
             ui.add_space(60.0);
             ui.heading("Место для важных мыслей");
@@ -1243,7 +1270,7 @@ impl NotetakerApp {
         egui::Window::new("Новая запись").open(&mut open).collapsible(false).show(ctx, |ui| {
             ui.label("Название"); ui.text_edit_singleline(&mut self.state.title);
             model_selector(ui, "record_model", &mut self.state.record_model);
-            mode_selector(ui, &mut self.state.record_mode);
+            self.state.record_mode_edited |= mode_selector(ui, &mut self.state.record_mode);
             egui::ComboBox::from_id_salt("audio_session").selected_text(self.state.inventory.sessions.iter().find(|s| Some(s.pid) == self.state.process_id)
                 .map_or_else(|| "Весь системный звук".to_owned(), |s| format!("{} (PID {})", s.exe.as_deref().unwrap_or(&s.name), s.pid))).show_ui(ui, |ui| {
                 ui.selectable_value(&mut self.state.process_id, None, "Весь системный звук");
@@ -1275,7 +1302,7 @@ impl NotetakerApp {
                 ui.add(egui::TextEdit::singleline(&mut self.import_path).desired_width(480.0));
                 ui.small("wav, mp3, m4a, ogg, opus, flac, mp4, webm, mkv");
                 model_selector(ui, "import_model", &mut self.state.record_model);
-                mode_selector(ui, &mut self.state.record_mode);
+                self.state.record_mode_edited |= mode_selector(ui, &mut self.state.record_mode);
                 if ui
                     .add_enabled(
                         !self.state.recording.busy() && !self.import_path.trim().is_empty(),
@@ -1757,6 +1784,7 @@ impl eframe::App for NotetakerApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // eframe calls this even when the root window is hidden in the tray.
         self.state.poll();
+        self.organization.poll(ctx, &mut self.state);
         self.quickstart.tick(&mut self.state);
         if self.maintenance.tick(
             ctx,
@@ -1811,6 +1839,8 @@ impl eframe::App for NotetakerApp {
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.organization.windows(&ctx);
+        self.trackers.poll(&ctx, &mut self.state);
         self.maintenance.dialogs(
             &ctx,
             !self.state.ready
@@ -1919,13 +1949,15 @@ fn mode_label(mode: Mode) -> &'static str {
         Mode::Hybrid => "Hybrid (разрешён облачный LLM)",
     }
 }
-fn mode_selector(ui: &mut egui::Ui, mode: &mut Mode) {
+fn mode_selector(ui: &mut egui::Ui, mode: &mut Mode) -> bool {
+    let mut selected = false;
     ui.horizontal_wrapped(|ui| {
         ui.label("Режим:");
-        ui.selectable_value(mode, Mode::Local, "Local");
-        ui.selectable_value(mode, Mode::Hybrid, "Hybrid");
+        selected |= ui.selectable_value(mode, Mode::Local, "Local").clicked();
+        selected |= ui.selectable_value(mode, Mode::Hybrid, "Hybrid").clicked();
     });
     ui.small(mode_label(*mode));
+    selected
 }
 fn model_selector(ui: &mut egui::Ui, id: &str, model: &mut String) {
     egui::ComboBox::from_id_salt(id)

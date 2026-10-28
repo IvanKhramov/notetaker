@@ -818,3 +818,54 @@ fn failed_import_does_not_publish_a_final_transcript_and_keeps_audio() {
     assert!(meeting.read_transcript().unwrap().segments.is_empty());
     assert!(meeting.system_audio_path().is_file());
 }
+
+#[test]
+fn import_inherits_folder_template_and_explicit_local_mode_wins() {
+    for explicit in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("call.wav");
+        wav(&input, 3200);
+        let library = Library::open(directory.path().join("library")).unwrap();
+        let mut folders = library.load_folders().unwrap();
+        folders.value.insert(
+            "client".into(),
+            notetaker_core::folders::FolderSettings {
+                template: Some("client-call".into()),
+                mode: Some(notetaker_core::Mode::Hybrid),
+                ..Default::default()
+            },
+        );
+        library
+            .save_folders(&folders.value, folders.revision)
+            .unwrap();
+        let session = RecordingSession::import_with_asr(
+            library,
+            &input,
+            notetaker_core::Mode::Local,
+            Fake {
+                stats: Arc::new(Mutex::new(Stats::default())),
+                crashes: vec![],
+                gate: None,
+            },
+            RecordingConfig {
+                folder: Some("client".into()),
+                mode_override: explicit.then_some(notetaker_core::Mode::Local),
+                retention: Some(Duration::ZERO),
+                ..RecordingConfig::default()
+            },
+        )
+        .unwrap();
+        let meeting = session.wait().unwrap();
+        let meta = meeting.read_meta().unwrap();
+        assert_eq!(meta.folder.as_deref(), Some("client"));
+        assert_eq!(meta.template.as_deref(), Some("client-call"));
+        assert_eq!(
+            meta.mode,
+            if explicit {
+                notetaker_core::Mode::Local
+            } else {
+                notetaker_core::Mode::Hybrid
+            }
+        );
+    }
+}

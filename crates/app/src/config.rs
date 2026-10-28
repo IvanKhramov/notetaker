@@ -54,6 +54,8 @@ pub struct Settings {
     pub vocabulary: String,
     pub diarize: bool,
     pub speakers: Option<u32>,
+    pub folder: Option<String>,
+    pub folder_mode_override: Option<notetaker_core::Mode>,
     pub voice_library: bool,
     /// Only credential IDs and display names, never subscription URLs.
     pub calendars: Vec<notetaker_llm::calendar::Subscription>,
@@ -98,6 +100,8 @@ impl Default for Settings {
             vocabulary: String::new(),
             diarize: true,
             speakers: None,
+            folder: None,
+            folder_mode_override: None,
             voice_library: false,
             calendars: Vec::new(),
             calendar_timezone: "Europe/Moscow".into(),

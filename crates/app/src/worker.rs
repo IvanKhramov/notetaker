@@ -1038,6 +1038,17 @@ fn record(request: RecordRequest, import_file: Option<PathBuf>, events: &Sender<
     let mut path = None;
     let mut meeting_for_reload = None;
     let result: Result<()> = (|| {
+        let library = Library::open(&request.settings.library)?;
+        let mut initial_meta = MeetingMeta::new(&request.title, Utc::now());
+        initial_meta.mode = request.settings.mode;
+        if let Some(event) = &request.event {
+            notetaker_core::calendar::link_meeting(&mut initial_meta, event, true);
+        }
+        let folder_defaults =
+            library.inherit_folder(&mut initial_meta, request.settings.folder.as_deref())?;
+        if let Some(mode) = request.settings.folder_mode_override {
+            initial_meta.mode = mode;
+        }
         let binary = asr_binary()?;
         let mut config = AsrConfig::new(&request.settings.model)?;
         config.binary = binary;
@@ -1047,6 +1058,9 @@ fn record(request: RecordRequest, import_file: Option<PathBuf>, events: &Sender<
             &request.settings.vocabulary,
             &request.settings.library,
         )?;
+        if let Some(defaults) = &folder_defaults {
+            config.vocabulary.merge(&defaults.vocabulary);
+        }
         let mut asr = AppAsr {
             config,
             client: None,
@@ -1057,11 +1071,15 @@ fn record(request: RecordRequest, import_file: Option<PathBuf>, events: &Sender<
         asr.start()
             .context("Модель ASR недоступна. Откройте настройки и нажмите «Скачать»")?;
         asr.preloaded = true;
-        let library = Library::open(&request.settings.library)?;
         let config = RecordingConfig {
+            folder: request.settings.folder.clone(),
+            mode_override: request.settings.folder_mode_override,
             diarization: notetaker_pipeline::DiarizationConfig {
                 enabled: request.settings.diarize,
-                speakers: request.settings.speakers,
+                speakers: folder_defaults
+                    .as_ref()
+                    .and_then(|d| d.speaker_hint)
+                    .or(request.settings.speakers),
                 voice_library: request.settings.voice_library,
             },
             retention: request
@@ -1086,7 +1104,8 @@ fn record(request: RecordRequest, import_file: Option<PathBuf>, events: &Sender<
                 ..LiveOptions::default()
             })?;
             let sources: [Box<dyn AudioSource + Send>; 2] = [Box::new(mic), Box::new(system)];
-            let mut meta = MeetingMeta::new(request.title, Utc::now());
+            let mut meta = initial_meta;
+            meta.started_at = Utc::now();
             meta.mode = if request
                 .brief
                 .as_ref()
@@ -1094,7 +1113,7 @@ fn record(request: RecordRequest, import_file: Option<PathBuf>, events: &Sender<
             {
                 notetaker_core::Mode::Local
             } else {
-                request.settings.mode
+                meta.mode
             };
             meta.app = request.app;
             if let Some(event) = &request.event {

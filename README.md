@@ -59,6 +59,22 @@ Markdown, JSON, CSV и VTT сохраняют закладки; SRT содерж
 `reindex --semantic`; MCP: `search_meetings(..., mode="hybrid")`.
 Backend, приватность и измерения: [поиск](docs/search.md).
 
+## Папки, трекеры и общая библиотека (0.13.0)
+
+Виртуальные папки и теги группируют встречи без переноса каталогов. Папка
+задаёт шаблон, словарь, режим, число спикеров и правила календаря. Есть
+перетаскивание, выбор нескольких встреч и фильтры задач, людей и дайджеста.
+[Папки и теги](docs/organization.md).
+
+Задачи отправляются в webhook, Kaiten, Jira или YouTrack после просмотра JSON.
+Секреты остаются в Credential Manager, созданная ссылка сохраняется рядом с
+задачей. Local требует отдельного подтверждения. [Трекеры](docs/trackers.md).
+
+Для Яндекс Диска и других синхронизируемых папок включите общую библиотеку:
+индекс пересоздаётся в локальном каталоге пользователя, биометрия всегда
+локальна, копии заметок можно сравнить и объединить. Local-файлы в общей
+папке тоже загружаются дисковым сервисом. [Настройка команды](docs/sharing.md).
+
 ## Install
 
 Download `notetaker-0.12.0-windows-x64.zip` from this repository's **Releases**
@@ -229,8 +245,8 @@ renaming marks an existing summary stale. Missing models leave ASR usable.
 **Голоса** is opt-in biometric storage. Name a speaker or click **Это я** to
 remember their voice. New matches appear as **Name?** for confirmation; very
 confident self matches in imports use `me`. Settings list and delete voices.
-Exclude the entire local `<library>/.notetaker` directory from synchronization.
-Embeddings stay there and never enter LLM prompts. See
+Voice embeddings use the per-user local data directory and never enter LLM prompts.
+Shared library setup is described in [sharing](docs/sharing.md). See
 [speakers and privacy](docs/speakers.md) for models, licenses and limitations.
 Diarization reads the complete waveform into RAM, about 230 MB per audio hour
 plus models, after releasing ASR weights.

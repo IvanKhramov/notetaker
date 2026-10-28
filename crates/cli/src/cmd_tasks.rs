@@ -9,6 +9,8 @@ pub struct Args {
     #[arg(long)]
     mine: bool,
     #[arg(long)]
+    folder: Option<String>,
+    #[arg(long)]
     open: bool,
 }
 #[derive(Default, Deserialize)]
@@ -44,7 +46,12 @@ pub fn run(args: Args) -> Result<()> {
     let names: Vec<_> = std::iter::once(prefs.user_name.as_str())
         .chain(prefs.user_aliases.split([',', ';', '\n']))
         .collect();
-    for task in library.list_tasks(args.open.then_some(false), None, false)? {
+    for task in library.list_tasks_in_folder(
+        args.open.then_some(false),
+        None,
+        false,
+        args.folder.as_deref(),
+    )? {
         if args.mine
             && !names
                 .iter()

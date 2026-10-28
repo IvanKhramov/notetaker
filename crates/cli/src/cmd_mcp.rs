@@ -65,7 +65,15 @@ impl Server {
             && meeting.validate_source_paths().is_ok()
             && (!self.exclude_local || meeting.read_meta()?.mode != Mode::Local))
     }
-    fn call(&self, name: &str, args: Value) -> Result<Value> {
+    fn call(&self, name: &str, mut args: Value) -> Result<Value> {
+        let folder = if name != "search_meetings" {
+            args.as_object_mut()
+                .and_then(|a| a.remove("folder"))
+                .map(serde_json::from_value::<String>)
+                .transpose()?
+        } else {
+            None
+        };
         match name {
             "list_people" => {
                 #[derive(Deserialize)]
@@ -74,7 +82,7 @@ impl Server {
                 let _: Input = serde_json::from_value(args)?;
                 Ok(serde_json::to_value(
                     self.library
-                        .people(self.exclude_local, "", "")?
+                        .people_in_folder(self.exclude_local, "", "", folder.as_deref())?
                         .into_iter()
                         .filter(|p| !p.hidden)
                         .collect::<Vec<_>>(),
@@ -89,14 +97,15 @@ impl Server {
                 let input: Input = serde_json::from_value(args)?;
                 let people: Vec<_> = self
                     .library
-                    .people(self.exclude_local, "", "")?
+                    .people_in_folder(self.exclude_local, "", "", folder.as_deref())?
                     .into_iter()
                     .filter(|p| !p.hidden && (p.id == input.person || p.matches(&input.person)))
                     .collect();
                 ensure!(people.len() == 1, "Человек не найден или имя неоднозначно");
-                Ok(serde_json::to_value(self.library.person_page(
+                Ok(serde_json::to_value(self.library.person_page_in_folder(
                     people.into_iter().next().unwrap(),
                     self.exclude_local,
+                    folder.as_deref(),
                 )?)?)
             }
             "get_series" => {
@@ -115,7 +124,7 @@ impl Server {
                 let requested = requested.canonicalize().ok();
                 let series = self
                     .library
-                    .series(self.exclude_local)?
+                    .series_in_folder(self.exclude_local, folder.as_deref())?
                     .into_iter()
                     .find(|s| {
                         s.meetings.iter().any(|m| {
@@ -150,7 +159,7 @@ impl Server {
                     .map(|name| -> Result<_> {
                         let matches: Vec<_> = self
                             .library
-                            .people(self.exclude_local, "", "")?
+                            .people_in_folder(self.exclude_local, "", "", folder.as_deref())?
                             .into_iter()
                             .filter(|p| !p.hidden && (p.id == name || p.matches(&name)))
                             .collect();
@@ -163,6 +172,7 @@ impl Server {
                     &notetaker_core::DigestFilter {
                         person,
                         series_id: input.series,
+                        folder: folder.clone(),
                     },
                     &chrono::Local,
                     self.exclude_local,
@@ -183,10 +193,11 @@ impl Server {
                     _ => anyhow::bail!("status: open, completed или all"),
                 };
                 self.library.reindex_incremental()?;
-                Ok(serde_json::to_value(self.library.list_tasks(
+                Ok(serde_json::to_value(self.library.list_tasks_in_folder(
                     completed,
                     input.owner.as_deref(),
                     self.exclude_local,
+                    folder.as_deref(),
                 )?)?)
             }
 
@@ -241,6 +252,9 @@ impl Server {
                         continue;
                     }
                     let meta = meeting.read_meta()?;
+                    if !notetaker_core::folders::matches_folder(&meta, folder.as_deref()) {
+                        continue;
+                    }
                     result.push((
                         meta.started_at,
                         json!({"id":meta.id,"title":meta.title,"started_at":meta.started_at}),
@@ -301,6 +315,9 @@ impl Server {
                         continue;
                     }
                     let meta = meeting.read_meta()?;
+                    if !notetaker_core::folders::matches_folder(&meta, folder.as_deref()) {
+                        continue;
+                    }
                     if input.id.as_deref() == Some(&meta.id.to_string())
                         || requested_path.as_deref() == Some(meeting.path())
                     {
@@ -326,7 +343,7 @@ fn ten() -> usize {
     10
 }
 fn tools() -> Value {
-    json!({"tools":[
+    let mut result = json!({"tools":[
         {"name":"list_people","description":"Люди из доступных встреч и задач. Соблюдает фильтр Local.","inputSchema":{"type":"object","properties":{},"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}},
         {"name":"get_person","description":"Встречи, задачи и время речи человека по имени, email или id.","inputSchema":{"type":"object","properties":{"person":{"type":"string"}},"required":["person"],"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}},
         {"name":"get_series","description":"Серия по UUID или пути доступной встречи.","inputSchema":{"type":"object","properties":{"meeting":{"type":"string"}},"required":["meeting"],"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}},
@@ -336,7 +353,13 @@ fn tools() -> Value {
         {"name":"get_meeting","description":"Заметки, конспект и транскрипт с именами. Укажите id или path внутри библиотеки.","inputSchema":{"type":"object","properties":{"id":{"type":"string"},"path":{"type":"string"}},"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}},
         {"name":"get_speaker_timeline","description":"Таймлайн спикеров, суммарное время, доли, реплики и монологи. meeting: UUID или путь внутри библиотеки. Политика Local применяется.","inputSchema":{"type":"object","properties":{"meeting":{"type":"string"}},"required":["meeting"],"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}},
         {"name":"list_recent","description":"Последние доступные встречи.","inputSchema":{"type":"object","properties":{"n":{"type":"integer","minimum":0,"maximum":100}},"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}}
-    ]})
+    ]});
+    for tool in result["tools"].as_array_mut().expect("tool list") {
+        if tool["name"] != "search_meetings" {
+            tool["inputSchema"]["properties"]["folder"] = json!({"type":"string","description":"Папка с подпапками; пустая строка - без папки"});
+        }
+    }
+    result
 }
 fn error(id: Value, code: i32, message: &str) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}})
@@ -598,7 +621,7 @@ mod tests {
                 .to_lowercase()
                 .contains("secret")
         );
-        let mut edits = notetaker_core::PeopleEdits::default();
+        let mut edits = server.library.read_people_edits().unwrap();
         edits.merge(private_person, public_person);
         server.library.write_people_edits(&edits).unwrap();
         assert!(
@@ -841,5 +864,68 @@ mod tests {
                 .call("get_speaker_timeline", json!({"meeting":hidden}))
                 .is_ok()
         );
+    }
+    #[test]
+    fn folder_filters_are_optional_and_apply_to_source_views() {
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open(root.path()).unwrap();
+        let mut client_id = String::new();
+        let mut other_id = String::new();
+        for folder in ["client", "other"] {
+            let mut meta = MeetingMeta::new(folder, chrono::Utc::now());
+            meta.mode = Mode::Hybrid;
+            meta.folder = Some(folder.into());
+            let meeting = library.create_meeting(meta).unwrap();
+            meeting
+                .write_enhanced(&format!("- [ ] Task - {folder} - завтра\n"))
+                .unwrap();
+            let mut transcript = meeting.read_transcript().unwrap();
+            transcript.rename_speaker("s1", folder);
+            meeting.write_transcript(&transcript).unwrap();
+            if folder == "client" {
+                client_id = meeting.read_meta().unwrap().id.to_string();
+            } else {
+                other_id = meeting.read_meta().unwrap().id.to_string();
+            }
+        }
+        let server = Server {
+            library,
+            exclude_local: true,
+        };
+        assert_eq!(
+            server
+                .call("list_recent", json!({}))
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        let recent = server
+            .call("list_recent", json!({"folder":"client"}))
+            .unwrap();
+        assert_eq!(recent.as_array().unwrap().len(), 1);
+        assert_eq!(recent[0]["title"], "client");
+        let tasks = server
+            .call("list_tasks", json!({"folder":"client"}))
+            .unwrap();
+        assert_eq!(tasks.as_array().unwrap().len(), 1);
+        assert_eq!(tasks[0]["owner"], "client");
+        let people = server
+            .call("list_people", json!({"folder":"client"}))
+            .unwrap();
+        assert_eq!(people.as_array().unwrap().len(), 1);
+        assert_eq!(people[0]["name"], "client");
+        assert!(
+            server
+                .call("get_meeting", json!({"id":client_id,"folder":"client"}))
+                .is_ok()
+        );
+        assert!(
+            server
+                .call("get_meeting", json!({"id":other_id,"folder":"client"}))
+                .is_err()
+        );
+        assert!(server.call("list_recent", json!({"folder":42})).is_err());
     }
 }

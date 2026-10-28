@@ -41,15 +41,20 @@ impl Snapshot {
     fn read(settings: &Settings) -> anyhow::Result<Self> {
         let library = Library::open(&settings.library)?;
         Ok(Self {
-            people: library.people(false, &settings.user_name, &settings.user_aliases)?,
+            people: library.people_in_folder(
+                false,
+                &settings.user_name,
+                &settings.user_aliases,
+                settings.folder.as_deref(),
+            )?,
             edits: library.read_people_edits()?,
-            series: library.series(false)?,
+            series: library.series_in_folder(false, settings.folder.as_deref())?,
             meetings: library
                 .list_meetings()?
                 .into_iter()
                 .map(|m| (m.path().to_owned(), m))
                 .collect(),
-            tasks: library.list_tasks(None, None, false)?,
+            tasks: library.list_tasks_in_folder(None, None, false, settings.folder.as_deref())?,
         })
     }
 }
@@ -66,6 +71,7 @@ pub enum HeaderAction {
 pub struct Panel {
     view: Option<View>,
     root: PathBuf,
+    folder: Option<String>,
     snapshot: Option<Snapshot>,
     receiver: Option<Receiver<Result<Response, String>>>,
     needs_refresh: bool,
@@ -93,6 +99,7 @@ impl Default for Panel {
         Self {
             view: None,
             root: PathBuf::new(),
+            folder: None,
             snapshot: None,
             receiver: None,
             needs_refresh: false,
@@ -144,15 +151,17 @@ impl Panel {
             return;
         }
         self.needs_refresh = false;
-        let settings = settings.clone();
+        let mut settings = settings.clone();
+        settings.folder = self.folder.clone();
         self.launch(ctx, move || {
             Ok(Response::Loaded(Box::new(Snapshot::read(&settings)?)))
         });
     }
     pub fn poll(&mut self, ctx: &egui::Context, state: &mut AppState) {
-        if self.root != state.settings.library {
+        if self.root != state.settings.library || self.folder != state.folder_filter {
             *self = Self {
                 root: state.settings.library.clone(),
+                folder: state.folder_filter.clone(),
                 ..Self::default()
             };
         }
@@ -275,9 +284,10 @@ impl Panel {
         self.brief.clear();
         self.merge_into.clear();
         let root = self.root.clone();
+        let folder = self.folder.clone();
         self.launch(ctx, move || {
             Ok(Response::Person(Box::new(
-                Library::open(root)?.person_page(person, false)?,
+                Library::open(root)?.person_page_in_folder(person, false, folder.as_deref())?,
             )))
         });
     }
@@ -589,18 +599,21 @@ impl Panel {
         if generate {
             let recent = self.recent;
             let root = self.root.clone();
+            let folder = self.folder.clone();
             self.launch(ui.ctx(), move || {
-                Ok(Response::Brief(notetaker_llm::person_brief(
+                Ok(Response::Brief(notetaker_llm::person_brief_in_folder(
                     &Library::open(root)?,
                     page.person,
                     recent,
                     notetaker_llm::Config::load().ok().as_ref(),
                     notetaker_llm::Cancellation::default(),
+                    folder.as_deref(),
                 )?))
             });
         }
         if let Some(edits) = changed {
-            let settings = state.settings.clone();
+            let mut settings = state.settings.clone();
+            settings.folder = self.folder.clone();
             self.launch(ui.ctx(), move || {
                 let library = Library::open(&settings.library)?;
                 library.write_people_edits(&edits)?;
@@ -730,6 +743,7 @@ impl Panel {
                         .and_then(|s| s.people.iter().find(|p| p.id == self.filter_person))
                         .cloned(),
                     series_id: (!self.filter_series.is_empty()).then(|| self.filter_series.clone()),
+                    folder: self.folder.clone(),
                 };
                 self.launch(ui.ctx(), move || {
                     let library = Library::open(root)?;

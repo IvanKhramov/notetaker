@@ -10,11 +10,13 @@ mod detection;
 mod icon;
 mod live;
 mod maintenance;
+mod organization;
 mod people;
 mod quickstart;
 mod speakers;
 mod state;
 mod theme;
+mod trackers;
 mod ui;
 #[cfg(windows)]
 mod updates;

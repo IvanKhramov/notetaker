@@ -7,12 +7,16 @@ use std::{fs, path::PathBuf};
 pub struct PeopleArgs {
     #[arg(long)]
     library: Option<PathBuf>,
+    #[arg(long)]
+    folder: Option<String>,
 }
 #[derive(clap::Args)]
 pub struct PersonArgs {
     pub person: String,
     #[arg(long)]
     library: Option<PathBuf>,
+    #[arg(long)]
+    folder: Option<String>,
 }
 #[derive(clap::Args)]
 pub struct DigestArgs {
@@ -22,6 +26,8 @@ pub struct DigestArgs {
     prev: bool,
     #[arg(long)]
     library: Option<PathBuf>,
+    #[arg(long)]
+    folder: Option<String>,
 }
 #[derive(Default, Deserialize)]
 #[serde(default)]
@@ -50,7 +56,12 @@ fn library(path: Option<PathBuf>) -> Result<(Library, Preferences)> {
 pub fn people(args: PeopleArgs) -> Result<()> {
     let (library, prefs) = library(args.library)?;
     for person in library
-        .people(false, &prefs.user_name, &prefs.user_aliases)?
+        .people_in_folder(
+            false,
+            &prefs.user_name,
+            &prefs.user_aliases,
+            args.folder.as_deref(),
+        )?
         .into_iter()
         .filter(|p| !p.hidden)
     {
@@ -65,7 +76,12 @@ pub fn people(args: PeopleArgs) -> Result<()> {
 pub fn person(args: PersonArgs) -> Result<()> {
     let (library, prefs) = library(args.library)?;
     let matches: Vec<_> = library
-        .people(false, &prefs.user_name, &prefs.user_aliases)?
+        .people_in_folder(
+            false,
+            &prefs.user_name,
+            &prefs.user_aliases,
+            args.folder.as_deref(),
+        )?
         .into_iter()
         .filter(|p| p.id == args.person || p.matches(&args.person))
         .collect();
@@ -73,7 +89,11 @@ pub fn person(args: PersonArgs) -> Result<()> {
         matches.len() == 1,
         "Человек не найден или имя неоднозначно; укажите email"
     );
-    let page = library.person_page(matches.into_iter().next().unwrap(), false)?;
+    let page = library.person_page_in_folder(
+        matches.into_iter().next().unwrap(),
+        false,
+        args.folder.as_deref(),
+    )?;
     println!("{}", serde_json::to_string_pretty(&page)?);
     Ok(())
 }
@@ -81,7 +101,10 @@ pub fn digest(args: DigestArgs) -> Result<()> {
     let (library, _) = library(args.library)?;
     let digest = library.digest(
         DigestPeriod::week(chrono::Local::now(), args.prev),
-        &DigestFilter::default(),
+        &DigestFilter {
+            folder: args.folder,
+            ..Default::default()
+        },
         &chrono::Local,
         false,
     )?;
