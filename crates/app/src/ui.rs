@@ -16,6 +16,11 @@ use crate::{
     worker::Command,
 };
 
+const TEXT_SCROLL_MARGIN: egui::Margin = egui::Margin {
+    right: 16,
+    ..egui::Margin::ZERO
+};
+
 struct Toast {
     at: Instant,
     text: String,
@@ -334,7 +339,9 @@ impl NotetakerApp {
                     };
                     theme::timeline_row(ui, dot, |ui| {
                         let frame = theme::card(p, selected)
+                            .inner_margin(10)
                             .show(ui, |ui| {
+                                ui.spacing_mut().item_spacing.y = 4.0;
                                 ui.set_width((ui.available_width() - 2.0).max(1.0));
                                 ui.add(
                                     egui::Label::new(
@@ -398,23 +405,27 @@ impl NotetakerApp {
                                         .map(|segment| segment.speaker.0.as_str())
                                         .collect();
                                     if !speakers.is_empty() {
-                                        ui.horizontal(|ui| {
-                                            ui.spacing_mut().item_spacing.x = 3.0;
-                                            for id in speakers.into_iter().take(6) {
-                                                let (rect, response) = ui.allocate_exact_size(
-                                                    egui::vec2(10.0, 10.0),
-                                                    egui::Sense::hover(),
-                                                );
-                                                ui.painter().circle_filled(
-                                                    rect.center(),
-                                                    3.0,
-                                                    crate::speakers::color(id),
-                                                );
-                                                response.on_hover_text(
-                                                    document.data.transcript.speaker_name(id),
-                                                );
-                                            }
-                                        });
+                                        ui.allocate_ui_with_layout(
+                                            egui::vec2(ui.available_width(), 10.0),
+                                            egui::Layout::left_to_right(egui::Align::Center),
+                                            |ui| {
+                                                ui.spacing_mut().item_spacing.x = 3.0;
+                                                for id in speakers.into_iter().take(6) {
+                                                    let (rect, response) = ui.allocate_exact_size(
+                                                        egui::vec2(10.0, 10.0),
+                                                        egui::Sense::hover(),
+                                                    );
+                                                    ui.painter().circle_filled(
+                                                        rect.center(),
+                                                        3.0,
+                                                        crate::speakers::color(id),
+                                                    );
+                                                    response.on_hover_text(
+                                                        document.data.transcript.speaker_name(id),
+                                                    );
+                                                }
+                                            },
+                                        );
                                     }
                                 }
                             })
@@ -1087,7 +1098,7 @@ impl NotetakerApp {
                     if assist.schedule.busy() { ui.spinner(); }
                     if let Some(error) = &assist.error { ui.label(error); }
                     if assist.summary.is_empty() { ui.weak("Конспект появится после новых строк транскрипта. Нужен настроенный провайдер."); }
-                    egui::ScrollArea::vertical().id_salt("live_summary").show(ui, |ui| {
+                    egui::ScrollArea::vertical().id_salt("live_summary").content_margin(TEXT_SCROLL_MARGIN).show(ui, |ui| {
                         CommonMarkViewer::new().show(ui, &mut self.cache, &assist.summary);
                     });
                 } else { transcript_view(ui, document, &path, true, None, false, false); }
@@ -1269,6 +1280,7 @@ impl NotetakerApp {
                 if self.notes_preview {
                     egui::ScrollArea::vertical()
                         .id_salt(("notes_preview", &path))
+                        .content_margin(TEXT_SCROLL_MARGIN)
                         .show(ui, |ui| {
                             markdown_preview(
                                 ui,
@@ -1285,6 +1297,7 @@ impl NotetakerApp {
             Tab::Enhanced => {
                 egui::ScrollArea::vertical()
                     .id_salt(("enhanced", &path))
+                    .content_margin(TEXT_SCROLL_MARGIN)
                     .show(ui, |ui| {
                         if let Some(text) = &document.generation {
                             markdown_preview(
@@ -2367,6 +2380,7 @@ fn notes_editor(
     let mut images = Vec::new();
     egui::ScrollArea::vertical()
         .id_salt(("notes", path))
+        .content_margin(TEXT_SCROLL_MARGIN)
         .show(ui, |ui| {
             let id = egui::Id::unique(("notes_edit", path));
             if ui.memory(|memory| memory.has_focus(id)) {
@@ -2511,6 +2525,7 @@ fn transcript_view(
     let mut scrolled = false;
     egui::ScrollArea::vertical()
         .id_salt(("transcript", path))
+        .content_margin(TEXT_SCROLL_MARGIN)
         .stick_to_bottom(live)
         .show(ui, |ui| {
             for (index, segment) in document.data.transcript.segments.iter().enumerate() {
