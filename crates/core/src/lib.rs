@@ -8,10 +8,15 @@ pub use relationships::{CarryOver, MeetingSummary, PersonPage, Series, decisions
 mod digest;
 pub use digest::{Digest, DigestFilter, DigestPeriod};
 pub mod calendar;
+pub mod embedding;
 mod export;
 mod identity;
 mod index;
+mod semantic;
 pub use identity::configured_user_name;
+pub use semantic::{
+    Anchor, Chunk, Embedder, SearchMode, SemanticProgress, dot_blob, meeting_chunks,
+};
 mod model;
 mod paths;
 pub use paths::{display_path, display_text};
@@ -53,6 +58,8 @@ pub enum Error {
         path: std::path::PathBuf,
         local: std::path::PathBuf,
     },
+    #[error("Поиск по смыслу: {0}")]
+    Embedding(String),
     #[error("invalid index data: {0}")]
     InvalidIndex(String),
     #[error("task edit failed: {0}")]

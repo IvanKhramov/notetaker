@@ -17,6 +17,8 @@ pub struct Hit {
     pub title: String,
     /// Plain text, with matching words surrounded by `[` and `]`.
     pub snippet: String,
+    pub anchor: Option<crate::Anchor>,
+    pub chunks: Vec<crate::Chunk>,
 }
 
 impl Library {
@@ -72,6 +74,8 @@ impl Library {
                 path: PathBuf::from(path),
                 title,
                 snippet,
+                anchor: None,
+                chunks: Vec::new(),
             })
         })
         .collect()
@@ -126,6 +130,8 @@ impl Library {
                 path,
                 title: meta.title,
                 snippet: row.get(3)?,
+                anchor: None,
+                chunks: Vec::new(),
             });
             if hits.len() >= limit.min(100) {
                 break;
@@ -220,7 +226,7 @@ impl Library {
         Ok(result)
     }
 
-    fn open_index(&self) -> Result<Connection> {
+    pub(crate) fn open_index(&self) -> Result<Connection> {
         let path = self.index_path();
         fs::create_dir_all(path.parent().expect("index has a parent"))?;
         match connect_index(&path) {
@@ -236,7 +242,8 @@ impl Library {
 
     fn reindex(&self, full: bool) -> Result<()> {
         let mut connection = self.open_index()?;
-        let transaction = connection.transaction()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         if full {
             transaction.execute("DELETE FROM meetings", [])?;
             transaction.execute("DELETE FROM tasks", [])?;
@@ -328,7 +335,7 @@ impl Library {
     }
 }
 
-fn source_stamp(meeting: &Meeting) -> Result<String> {
+pub(crate) fn source_stamp(meeting: &Meeting) -> Result<String> {
     let mut stamps = Vec::new();
     for name in ["meta.yaml", "notes.md", "enhanced.md", "transcript.json"] {
         let stamp = match fs::metadata(meeting.source_path(name)?) {
@@ -345,13 +352,23 @@ fn connect_index(path: &Path) -> Result<Connection> {
     let connection = Connection::open(path)?;
     connection.busy_timeout(Duration::from_secs(5))?;
     let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version != 3 {
-        connection.execute_batch(
-            "DROP TABLE IF EXISTS meetings; DROP TABLE IF EXISTS tasks; DROP TABLE IF EXISTS people_sources; PRAGMA user_version = 3;",
+    let initializing = version != 4;
+    if initializing {
+        // The GUI can start FTS and semantic jobs together on a new library.
+        // Recheck after acquiring the lock so the second opener keeps the schema.
+        connection.execute_batch("BEGIN IMMEDIATE")?;
+        let current: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if current != 4 {
+            connection.execute_batch(
+            "DROP TABLE IF EXISTS meetings; DROP TABLE IF EXISTS tasks; DROP TABLE IF EXISTS people_sources; DROP TABLE IF EXISTS semantic_chunks; DROP TABLE IF EXISTS semantic_sources; PRAGMA user_version = 4;",
         )?;
+        }
     }
     connection.execute_batch(
-        "CREATE TABLE IF NOT EXISTS people_sources (path TEXT PRIMARY KEY, stamp TEXT NOT NULL, item TEXT NOT NULL);
+        "CREATE TABLE IF NOT EXISTS semantic_chunks (id INTEGER PRIMARY KEY, path TEXT NOT NULL, model TEXT NOT NULL, stamp TEXT NOT NULL, local INTEGER NOT NULL, chunk TEXT NOT NULL, vector BLOB NOT NULL);
+        CREATE INDEX IF NOT EXISTS semantic_model_path ON semantic_chunks(model,path);
+        CREATE TABLE IF NOT EXISTS semantic_sources(path TEXT NOT NULL, model TEXT NOT NULL, stamp TEXT NOT NULL, local INTEGER NOT NULL, PRIMARY KEY(path,model));
+        CREATE TABLE IF NOT EXISTS people_sources (path TEXT PRIMARY KEY, stamp TEXT NOT NULL, item TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS tasks (path TEXT NOT NULL, line INTEGER NOT NULL, item TEXT NOT NULL, PRIMARY KEY(path, line));
         CREATE VIRTUAL TABLE IF NOT EXISTS meetings USING fts5(
             meeting_id UNINDEXED, path UNINDEXED, stamp UNINDEXED,
@@ -359,6 +376,12 @@ fn connect_index(path: &Path) -> Result<Connection> {
             tokenize = 'unicode61 remove_diacritics 2'
         );",
     )?;
+    connection
+        .prepare("SELECT path,model,stamp,local,chunk,vector FROM semantic_chunks LIMIT 0")?;
+    if initializing {
+        connection.execute_batch("COMMIT")?;
+    }
+    connection.prepare("SELECT path,model,stamp,local FROM semantic_sources LIMIT 0")?;
     connection.prepare("SELECT path, line, item FROM tasks LIMIT 0")?;
     connection.prepare("SELECT path, stamp, item FROM people_sources LIMIT 0")?;
     connection.prepare(

@@ -6,6 +6,7 @@ members = [
     "crates/detect",
     "crates/asr-proto",
     "crates/asr-worker",
+    "crates/embed-worker",
     "crates/llm",
     "crates/pipeline",
     "crates/cli",
