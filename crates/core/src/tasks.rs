@@ -21,6 +21,8 @@ pub struct Task {
     pub due: Option<NaiveDate>,
     pub completed: bool,
     pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_url: Option<String>,
     #[serde(skip)]
     pub revision: Revision,
 }
@@ -72,6 +74,15 @@ pub fn parse_tasks(text: &str, date: NaiveDate) -> Vec<Task> {
             .filter(|byte| *byte == b'\n')
             .count();
         let body = text[range.end..line_end].trim();
+        let (body, issue_url) = if let Some((body, suffix)) = body.rsplit_once(" [Трекер](") {
+            if let Some(url) = suffix.strip_suffix(')') {
+                (body.trim(), Some(url.to_owned()))
+            } else {
+                (body, None)
+            }
+        } else {
+            (body, None)
+        };
         if body.is_empty() {
             continue;
         }
@@ -142,6 +153,7 @@ pub fn parse_tasks(text: &str, date: NaiveDate) -> Vec<Task> {
             due_text,
             completed,
             source: source.into(),
+            issue_url,
             revision: Revision::default(),
         });
     }
@@ -215,6 +227,43 @@ pub fn resolve_due(value: &str, date: NaiveDate) -> Option<NaiveDate> {
 }
 
 impl Meeting {
+    pub fn link_task_issue(&self, task: &Task, url: &str) -> Result<Revision> {
+        if !(url.starts_with("https://") || url.starts_with("http://"))
+            || url.contains(['\n', '\r', ')', '('])
+        {
+            return Err(crate::Error::TaskEdit("Некорректная ссылка трекера".into()));
+        }
+        let loaded = self.load_enhanced()?;
+        if loaded.revision != task.revision
+            || loaded.value.lines().nth(task.line.saturating_sub(1)) != Some(task.source.as_str())
+        {
+            return Err(crate::Error::TaskEdit(
+                "Задача изменилась; обновите список".into(),
+            ));
+        }
+        if task.issue_url.is_some() {
+            return Err(crate::Error::TaskEdit("Задача уже отправлена".into()));
+        }
+        let mut lines = loaded
+            .value
+            .split_inclusive('\n')
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let line = &mut lines[task.line - 1];
+        let ending = if line.ends_with("\r\n") {
+            "\r\n"
+        } else if line.ends_with('\n') {
+            "\n"
+        } else {
+            ""
+        };
+        *line = format!(
+            "{} [Трекер]({url}){ending}",
+            line.trim_end_matches(['\r', '\n'])
+        );
+        self.save_enhanced(&lines.concat(), task.revision)
+    }
+
     pub fn toggle_task(&self, task: &Task, completed: bool) -> Result<Revision> {
         if task.line == 0 || task.path != self.path {
             return Err(crate::Error::TaskEdit(

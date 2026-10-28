@@ -1,10 +1,7 @@
 //! Rebuilt observations plus explicit local identity edits. Never guess nicknames.
 use crate::{Library, Result, person_matches};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fs,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) fn normalized(value: &str) -> String {
     value
@@ -52,6 +49,8 @@ impl Person {
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PeopleEdits {
+    #[serde(skip)]
+    pub revision: crate::Revision,
     /// Source identity -> user-selected stable identity.
     pub merges: BTreeMap<String, String>,
     pub names: BTreeMap<String, String>,
@@ -258,18 +257,22 @@ pub(crate) fn meeting_people(
 }
 impl Library {
     pub fn read_people_edits(&self) -> Result<PeopleEdits> {
-        match fs::read(self.root().join(".notetaker/people.json")) {
-            Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(PeopleEdits::default()),
-            Err(e) => Err(e.into()),
-        }
+        let loaded = self.load_shared_text("people.json")?;
+        let mut edits = if loaded.value.is_empty() {
+            PeopleEdits::default()
+        } else {
+            serde_json::from_str(&loaded.value)?
+        };
+        edits.revision = loaded.revision;
+        Ok(edits)
     }
     pub fn write_people_edits(&self, edits: &PeopleEdits) -> Result<()> {
-        fs::create_dir_all(self.root().join(".notetaker"))?;
-        crate::storage::atomic_write(
-            &self.root().join(".notetaker/people.json"),
-            &serde_json::to_vec_pretty(edits)?,
-        )
+        self.save_shared_text(
+            "people.json",
+            &serde_json::to_string_pretty(edits)?,
+            edits.revision,
+        )?;
+        Ok(())
     }
     /// Local-only voice enrollment and user aliases are omitted for MCP privacy.
     pub fn people(

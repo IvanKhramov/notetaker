@@ -95,7 +95,8 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
 
 impl Library {
     pub fn read_voices(&self) -> Result<VoiceLibrary> {
-        match fs::read(self.root.join(".notetaker/voices.json")) {
+        self.relocate_private_state()?;
+        match fs::read(self.private_state_dir().join("voices.json")) {
             Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(VoiceLibrary::default()),
             Err(e) => Err(e.into()),
@@ -104,7 +105,7 @@ impl Library {
 
     /// Called only with the voice library enabled. Give legacy entries stable identities.
     pub fn prepare_voices(&self) -> Result<VoiceLibrary> {
-        let path = self.root.join(".notetaker/voices.json");
+        let path = self.private_state_dir().join("voices.json");
         let lock = meeting_lock(&path);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut voices = self.read_voices()?;
@@ -116,7 +117,7 @@ impl Library {
     }
 
     pub fn delete_voice(&self, name: &str) -> Result<()> {
-        let path = self.root.join(".notetaker/voices.json");
+        let path = self.private_state_dir().join("voices.json");
         let lock = meeting_lock(&path);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut library = self.read_voices()?;
@@ -132,8 +133,8 @@ impl Library {
         let id = meeting.read_meta()?.id;
         write_json(
             &self
-                .root
-                .join(format!(".notetaker/speaker-embeddings/{id}.json")),
+                .private_state_dir()
+                .join(format!("speaker-embeddings/{id}.json")),
             &MeetingVoices {
                 model: VOICE_MODEL.into(),
                 embeddings,
@@ -145,8 +146,8 @@ impl Library {
     pub fn remember_speakers(&self, meeting: &Meeting, transcript: &Transcript) -> Result<()> {
         let id = meeting.read_meta()?.id;
         let bytes = match fs::read(
-            self.root
-                .join(format!(".notetaker/speaker-embeddings/{id}.json")),
+            self.private_state_dir()
+                .join(format!("speaker-embeddings/{id}.json")),
         ) {
             Ok(v) => v,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -156,7 +157,7 @@ impl Library {
         if meeting.model != VOICE_MODEL {
             return Ok(());
         }
-        let path = self.root.join(".notetaker/voices.json");
+        let path = self.private_state_dir().join("voices.json");
         let lock = meeting_lock(&path);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut library = self.read_voices()?;
@@ -313,8 +314,8 @@ pub struct SpeakerEditResult {
 
 impl Library {
     fn meeting_voices_path(&self, meeting: &Meeting) -> Result<std::path::PathBuf> {
-        Ok(self.root.join(format!(
-            ".notetaker/speaker-embeddings/{}.json",
+        Ok(self.private_state_dir().join(format!(
+            "speaker-embeddings/{}.json",
             meeting.read_meta()?.id
         )))
     }
@@ -346,7 +347,7 @@ impl Library {
             ));
         }
         let mut transcript = loaded.value;
-        let voices_path = self.root.join(".notetaker/voices.json");
+        let voices_path = self.private_state_dir().join("voices.json");
         let lock = meeting_lock(&voices_path);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut voices = if voices_enabled {

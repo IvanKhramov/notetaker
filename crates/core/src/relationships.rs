@@ -194,12 +194,20 @@ impl Library {
         Ok(summaries)
     }
     pub fn person_page(&self, person: Person, exclude_local: bool) -> Result<PersonPage> {
+        self.person_page_in_folder(person, exclude_local, None)
+    }
+    pub fn person_page_in_folder(
+        &self,
+        person: Person,
+        exclude_local: bool,
+        folder: Option<&str>,
+    ) -> Result<PersonPage> {
         let meetings: Vec<_> = self
             .meeting_summaries(exclude_local)?
             .into_iter()
-            .filter(|m| m.has_person(&person))
+            .filter(|m| m.has_person(&person) && crate::folders::matches_folder(&m.meta, folder))
             .collect();
-        let tasks = self.list_tasks(None, None, exclude_local)?;
+        let tasks = self.list_tasks_in_folder(None, None, exclude_local, folder)?;
         let mut page = PersonPage {
             owned_tasks: tasks
                 .iter()

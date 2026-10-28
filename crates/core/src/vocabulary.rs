@@ -46,7 +46,7 @@ impl Vocabulary {
         Self::with_library(&global, library)
     }
 
-    fn merge(&mut self, text: &str) {
+    pub fn merge(&mut self, text: &str) {
         for line in text
             .lines()
             .map(str::trim)

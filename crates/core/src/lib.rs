@@ -1,7 +1,9 @@
 //! Meeting files are the source of truth; the SQLite search index is disposable.
 mod attachments;
 mod brief;
+pub mod folders;
 mod people;
+pub mod sharing;
 pub use people::{PeopleEdits, Person, resolve_people};
 mod relationships;
 pub use relationships::{CarryOver, MeetingSummary, PersonPage, Series, decisions};

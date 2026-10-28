@@ -15,6 +15,10 @@ pub struct MeetingMeta {
     pub app: Option<String>,
     pub mode: Mode,
     pub template: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
     /// `None` keeps audio indefinitely; a timestamp at/before now expires it.
     pub audio_expires_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -39,6 +43,8 @@ impl MeetingMeta {
             app: None,
             mode: Mode::Local,
             template: None,
+            folder: None,
+            tags: Vec::new(),
             audio_expires_at: started_at.checked_add_signed(TimeDelta::days(7)),
         }
     }

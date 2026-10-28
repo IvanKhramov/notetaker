@@ -23,7 +23,7 @@ pub struct Hit {
 
 impl Library {
     pub fn index_path(&self) -> PathBuf {
-        self.root.join(".notetaker/index.sqlite")
+        self.local_state_dir().join("index.sqlite")
     }
 
     /// Rebuild all index content transactionally from the meeting files.

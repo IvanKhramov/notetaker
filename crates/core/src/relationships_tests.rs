@@ -289,6 +289,7 @@ fn user_edits_follow_a_new_email_and_can_be_unhidden() {
     assert_eq!(people[0].name, "Анна Новая");
     assert!(people[0].hidden);
     assert_eq!(people[0].id, "email:a@x");
+    let mut edits = library.read_people_edits().unwrap();
     edits.set_hidden(&people[0], false);
     library.write_people_edits(&edits).unwrap();
     assert!(!library.people(false, "", "").unwrap()[0].hidden);

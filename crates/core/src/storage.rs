@@ -202,6 +202,20 @@ impl Meeting {
         )?)?)
     }
 
+    pub fn update_meta(&self, update: impl FnOnce(&mut MeetingMeta)) -> Result<()> {
+        let lock = meeting_lock(&self.path);
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let loaded = load_text(&self.source_path("meta.yaml")?)?;
+        let mut meta: MeetingMeta = serde_yaml::from_str(&loaded.value)?;
+        update(&mut meta);
+        checked_write(
+            &self.path.join("meta.yaml"),
+            serde_yaml::to_string(&meta)?.as_bytes(),
+            loaded.revision,
+        )?;
+        Ok(())
+    }
+
     pub fn write_meta(&self, meta: &MeetingMeta) -> Result<()> {
         atomic_write(
             &self.path.join("meta.yaml"),
@@ -354,7 +368,7 @@ fn slug(title: &str) -> String {
     }
 }
 
-fn load_text(path: &Path) -> Result<Versioned<String>> {
+pub(crate) fn load_text(path: &Path) -> Result<Versioned<String>> {
     let bytes = read_bytes(path)?;
     let revision = Revision::of(bytes.as_deref());
     let value = String::from_utf8(bytes.unwrap_or_default())
@@ -362,7 +376,7 @@ fn load_text(path: &Path) -> Result<Versioned<String>> {
     Ok(Versioned { value, revision })
 }
 
-fn checked_write(path: &Path, bytes: &[u8], expected: Revision) -> Result<Revision> {
+pub(crate) fn checked_write(path: &Path, bytes: &[u8], expected: Revision) -> Result<Revision> {
     let current = Revision::of(read_bytes(path)?.as_deref());
     if current != expected {
         // UUID disambiguates concurrent saves within the same millisecond.

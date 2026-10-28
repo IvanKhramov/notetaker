@@ -43,6 +43,7 @@ impl DigestPeriod {
 pub struct DigestFilter {
     pub person: Option<Person>,
     pub series_id: Option<String>,
+    pub folder: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Digest {
@@ -69,7 +70,8 @@ impl Library {
         }
         let all = self.meeting_summaries(exclude_local)?;
         let relevant = |m: &&MeetingSummary| {
-            filter.person.as_ref().is_none_or(|p| m.has_person(p))
+            crate::folders::matches_folder(&m.meta, filter.folder.as_deref())
+                && filter.person.as_ref().is_none_or(|p| m.has_person(p))
                 && filter
                     .series_id
                     .as_ref()
