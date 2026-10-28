@@ -57,6 +57,10 @@ Markdown, JSON, CSV и VTT сохраняют закладки; SRT содерж
 фрагменты ведут к строкам заметок и времени реплик. Local остаётся локальным,
 удалённые embeddings доступны только для Hybrid. CLI: `search --mode hybrid`,
 `reindex --semantic`; MCP: `search_meetings(..., mode="hybrid")`.
+Выбранные папка и тег ограничивают поиск до лимита результатов во всех режимах.
+CLI: `search --folder client`; MCP: `search_meetings(..., folder="client")`.
+Чат по библиотеке учитывает выбранную папку. См. [папки](docs/organization.md)
+и [локальное хранение индекса общей библиотеки](docs/sharing.md).
 Backend, приватность и измерения: [поиск](docs/search.md).
 
 ## Папки, трекеры и общая библиотека (0.13.0)
@@ -70,6 +74,8 @@ Backend, приватность и измерения: [поиск](docs/search.
 Секреты остаются в Credential Manager, созданная ссылка сохраняется рядом с
 задачей. Local требует отдельного подтверждения. [Трекеры](docs/trackers.md).
 
+В быстром старте и настройках есть два независимых необязательных шага:
+«Поиск по смыслу» (скачивание модели) и «Общая библиотека» (переключатель).
 Для Яндекс Диска и других синхронизируемых папок включите общую библиотеку:
 индекс пересоздаётся в локальном каталоге пользователя, биометрия всегда
 локальна, копии заметок можно сравнить и объединить. Local-файлы в общей
@@ -92,6 +98,9 @@ Windows 10 builds fall back to all system audio (see the diagnostics guide).
    Download GigaAM v3 for Russian or Parakeet v3 for English inline, then connect
    AI and an optional ICS calendar without opening Settings. Speaker models
    download automatically once an ASR model is installed (can be disabled).
+   Quick start and Settings also offer two optional steps: download the semantic
+   search model and enable shared-library mode for a synced folder. See
+   [search](docs/search.md) and [sharing](docs/sharing.md).
    Select **Больше не показывать при запуске** to hide the window; reopen it from
    the sidebar or Settings. A dismissible sidebar reminder shows missing ASR/AI.
 2. Start a recording, select the call's audio session, and write notes. Windows
