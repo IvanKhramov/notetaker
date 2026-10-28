@@ -202,12 +202,33 @@
   синхронизации, revision общих файлов, сравнение копий notes/enhanced,
   периодическое обновление при фокусе. [Ограничения](sharing.md).
 
+## macOS Apple Silicon: реализовано, ожидает проверки на Mac
+
+- macOS 14.4+: вход Core Audio и приватный global process tap без собственного
+  процесса; 16 кГц mono, общие монотонные часы, ограниченные очереди,
+  переоткрытие при смене устройства. Выбор PID сообщает о переходе на общий звук.
+- Unix single instance и show/quit по сокету, меню macOS, Cmd+Option+Shift hotkeys,
+  LaunchAgent, Keychain, отдельная папка логов, ручные обновления через Releases.
+- Определение звонков по HAL microphone owners и дереву процессов;
+  без чтения вкладок и названий встреч, возможны ложные предложения.
+- `.app` со всеми workers, русские permission prompts, ad-hoc codesign,
+  `.dmg` и SHA-256; CI проверяет bundle/plist/signature, release добавляет DMG
+  к общему draft после Windows. Версия Cargo не меняется.
+- На Linux прошли форматирование, Clippy с `-D warnings` и workspace tests.
+  Для arm64 macOS прошёл Clippy capture/runtime/detect, включая test targets.
+  Полная сборка приложения, линковка и упаковка ожидают macOS CI;
+  Windows cross-check на Linux ограничен отсутствием MSVC `lib.exe`.
+  Реальные звонки, синхронизация дорожек, Bluetooth и TCC ещё не проверены.
+  Ad-hoc подпись может требовать повторной выдачи разрешений после обновления.
+- Release runner `macos-14` собирает arm64 через target и ARM sherpa SDK;
+  GitHub объявил его отключение 2026-11-02, потребуется новый runner.
+
 ## Дальше
 - Калибровка подавления эха и hotwords на реальных звонках.
 - Напоминания календаря; MONTHLY/YEARLY и полные правила повторов ICS.
 - Калибровка качества семантического поиска на реальных библиотеках.
 - Выбор effort на сценарий и отдельный сценарий задач.
-- macOS (Core Audio taps), Linux (PipeWire), синхронизация папки через Диск.
+- Linux (PipeWire), синхронизация папки через Диск.
 
 ## Откат
 Каждая веха в своей ветке, мерж fast-forward в main после проверки. Откат: revert мерж-коммита.

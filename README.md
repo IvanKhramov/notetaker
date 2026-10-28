@@ -1,7 +1,7 @@
 # notetaker
 
 An open-source AI notebook for online meetings, inspired by Granola and written
-in Rust. Windows comes first, with macOS and Linux capture support planned.
+in Rust. Windows and macOS (Apple Silicon, 14.4+) support live capture. Linux capture is planned.
 
 **v0.7.0:** Fast speaker corrections with merge/undo and segment selection,
 speaker timing statistics and a clickable timeline. Export transcripts as
@@ -91,6 +91,74 @@ is available beside the ZIP (`Get-FileHash <zip> -Algorithm SHA256`).
 Windows 11 is recommended for capture of an individual application; older
 Windows 10 builds fall back to all system audio (see the diagnostics guide).
 
+### macOS (Apple Silicon)
+
+Скачайте `notetaker-<version>-macos-arm64.dmg` и соседний `.sha256` из
+[Releases](https://github.com/IvanKhramov/notetaker/releases).
+Требуется Apple Silicon и macOS 14.4 или новее. Проверка загрузки:
+
+```sh
+shasum -a 256 -c notetaker-<version>-macos-arm64.dmg.sha256
+```
+
+Откройте DMG, перетащите `notetaker.app` в Applications, извлеките образ.
+Приложение подписано ad-hoc, без Apple Developer ID и notarization.
+При первом запуске попробуйте правую кнопку на приложении > Open.
+Если Gatekeeper блокирует запуск, для доверенной загрузки выполните:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/notetaker.app
+open /Applications/notetaker.app
+```
+
+При первой записи разрешите **Microphone** и **System Audio Recording**
+в **System Settings > Privacy & Security**. Название раздела системного звука
+может включать Screen Recording. После изменения разрешений перезапустите
+notetaker. Ad-hoc подпись меняется между сборками: после обновления macOS может
+повторно запросить доступ или потребовать выключить и включить разрешение.
+Нулевой системный звук не доказывает отсутствие разрешения; проверьте его
+в настройках и запустите слышимый звук в другом приложении.
+
+Запись использует микрофон по умолчанию и Core Audio global process tap:
+весь системный звук, кроме самого notetaker. Выбор одного приложения пока
+недоступен, выбранный PID вызывает явное сообщение о переходе на общий звук.
+При смене устройства поток переоткрывается; неудача видна как ошибка записи.
+Рекомендуются наушники, подавление эха остаётся приблизительным.
+
+Приложение имеет обычное окно, Dock и меню в строке macOS. Закрытие окна
+скрывает его, выход через меню завершает запись и сохранение.
+Клавиши по умолчанию: Cmd+Option+Shift+R (запись), Cmd+Option+Shift+M (обзор),
+Cmd+Option+Shift+B (закладка). В настройках `Super` означает Cmd, `Alt` означает Option.
+Автозапуск создаёт `~/Library/LaunchAgents/com.notetaker.app.plist` для следующего
+входа в систему. Включайте его после переноса приложения в Applications;
+после переноса в другое место выключите и включите настройку заново.
+
+Определение звонка использует активность микрофона и процессы Zoom, Teams,
+Slack, Telegram и браузеров. Вкладки и названия встреч не читаются, диктовка
+может выглядеть как звонок. Подтверждайте начало и конец записи вручную.
+Обновление открывает страницу релиза: завершите запись, закройте приложение
+и замените `.app` из нового DMG. Автоматической установки нет.
+
+Настройки, модели и локальные данные: `~/Library/Application Support/notetaker`.
+Логи: `~/Library/Logs/notetaker`. Ключи API и секретные URL календарей хранятся
+в macOS Keychain. Вход в Claude/Codex CLI выполняется вручную в Terminal
+(`claude`, затем `/login`, либо `codex login`), после этого нажмите проверку
+подключения в notetaker. Библиотека по умолчанию: `~/Documents/notetaker`.
+ASR и embedding workers включены в `.app`; модели скачиваются отдельно.
+
+Сборка на Mac с Rust и Xcode Command Line Tools:
+
+```sh
+rustup target add aarch64-apple-darwin
+export SHERPA_TARGET_ARCH=arm64
+export SHERPA_ONNX_LIB_DIR=$(bash scripts/fetch-sherpa-libs.sh | sed -n 's/^SHERPA_ONNX_LIB_DIR=//p' | tail -1)
+scripts/package-macos.sh
+```
+
+Скрипт создаёт DMG и SHA-256 в `dist/`, проверяет arm64, plist, комплектность
+workers, отсутствие внешних dylib и ad-hoc подпись. На Linux сборка DMG
+недоступна. Реальный захват и разрешения требуют проверки на Mac.
+
 ## Quick start
 
 1. At startup, **Быстрый старт** shows installed speech/speaker models, AI
@@ -173,12 +241,11 @@ and a small always-on-top recording window with timer and Stop. The shortcut
 starts immediately with the current recording options (defaults at startup);
 use New Recording to choose another audio session. Closing the main window
 hides it in the tray; double-click the icon to reopen, or use Exit to stop,
-finish transcription and flush pending saves. Other platforms can browse/edit
-libraries and enhance notes; live capture, tray and global shortcut are Windows
-only. No GTK/AppIndicator dependencies are added on Linux. See the native
+finish transcription and flush pending saves. macOS also has live capture, a menu bar icon and global shortcuts as described
+above. Linux can browse/edit libraries and enhance notes. No GTK/AppIndicator dependencies are added on Linux. See the native
 [tray-icon event-loop requirements](https://docs.rs/tray-icon/0.26.1/tray_icon/)
 and [global-hotkey requirements](https://docs.rs/global-hotkey/0.9.0/global_hotkey/):
-both integrations live on eframe's Win32 event-loop thread and wake egui through
+both integrations live on eframe's native event-loop thread and wake egui through
 `Context::request_repaint` when native events arrive.
 
 The UI uses egui's embedded Ubuntu Light (Ubuntu Font Licence) and Hack
