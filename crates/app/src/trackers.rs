@@ -139,7 +139,7 @@ impl Panel {
             }
         }
         let mut open = self.open;
-        egui::Window::new("Отправить в трекер: предварительный просмотр")
+        crate::theme::window(ctx, "Отправить в трекер: предварительный просмотр")
             .open(&mut open)
             .default_width(680.0)
             .show(ctx, |ui| {
@@ -150,16 +150,19 @@ impl Panel {
                     .max_height(420.0)
                     .show(ui, |ui| {
                         for p in &self.previews {
-                            ui.strong(&p.task.text);
-                            ui.label(&p.endpoint);
-                            ui.monospace(serde_json::to_string_pretty(&p.body).unwrap_or_default());
-                            ui.separator();
+                            crate::theme::bar(crate::theme::Palette::of(ui)).show(ui, |ui| {
+                                ui.strong(&p.task.text);
+                                ui.label(&p.endpoint);
+                                ui.monospace(
+                                    serde_json::to_string_pretty(&p.body).unwrap_or_default(),
+                                );
+                            });
                         }
                     });
                 let local = self.previews.iter().any(|p| p.local);
                 if local {
                     ui.colored_label(
-                        egui::Color32::YELLOW,
+                        ui.visuals().warn_fg_color,
                         "Это Local-встреча. Задача и фрагмент конспекта покинут компьютер.",
                     );
                     ui.checkbox(

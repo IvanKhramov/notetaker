@@ -91,7 +91,7 @@ impl Maintenance {
     }
     pub fn dialogs(&mut self, ctx: &egui::Context, busy: bool) {
         if self.crashed {
-            egui::Window::new("Прошлый запуск завершился ошибкой")
+            crate::theme::window(ctx, "Прошлый запуск завершился ошибкой")
                 .collapsible(false)
                 .resizable(false)
                 .show(ctx, |ui| {
@@ -106,7 +106,7 @@ impl Maintenance {
                 });
         }
         if let Some(message) = self.message.clone() {
-            egui::Window::new("Диагностика")
+            crate::theme::window(ctx, "Диагностика")
                 .collapsible(false)
                 .show(ctx, |ui| {
                     ui.label(message);
@@ -121,8 +121,8 @@ impl Maintenance {
         let _ = busy;
     }
     pub fn settings(&mut self, ui: &mut egui::Ui, settings: &mut crate::config::Settings) {
-        ui.separator();
-        ui.heading("Обновления и диагностика");
+        ui.add_space(16.0);
+        crate::theme::section_caption(ui, "Обновления и диагностика");
         ui.add_enabled_ui(cfg!(windows), |ui| {
             ui.checkbox(&mut settings.check_updates, "Проверять обновления");
         });

@@ -2603,7 +2603,7 @@ dependencies = [
 
 [[package]]
 name = "notetaker-app"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2632,7 +2632,7 @@ dependencies = [
 
 [[package]]
 name = "notetaker-asr-proto"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "base64 0.22.1",
  "notetaker-runtime",
@@ -2643,7 +2643,7 @@ dependencies = [
 
 [[package]]
 name = "notetaker-asr-worker"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "bzip2 0.6.1",
@@ -2661,7 +2661,7 @@ dependencies = [
 
 [[package]]
 name = "notetaker-capture"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "hound",
@@ -2677,7 +2677,7 @@ dependencies = [
 
 [[package]]
 name = "notetaker-cli"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2699,7 +2699,7 @@ dependencies = [
 
 [[package]]
 name = "notetaker-core"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -2721,7 +2721,7 @@ dependencies = [
 
 [[package]]
 name = "notetaker-detect"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "notetaker-capture",
@@ -2732,7 +2732,7 @@ dependencies = [
 
 [[package]]
 name = "notetaker-embed-worker"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -2749,7 +2749,7 @@ dependencies = [
 
 [[package]]
 name = "notetaker-llm"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2771,7 +2771,7 @@ dependencies = [
 
 [[package]]
 name = "notetaker-pipeline"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2790,7 +2790,7 @@ dependencies = [
 
 [[package]]
 name = "notetaker-runtime"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "directories",

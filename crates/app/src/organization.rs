@@ -187,136 +187,145 @@ impl Panel {
         let previous_tag = state.tag_filter.clone();
         let mut destination = None;
         let mut edit_folder = None;
-        let id = ui.make_persistent_id("Папки и теги");
-        let mut toggle = false;
-        let mut header =
-            egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true)
-                .show_header(ui, |ui| {
-                    toggle = ui
-                        .add(
-                            egui::Label::new(
-                                egui::RichText::new("Папки")
-                                    .small()
-                                    .color(theme::Palette::of(ui).muted),
-                            )
-                            .sense(egui::Sense::click()),
+        ui.horizontal(|ui| {
+            let width = (ui.available_width() - 34.0).max(1.0);
+            egui::ScrollArea::horizontal()
+                .id_salt("folder_chips")
+                .max_width(width)
+                .max_height(32.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        if theme::filter_chip(
+                            ui,
+                            "Все заметки",
+                            state.folder_filter.is_none(),
+                            None,
                         )
-                        .clicked();
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if theme::icon_button(ui, theme::Icon::Settings, "Папки и общая библиотека")
-                            .clicked()
+                        .clicked()
                         {
-                            self.settings_open = true;
-                            if let Some(s) = &self.snapshot {
-                                self.settings_revision = s.folders.revision;
+                            state.folder_filter = None;
+                        }
+                        if let Some(s) = &self.snapshot {
+                            let mut names =
+                                s.folders.value.keys().cloned().collect::<BTreeSet<_>>();
+                            for meta in s.metas.values() {
+                                if let Some(folder) = &meta.folder {
+                                    names.insert(folder.clone());
+                                }
+                            }
+                            for name in names.clone() {
+                                let parts = name.split('/').collect::<Vec<_>>();
+                                for n in 1..parts.len() {
+                                    names.insert(parts[..n].join("/"));
+                                }
+                            }
+                            for name in std::iter::once(String::new()).chain(names) {
+                                let count = s
+                                    .metas
+                                    .values()
+                                    .filter(|m| matches_folder(m, Some(&name)))
+                                    .count();
+                                let label = if name.is_empty() {
+                                    format!("Без папки ({count})")
+                                } else {
+                                    format!(
+                                        "{} ({count})",
+                                        name.rsplit('/').next().unwrap_or(&name)
+                                    )
+                                };
+                                let response = theme::filter_chip(
+                                    ui,
+                                    &label,
+                                    state.folder_filter.as_deref() == Some(&name),
+                                    Some(theme::folder_color(Some(&name), theme::Palette::of(ui))),
+                                )
+                                .on_hover_text(&name);
+                                if response.clicked() {
+                                    state.folder_filter = Some(name.clone());
+                                }
+                                if let Some(paths) = response.dnd_release_payload::<Vec<PathBuf>>()
+                                {
+                                    destination = Some(((*paths).clone(), name.clone()));
+                                }
+                                response.context_menu(|ui| {
+                                    if !name.is_empty() && ui.button("Настройки папки").clicked()
+                                    {
+                                        edit_folder = Some(name.clone());
+                                        ui.close();
+                                    }
+                                    if !self.selected.is_empty()
+                                        && ui.button("Переместить выбранные сюда").clicked()
+                                    {
+                                        destination = Some((
+                                            self.selected.iter().cloned().collect(),
+                                            name.clone(),
+                                        ));
+                                        ui.close();
+                                    }
+                                });
                             }
                         }
                     });
                 });
-        if toggle {
-            header.toggle();
-        }
-        header.body_unindented(|ui| {
-            if theme::nav_item(ui, state.folder_filter.is_none(), "Все заметки").clicked()
+            if theme::icon_button(ui, theme::Icon::Settings, "Папки и общая библиотека").clicked()
             {
-                state.folder_filter = None;
-            }
-            if let Some(s) = &self.snapshot {
-                let mut names = s.folders.value.keys().cloned().collect::<BTreeSet<_>>();
-                for meta in s.metas.values() {
-                    if let Some(folder) = &meta.folder {
-                        names.insert(folder.clone());
-                    }
+                self.settings_open = true;
+                if let Some(s) = &self.snapshot {
+                    self.settings_revision = s.folders.revision;
                 }
-                for name in names.clone() {
-                    let parts = name.split('/').collect::<Vec<_>>();
-                    for n in 1..parts.len() {
-                        names.insert(parts[..n].join("/"));
-                    }
-                }
-                for name in std::iter::once(String::new()).chain(names) {
-                    let count = s
-                        .metas
-                        .values()
-                        .filter(|m| matches_folder(m, Some(&name)))
-                        .count();
-                    let label = if name.is_empty() {
-                        format!("Без папки ({count})")
-                    } else {
-                        format!(
-                            "{}{} ({count})",
-                            "  ".repeat(name.matches('/').count()),
-                            name.rsplit('/').next().unwrap_or(&name)
-                        )
-                    };
-                    let response =
-                        theme::nav_item(ui, state.folder_filter.as_deref() == Some(&name), &label)
-                            .on_hover_text(&label);
-                    if response.clicked() {
-                        state.folder_filter = Some(name.clone());
-                    }
-                    if let Some(paths) = response.dnd_release_payload::<Vec<PathBuf>>() {
-                        destination = Some(((*paths).clone(), name.clone()));
-                    }
-                    response.context_menu(|ui| {
-                        if !name.is_empty() && ui.button("Настройки папки").clicked()
-                        {
-                            edit_folder = Some(name.clone());
-                            ui.close();
-                        }
-                        if !self.selected.is_empty()
-                            && ui.button("Переместить выбранные сюда").clicked()
-                        {
-                            destination =
-                                Some((self.selected.iter().cloned().collect(), name.clone()));
-                            ui.close();
-                        }
-                    });
-                }
-                let tags = s
-                    .metas
-                    .values()
-                    .flat_map(|m| m.tags.iter().cloned())
-                    .collect::<BTreeSet<_>>();
-                if !tags.is_empty() {
-                    ui.horizontal_wrapped(|ui| {
-                        for tag in tags {
-                            if ui
-                                .selectable_label(
-                                    state.tag_filter.as_ref() == Some(&tag),
-                                    format!("#{tag}"),
-                                )
-                                .clicked()
-                            {
-                                state.tag_filter = if state.tag_filter.as_ref() == Some(&tag) {
-                                    None
-                                } else {
-                                    Some(tag)
-                                };
-                            }
-                        }
-                    });
-                }
-            }
-            if !self.selected.is_empty() {
-                ui.small(format!(
-                    "Выбрано: {}. Меню папки - переместить",
-                    self.selected.len()
-                ));
-                if ui.small_button("Снять выбор").clicked() {
-                    self.selected.clear();
-                }
-            }
-            if self.snapshot.as_ref().is_some_and(|s| !s.shared) && likely_synced(&self.root) {
-                ui.colored_label(
-                    egui::Color32::YELLOW,
-                    "Библиотека похожа на общую. Включите режим синхронизации в настройках папок.",
-                );
-            }
-            if !self.message.is_empty() {
-                ui.colored_label(egui::Color32::YELLOW, &self.message);
             }
         });
+        if let Some(s) = &self.snapshot {
+            let tags = s
+                .metas
+                .values()
+                .flat_map(|m| m.tags.iter().cloned())
+                .collect::<BTreeSet<_>>();
+            if !tags.is_empty() {
+                egui::ScrollArea::horizontal()
+                    .id_salt("tag_chips")
+                    .max_height(32.0)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            for tag in tags {
+                                if theme::filter_chip(
+                                    ui,
+                                    &format!("#{tag}"),
+                                    state.tag_filter.as_ref() == Some(&tag),
+                                    None,
+                                )
+                                .clicked()
+                                {
+                                    state.tag_filter = if state.tag_filter.as_ref() == Some(&tag) {
+                                        None
+                                    } else {
+                                        Some(tag)
+                                    };
+                                }
+                            }
+                        });
+                    });
+            }
+        }
+        if !self.selected.is_empty() {
+            ui.small(format!(
+                "Выбрано: {}. Меню папки - переместить",
+                self.selected.len()
+            ));
+            if ui.small_button("Снять выбор").clicked() {
+                self.selected.clear();
+            }
+        }
+        if self.snapshot.as_ref().is_some_and(|s| !s.shared) && likely_synced(&self.root) {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                "Библиотека похожа на общую. Включите режим синхронизации в настройках папок.",
+            );
+        }
+        if !self.message.is_empty() {
+            ui.colored_label(ui.visuals().warn_fg_color, &self.message);
+        }
         if state.folder_filter != previous_filter {
             state.record_mode = state
                 .folder_filter
@@ -408,7 +417,7 @@ impl Panel {
             && self.receiver.is_none();
         if self.snapshot.as_ref().is_some_and(|s| s.shared) && meta.mode == Mode::Local {
             ui.colored_label(
-                egui::Color32::YELLOW,
+                ui.visuals().warn_fg_color,
                 "Local: файлы этой встречи синхронизируются дисковым сервисом.",
             );
         }
@@ -449,7 +458,10 @@ impl Panel {
             if let Some(copies) = self.snapshot.as_ref().and_then(|s| s.conflicts.get(&path)) {
                 for copy in copies {
                     ui.horizontal(|ui| {
-                        ui.colored_label(egui::Color32::YELLOW, "Найдена копия от синхронизации");
+                        ui.colored_label(
+                            ui.visuals().warn_fg_color,
+                            "Найдена копия от синхронизации",
+                        );
                         if ui.button(format!("Сравнить: {}", copy.copy)).clicked() {
                             self.compare = Some((m.clone(), copy.clone()));
                         }
@@ -489,7 +501,7 @@ impl Panel {
         let mut shared = self.snapshot.as_ref().is_some_and(|s| s.shared);
         if likely_synced(&self.root) && !shared {
             ui.colored_label(
-                egui::Color32::YELLOW,
+                ui.visuals().warn_fg_color,
                 "Путь похож на синхронизируемый. Включите общую библиотеку.",
             );
         }
@@ -720,14 +732,14 @@ impl Panel {
     }
     pub fn windows(&mut self, ctx: &egui::Context, can_share: bool) {
         let mut settings_open = self.settings_open;
-        egui::Window::new("Папки и общая библиотека")
+        crate::theme::window(ctx, "Папки и общая библиотека")
             .open(&mut settings_open)
             .default_width(620.0)
             .show(ctx, |ui| self.folder_settings(ctx, ui, can_share));
         self.settings_open = settings_open;
         if let Some(path) = self.tags_path.clone() {
             let mut open = true;
-            egui::Window::new("Теги встречи")
+            crate::theme::window(ctx, "Теги встречи")
                 .open(&mut open)
                 .show(ctx, |ui| {
                     ui.label("Через запятую");
@@ -759,13 +771,14 @@ impl Panel {
         }
         if let Some((m, copy)) = self.compare.clone() {
             let mut open = true;
-            egui::Window::new("Сравнение копии синхронизации")
+            crate::theme::window(ctx, "Сравнение копии синхронизации")
                 .open(&mut open)
                 .default_width(850.0)
                 .show(ctx, |ui| {
                     egui::ScrollArea::vertical()
                         .max_height(450.0)
                         .show(ui, |ui| {
+                            let warning_color = ui.visuals().warn_fg_color;
                             ui.columns(2, |cols| {
                                 cols[0].strong("Моя версия");
                                 cols[1].strong(&copy.copy);
@@ -781,7 +794,7 @@ impl Panel {
                                         cols[column].label(if left == right {
                                             label
                                         } else {
-                                            label.color(egui::Color32::YELLOW)
+                                            label.color(warning_color)
                                         });
                                     }
                                 }
@@ -868,7 +881,10 @@ fn tracker_settings(
                 c.owners = value;
             }
             if serde_json::from_str::<BTreeMap<String, u64>>(owners_json).is_err() {
-                ui.colored_label(egui::Color32::YELLOW, "Некорректный JSON ответственных");
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    "Некорректный JSON ответственных",
+                );
             }
         }
         TrackerKind::Jira => {

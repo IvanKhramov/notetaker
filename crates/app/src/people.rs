@@ -263,12 +263,18 @@ impl Panel {
         }
     }
     pub fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
-        for (label, view) in [
-            ("Люди", View::People),
-            ("Серии", View::Series(String::new())),
-            ("Дайджест", View::Digest),
+        for (label, view, icon) in [
+            ("Люди", View::People, theme::Icon::People),
+            ("Серии", View::Series(String::new()), theme::Icon::Series),
+            ("Дайджест", View::Digest, theme::Icon::Digest),
         ] {
-            if theme::nav_item(ui, self.view.as_ref() == Some(&view), label).clicked() {
+            let selected = matches!(
+                (&view, &self.view),
+                (View::People, Some(View::People | View::Person(_)))
+                    | (View::Series(_), Some(View::Series(_)))
+                    | (View::Digest, Some(View::Digest))
+            );
+            if theme::rail_button(ui, icon, label, selected).clicked() {
                 self.view = Some(view);
                 state.tasks_open = false;
                 self.refresh(ui.ctx(), &state.settings);
@@ -403,7 +409,7 @@ impl Panel {
             });
     }
     fn people_screen(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Люди");
+        theme::page_heading(ui, "Люди");
         ui.text_edit_singleline(&mut self.query);
         ui.checkbox(&mut self.show_hidden, "Показать скрытых");
         let mut selected = None;
@@ -417,17 +423,46 @@ impl Panel {
                             .contains(&self.query.to_lowercase())
                         || person.matches(&self.query))
                 {
-                    if ui
-                        .link(format!(
-                            "{}{}",
-                            person.name,
-                            if person.hidden { " (скрыт)" } else { "" }
-                        ))
-                        .clicked()
-                    {
-                        selected = Some(person.clone());
-                    }
-                    ui.small(person.emails.iter().cloned().collect::<Vec<_>>().join(", "));
+                    theme::card(theme::Palette::of(ui), false).show(ui, |ui| {
+                        ui.set_width((ui.available_width() - 2.0).max(1.0));
+                        ui.horizontal(|ui| {
+                            let (rect, _) = ui
+                                .allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
+                            let p = theme::Palette::of(ui);
+                            ui.painter().circle_filled(rect.center(), 16.0, p.selected);
+                            ui.painter().text(
+                                rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                person
+                                    .name
+                                    .chars()
+                                    .next()
+                                    .unwrap_or('?')
+                                    .to_uppercase()
+                                    .to_string(),
+                                theme::semibold(14.0),
+                                p.accent,
+                            );
+                            ui.vertical(|ui| {
+                                if ui
+                                    .link(
+                                        egui::RichText::new(format!(
+                                            "{}{}",
+                                            person.name,
+                                            if person.hidden { " (скрыт)" } else { "" }
+                                        ))
+                                        .font(theme::semibold(14.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    selected = Some(person.clone());
+                                }
+                                ui.small(
+                                    person.emails.iter().cloned().collect::<Vec<_>>().join(", "),
+                                );
+                            });
+                        });
+                    });
                 }
             }
             if snapshot.people.is_empty() {
@@ -442,7 +477,7 @@ impl Panel {
         let Some(page) = &self.person else {
             return;
         };
-        ui.heading(&page.person.name);
+        theme::page_heading(ui, &page.person.name);
         ui.label(
             page.person
                 .emails
@@ -532,7 +567,7 @@ impl Panel {
             page.turns,
             page.longest_monologue_ms / 1000
         ));
-        ui.heading("О чём говорили в последний раз");
+        theme::section_caption(ui, "О чём говорили в последний раз");
         if let Some(last) = page.meetings.first() {
             ui.label(last.excerpt());
         }
@@ -558,7 +593,7 @@ impl Panel {
             ("Открытые задачи", &page.owned_tasks),
             ("Поручил или попросил", &page.requested_tasks),
         ] {
-            ui.heading(heading);
+            theme::section_caption(ui, heading);
             for task in tasks {
                 if ui
                     .link(format!(
@@ -571,7 +606,7 @@ impl Panel {
                 }
             }
         }
-        ui.heading("Встречи");
+        theme::section_caption(ui, "Встречи");
         for meeting in &page.meetings {
             if ui
                 .link(format!(
@@ -619,41 +654,52 @@ impl Panel {
         }
     }
     fn series_screen(&mut self, ui: &mut egui::Ui, state: &mut AppState, id: &str) {
-        ui.heading("Серии");
+        theme::page_heading(ui, "Серии");
         let mut open = None;
         if let Some(snapshot) = &self.snapshot {
             for series in &snapshot.series {
                 if !id.is_empty() && series.id != id {
                     continue;
                 }
-                if ui
-                    .link(format!(
-                        "{} · {} встреч",
-                        series.title,
-                        series.meetings.len()
-                    ))
-                    .clicked()
-                {
-                    self.view = Some(View::Series(series.id.clone()));
-                }
-                for meeting in &series.meetings {
+                theme::card(theme::Palette::of(ui), false).show(ui, |ui| {
+                    ui.set_width((ui.available_width() - 2.0).max(1.0));
                     if ui
-                        .link(format!(
-                            "{} · {} · открытых задач: {}",
-                            meeting
-                                .meta
-                                .started_at
-                                .with_timezone(&chrono::Local)
-                                .format("%d.%m.%Y %H:%M"),
-                            meeting.meta.title,
-                            meeting.open_tasks
-                        ))
+                        .link(
+                            egui::RichText::new(format!(
+                                "{} · {} встреч",
+                                series.title,
+                                series.meetings.len()
+                            ))
+                            .font(theme::semibold(16.0)),
+                        )
                         .clicked()
                     {
-                        open = Some(meeting.path.clone());
+                        self.view = Some(View::Series(series.id.clone()));
                     }
-                }
-                ui.separator();
+                    for meeting in &series.meetings {
+                        theme::timeline_row(
+                            ui,
+                            theme::TimelineDot::Past(theme::Palette::of(ui).accent),
+                            |ui| {
+                                if ui
+                                    .link(format!(
+                                        "{} · {} · открытых задач: {}",
+                                        meeting
+                                            .meta
+                                            .started_at
+                                            .with_timezone(&chrono::Local)
+                                            .format("%d.%m.%Y %H:%M"),
+                                        meeting.meta.title,
+                                        meeting.open_tasks
+                                    ))
+                                    .clicked()
+                                {
+                                    open = Some(meeting.path.clone());
+                                }
+                            },
+                        );
+                    }
+                });
             }
         }
         if let Some(path) = open {
@@ -661,11 +707,13 @@ impl Panel {
         }
     }
     fn digest_screen(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
-        ui.heading("Дайджест");
+        theme::page_heading(ui, "Дайджест");
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.period, 0, "Эта неделя");
-            ui.selectable_value(&mut self.period, 1, "Прошлая");
-            ui.selectable_value(&mut self.period, 2, "Произвольно");
+            theme::segmented(
+                ui,
+                &mut self.period,
+                &[(0, "Эта неделя"), (1, "Прошлая"), (2, "Произвольно")],
+            );
         });
         if self.period == 2 {
             ui.horizontal(|ui| {

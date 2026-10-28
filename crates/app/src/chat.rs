@@ -41,7 +41,7 @@ impl Panel {
         folder: Option<&str>,
     ) -> Option<Action> {
         let mut action = None;
-        egui::Window::new("Спросить")
+        crate::theme::window(ctx, "Спросить")
             .open(&mut self.open)
             .default_size([620.0, 600.0])
             .show(ctx, |ui| {
@@ -89,7 +89,7 @@ impl Panel {
                         }
                     });
                 if let Some(error) = &self.error {
-                    ui.colored_label(egui::Color32::RED, error);
+                    ui.colored_label(ui.visuals().error_fg_color, error);
                 }
                 ui.add_enabled(
                     !self.busy,
@@ -101,7 +101,11 @@ impl Panel {
                     if ui
                         .add_enabled(
                             can_ask && !self.busy && !self.question.trim().is_empty(),
-                            egui::Button::new("Спросить"),
+                            crate::theme::styled_button(
+                                crate::theme::Palette::of(ui),
+                                "Спросить",
+                                crate::theme::ButtonStyle::Primary,
+                            ),
                         )
                         .clicked()
                     {

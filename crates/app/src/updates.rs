@@ -136,10 +136,13 @@ impl Updates {
     pub fn ui(&mut self, ctx: &egui::Context, busy: bool) {
         if let Some(release) = self.release.clone() {
             let mut later = false;
-            egui::Window::new(format!(
-                "Доступна версия {}",
-                release.tag_name.trim_start_matches('v')
-            ))
+            crate::theme::window(
+                ctx,
+                format!(
+                    "Доступна версия {}",
+                    release.tag_name.trim_start_matches('v')
+                ),
+            )
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::RIGHT_BOTTOM, [-20.0, -20.0])
@@ -189,7 +192,7 @@ impl Updates {
             }
         }
         if let Some(message) = self.message.clone() {
-            egui::Window::new("Обновление")
+            crate::theme::window(ctx, "Обновление")
                 .collapsible(false)
                 .show(ctx, |ui| {
                     ui.label(message);

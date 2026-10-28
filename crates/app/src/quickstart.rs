@@ -314,14 +314,15 @@ impl Panel {
         steps
     }
     pub fn header(&mut self, ui: &mut egui::Ui) {
-        if theme::icon_button(ui, theme::Icon::Help, "Быстрый старт").clicked() {
+        if theme::rail_button(ui, theme::Icon::Help, "Быстрый старт", self.open).clicked()
+        {
             self.open = true;
         }
     }
     pub fn sidebar(&mut self, ui: &mut egui::Ui, state: &AppState) {
         let missing = essential_missing(&self.steps(state));
         if state.ready && missing > 0 && !self.banner_dismissed {
-            ui.group(|ui| {
+            theme::bar(Palette::of(ui)).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
                 ui.small(format!(
                     "Настройка не завершена: {missing} {}",
@@ -354,7 +355,7 @@ impl Panel {
         let mut settings = false;
         let mut done = false;
         let mut save = false;
-        egui::Window::new("Быстрый старт")
+        theme::window(ctx, "Быстрый старт")
             .id(egui::Id::unique("quickstart"))
             .open(&mut open)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -362,9 +363,12 @@ impl Panel {
             .collapsible(false)
             .resizable(true)
             .show(ctx, |ui| {
-                ui.heading(format!("Настроено {} из 6", steps.iter().filter(|s| **s == Status::Ready).count()));
+                theme::section_caption(ui, "Быстрый старт");
+                let completed = steps.iter().filter(|s| **s == Status::Ready).count();
+                ui.heading(format!("Настроено {completed} из 6"));
+                ui.add(egui::ProgressBar::new(completed as f32 / 6.0).fill(Palette::of(ui).accent).desired_height(4.0));
                 ui.small("Настройте запись и конспекты здесь. Календарь и проверку звука можно пропустить.");
-                egui::ScrollArea::vertical().id_salt("quickstart_steps").max_height((ctx.content_rect().height() - 220.0).max(140.0)).show(ui, |ui| {
+                egui::ScrollArea::vertical().id_salt("quickstart_steps").max_height((ctx.content_rect().height() - 350.0).max(100.0)).show(ui, |ui| {
                     semantic_step(ui, state);
                     ui.separator();
                     organization.shared_step(ui, !state.semantic_running && state.can_save_settings());
@@ -468,7 +472,7 @@ impl Panel {
                     save |= ui.checkbox(&mut state.settings_draft.hide_quickstart, "Больше не показывать при запуске").changed();
                 });
                 ui.horizontal(|ui| {
-                    if ui.button("Готово").clicked() { done = true; }
+                    if theme::button(ui, "Готово", theme::ButtonStyle::Primary).clicked() { done = true; }
                     if ui.button("Открыть все настройки").clicked() { settings = true; }
                     if state.settings_pending { ui.spinner(); }
                 });
@@ -486,7 +490,7 @@ impl Panel {
 }
 
 fn row(ui: &mut egui::Ui, status: &Status, title: &str, explanation: &str) {
-    ui.separator();
+    ui.add_space(16.0);
     ui.horizontal_wrapped(|ui| {
         if matches!(status, Status::Error(_)) {
             ui.colored_label(Palette::of(ui).red, status.label());
@@ -620,7 +624,7 @@ pub fn semantic_step(ui: &mut egui::Ui, state: &mut AppState) {
             }
         }
         if let Some(error) = &state.quickstart.download_error {
-            ui.colored_label(egui::Color32::RED, error);
+            ui.colored_label(ui.visuals().error_fg_color, error);
         }
     }
     if state.semantic_running {
