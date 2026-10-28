@@ -138,9 +138,14 @@ impl Embedder for LocalEmbedder {
         self.input.flush()?;
         let line = match self.output.recv_timeout(Duration::from_secs(180)) {
             Ok(line) => line?,
-            Err(_) => {
+            Err(mpsc::RecvTimeoutError::Timeout) => {
                 let _ = self.child.kill();
                 return Err(Error::Embedding("Воркер не ответил за 180 с".into()));
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(Error::Embedding(
+                    "Воркер поиска завершился: проверьте модель в настройках".into(),
+                ));
             }
         };
         let response: EmbedResponse = serde_json::from_str(&line)?;

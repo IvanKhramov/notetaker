@@ -52,7 +52,7 @@ pub struct SemanticProgress {
     pub chunks: usize,
 }
 
-/// About 400 tokens (1200 Unicode characters), 60-token overlap. The worker
+/// About 400 E5 tokens (1800 Unicode characters), 60-token overlap. The worker
 /// applies the model's tokenizer limit as well. Long lines/segments are split.
 pub fn meeting_chunks(meeting: &Meeting) -> Result<Vec<Chunk>> {
     let mut result = Vec::new();
@@ -108,9 +108,9 @@ fn split_chunks(text: &str, anchor: impl Fn(usize) -> Anchor, result: &mut Vec<C
     let mut start = 0;
     let len = positions.len() - 1;
     while start < len {
-        let mut end = (start + 1200).min(len);
+        let mut end = (start + 1800).min(len);
         if end < len {
-            while end > start + 1000 && !text[positions[end]..].starts_with(char::is_whitespace) {
+            while end > start + 1500 && !text[positions[end]..].starts_with(char::is_whitespace) {
                 end -= 1;
             }
         }
@@ -125,7 +125,7 @@ fn split_chunks(text: &str, anchor: impl Fn(usize) -> Anchor, result: &mut Vec<C
         if end == len {
             break;
         }
-        start = end.saturating_sub(180).max(start + 1);
+        start = end.saturating_sub(270).max(start + 1);
     }
 }
 fn normalize(mut vector: Vec<f32>) -> Result<Vec<f32>> {
@@ -482,7 +482,7 @@ mod tests {
         })
         .unwrap();
         let chunks = meeting_chunks(&m).unwrap();
-        assert!(chunks.iter().all(|c| c.text.chars().count() <= 1200));
+        assert!(chunks.iter().all(|c| c.text.chars().count() <= 1800));
         assert!(chunks.iter().any(|c| c.text.contains("Конец")));
         assert!(chunks.iter().any(|c| c.anchor == Anchor::Notes { line: 2 }));
         assert!(chunks.iter().any(|c| c.anchor
