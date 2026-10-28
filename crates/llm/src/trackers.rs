@@ -63,6 +63,15 @@ fn base(config: &TrackerConfig) -> Result<String> {
     );
     Ok(config.base_url.trim_end_matches('/').to_owned())
 }
+/// Reject embedded URL credentials before configuration enters a shared file.
+pub fn validate_config(config: &TrackerConfig) -> Result<()> {
+    base(config)?;
+    if !config.signature_header.is_empty() {
+        reqwest::header::HeaderName::from_bytes(config.signature_header.as_bytes())
+            .context("Некорректное имя заголовка HMAC")?;
+    }
+    Ok(())
+}
 fn provider(kind: TrackerKind) -> Box<dyn Tracker> {
     match kind {
         TrackerKind::Webhook => Box::new(Webhook),

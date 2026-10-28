@@ -51,6 +51,7 @@ pub struct Panel {
     edit_name: String,
     edit: FolderSettings,
     settings_revision: notetaker_core::Revision,
+    pending_folder_name: Option<String>,
     secret: String,
     owners_json: String,
     destinations: notetaker_llm::trackers::KaitenDestinations,
@@ -109,6 +110,11 @@ impl Panel {
             self.checked = Some(Instant::now());
             match result {
                 Ok(snapshot) => {
+                    if let Some(name) = self.pending_folder_name.take() {
+                        self.folder_name = name.clone();
+                        self.edit_name = name;
+                        self.secret.clear();
+                    }
                     self.settings_revision = snapshot.folders.revision;
                     self.snapshot = Some(snapshot);
                     if !state.unsaved() && !state.recording.busy() && state.enhancing.is_none() {
@@ -132,7 +138,10 @@ impl Panel {
                         }
                     }
                 }
-                Err(e) => self.message = e,
+                Err(e) => {
+                    self.pending_folder_name = None;
+                    self.message = e;
+                }
             }
         }
         if state.ready
@@ -458,6 +467,10 @@ impl Panel {
             "Индекс пересоздаётся локально. Голоса всегда хранятся только на этом компьютере.",
         );
         ui.separator();
+        if self.receiver.is_some() || self.destinations_rx.is_some() {
+            ui.spinner();
+            return;
+        }
         egui::ScrollArea::vertical()
             .max_height(540.0)
             .show(ui, |ui| {
@@ -603,10 +616,11 @@ impl Panel {
                             let name = self.edit_name.trim_matches('/').trim().to_owned();
                             let settings = self.edit.clone();
                             let revision = self.settings_revision;
-                            let secret = std::mem::take(&mut self.secret);
+                            let secret = self.secret.clone();
                             if name.is_empty() {
                                 self.message = "Укажите имя папки".into();
                             } else {
+                                self.pending_folder_name = Some(name.clone());
                                 self.launch(ctx, move |l| {
                                     let mut folders = l.load_folders()?;
                                     anyhow::ensure!(
@@ -617,6 +631,9 @@ impl Panel {
                                         !old.is_empty() || !folders.value.contains_key(&name),
                                         "Папка уже существует; выберите её для изменения"
                                     );
+                                    if let Some(c) = &settings.tracker {
+                                        notetaker_llm::trackers::validate_config(c)?;
+                                    }
                                     if !secret.is_empty() {
                                         use notetaker_llm::CredentialStore;
                                         let c = settings
@@ -640,9 +657,6 @@ impl Panel {
                                     l.save_folders(&folders.value, folders.revision)?;
                                     Ok(())
                                 });
-                                self.folder_name.clear();
-                                self.edit_name.clear();
-                                self.edit = Default::default();
                             }
                         }
                         if !self.folder_name.is_empty()
@@ -653,9 +667,6 @@ impl Panel {
                                 l.rename_folder(&name, None)?;
                                 Ok(())
                             });
-                            self.folder_name.clear();
-                            self.edit_name.clear();
-                            self.edit = Default::default();
                         }
                     });
                 });

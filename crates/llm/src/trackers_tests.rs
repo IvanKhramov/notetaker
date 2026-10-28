@@ -288,3 +288,27 @@ fn kaiten_destinations_use_bearer_and_explicit_pagination() {
             .contains("authorization: bearer test-key")
     );
 }
+
+#[test]
+fn shared_tracker_configuration_rejects_url_credentials_and_query_secrets() {
+    for url in [
+        "https://user:password@tracker.test/hook",
+        "https://tracker.test/hook?token=secret",
+        "file:///tmp/hook",
+    ] {
+        assert!(
+            validate_config(&TrackerConfig {
+                base_url: url.into(),
+                ..Default::default()
+            })
+            .is_err()
+        );
+    }
+    assert!(
+        validate_config(&TrackerConfig {
+            base_url: "https://tracker.test/hook".into(),
+            ..Default::default()
+        })
+        .is_ok()
+    );
+}
