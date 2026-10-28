@@ -182,10 +182,18 @@ impl Settings {
             .filter(|line| !line.is_empty())
         {
             ensure!(
-                exe.to_ascii_lowercase().ends_with(".exe")
-                    && !exe.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|'])
-                    && exe.len() > 4,
-                "Приложения для звонков: укажите имена exe без путей, по одному на строку"
+                if cfg!(target_os = "macos") {
+                    !matches!(exe, "." | "..") && !exe.contains(['/', '\0'])
+                } else {
+                    exe.to_ascii_lowercase().ends_with(".exe")
+                        && !exe.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|'])
+                        && exe.len() > 4
+                },
+                if cfg!(target_os = "macos") {
+                    "Приложения для звонков: укажите имена процессов без путей, по одному на строку"
+                } else {
+                    "Приложения для звонков: укажите имена exe без путей, по одному на строку"
+                }
             );
         }
         notetaker_core::calendar::timezone(&self.calendar_timezone)?;
@@ -467,9 +475,35 @@ mod tests {
         let restored: Settings = toml::from_str(&toml::to_string(&settings).unwrap()).unwrap();
         assert_eq!(restored.call_apps, settings.call_apps);
         assert!(!restored.detect_any_microphone);
-        for invalid in ["C:\\Call.exe", "../call.exe", "*.exe", "call", ".exe"] {
+        #[cfg(not(target_os = "macos"))]
+        let invalid_names = ["C:\\Call.exe", "../call.exe", "*.exe", "call", ".exe"];
+        #[cfg(target_os = "macos")]
+        let invalid_names = [
+            "/Applications/FaceTime",
+            "../FaceTime",
+            ".",
+            "..",
+            "Face\0Time",
+        ];
+        for invalid in invalid_names {
             settings.call_apps = invalid.into();
             assert!(settings.validate().is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn call_process_names_follow_platform_rules() {
+        for name in ["FaceTime", "zoom.us", "Google Chrome Helper"] {
+            let settings = Settings {
+                library: std::env::current_dir().unwrap(),
+                call_apps: name.into(),
+                ..Settings::default()
+            };
+            assert_eq!(
+                settings.validate().is_ok(),
+                cfg!(target_os = "macos"),
+                "{name}"
+            );
         }
     }
 

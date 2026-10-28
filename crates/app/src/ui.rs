@@ -1610,7 +1610,7 @@ impl NotetakerApp {
                     ui.checkbox(&mut settings.detect_browsers, "Учитывать браузеры")
                         .on_hover_text("Включите для Meet, Толка и Телемоста в браузере. Диктовка и голосовые сообщения тоже могут выглядеть как звонок.");
                     ui.label("Свои приложения для звонков");
-                    ui.add(egui::TextEdit::multiline(&mut settings.call_apps).desired_rows(3).hint_text("Telemost.exe\nKonturTalk.exe"));
+                    ui.add(egui::TextEdit::multiline(&mut settings.call_apps).desired_rows(3).hint_text(if cfg!(target_os = "macos") { "FaceTime\nzoom.us" } else { "Telemost.exe\nKonturTalk.exe" }));
                     ui.small(if cfg!(target_os = "macos") { "Имена процессов, по одному на строку. Определение по микрофону приблизительное, вкладки браузера не читаются." } else { "Имена exe из Диспетчера задач, по одному на строку. Дополняют список известных приложений." });
                 });
                 ui.horizontal(|ui| {
@@ -1995,6 +1995,10 @@ impl eframe::App for NotetakerApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // eframe calls this even when the root window is hidden in the tray.
         self.state.poll();
+        #[cfg(target_os = "macos")]
+        if crate::macos::quit_requested() {
+            self.state.exit();
+        }
         self.organization.poll(ctx, &mut self.state);
         self.quickstart.tick(&mut self.state);
         if self.maintenance.tick(

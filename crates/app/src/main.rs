@@ -9,6 +9,8 @@ mod desktop;
 mod detection;
 mod icon;
 mod live;
+#[cfg(target_os = "macos")]
+mod macos;
 mod maintenance;
 mod organization;
 mod people;
@@ -60,6 +62,8 @@ fn main() -> eframe::Result {
             ..Default::default()
         },
         Box::new(|cc| {
+            #[cfg(target_os = "macos")]
+            macos::install_termination_handler(&cc.egui_ctx)?;
             theme::install(&cc.egui_ctx);
             egui_extras::install_image_loaders(&cc.egui_ctx);
             Ok(Box::new(ui::NotetakerApp::new()))
