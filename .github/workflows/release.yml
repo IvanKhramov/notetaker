@@ -71,6 +71,39 @@ jobs:
           gh release create $env:RELEASE_TAG $env:RELEASE_SETUP $env:SETUP_CHECKSUM $env:RELEASE_ZIP $env:RELEASE_CHECKSUM $env:EMBED_EXE $env:EMBED_CHECKSUM --verify-tag --draft --generate-notes --title "notetaker $env:RELEASE_TAG"
           if ($LASTEXITCODE -ne 0) { throw 'GitHub Release creation failed' }
 
+  macos:
+    if: github.event_name == 'push'
+    # macos-14 is Intel; cross-build arm64 with its macOS SDK.
+    runs-on: macos-14
+    needs: windows
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '14.4'
+      SHERPA_TARGET_ARCH: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2-macos-arm64
+      - uses: actions/cache@v4
+        with:
+          path: ~/sherpa-onnx-libs
+          key: sherpa-onnx-libs-macos-arm64-${{ hashFiles('Cargo.lock') }}
+      - name: Fetch sherpa-onnx native libraries
+        run: ./scripts/fetch-sherpa-libs.sh
+      - name: Build and package Apple Silicon applications
+        id: package
+        run: ./scripts/package-macos.sh
+      - name: Upload DMG to existing draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_DMG: ${{ steps.package.outputs.dmg }}
+          RELEASE_CHECKSUM: ${{ steps.package.outputs.checksum }}
+        run: gh release upload "$RELEASE_TAG" "$RELEASE_DMG" "$RELEASE_CHECKSUM" --clobber
+
   winget:
     if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest

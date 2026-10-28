@@ -97,3 +97,28 @@ jobs:
             ${{ steps.installer.outputs.setup }}
             ${{ steps.installer.outputs.setup_checksum }}
           if-no-files-found: error
+
+      - name: Prepare Apple Silicon packaging
+        if: runner.os == 'macOS'
+        env:
+          SHERPA_TARGET_ARCH: arm64
+        run: |
+          rustup target add aarch64-apple-darwin
+          ./scripts/fetch-sherpa-libs.sh
+      - name: Build macOS applications
+        if: runner.os == 'macOS'
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '14.4'
+        run: cargo build --locked --release --target aarch64-apple-darwin -p notetaker-app -p notetaker-cli -p notetaker-asr-worker -p notetaker-embed-worker -j 2
+      - name: Smoke-test macOS bundle, signature and DMG
+        if: runner.os == 'macOS'
+        run: ./scripts/package-macos.sh --skip-build
+      - name: Upload macOS applications
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: notetaker-macos-arm64
+          path: |
+            dist/notetaker-*-macos-arm64.dmg
+            dist/notetaker-*-macos-arm64.dmg.sha256
+          if-no-files-found: error
