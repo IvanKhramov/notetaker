@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Deterministic icon assets; Python standard library, no build-time tooling."""
+import argparse
 import math
 import struct
 import zlib
@@ -47,6 +48,17 @@ def png(size, recording=False):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--icns", type=Path, help="Write only a macOS icon to this path")
+    args = parser.parse_args()
+    if args.icns:
+        chunks = []
+        for kind, size in [(b"ic07", 128), (b"ic08", 256), (b"ic09", 512)]:
+            data = png(size)
+            chunks.append(kind + struct.pack(">I", len(data) + 8) + data)
+        payload = b"".join(chunks)
+        args.icns.write_bytes(b"icns" + struct.pack(">I", len(payload) + 8) + payload)
+        raise SystemExit(0)
     OUT.mkdir(parents=True, exist_ok=True)
     sizes = (16, 24, 32, 48, 64, 256)
     images = [png(size) for size in sizes]

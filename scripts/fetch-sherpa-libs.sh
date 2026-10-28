@@ -8,7 +8,7 @@ version=$(awk '/^name = "sherpa-onnx-sys"$/ {getline; gsub(/"/, "", $3); print $
 case "${RUNNER_OS:-$(uname -s)}" in
   Linux) stem="sherpa-onnx-v${version}-linux-x64-static-lib" ;;
   macOS | Darwin)
-    if [ "$(uname -m)" = "arm64" ]; then
+    if [ "${SHERPA_TARGET_ARCH:-$(uname -m)}" = "arm64" ]; then
       stem="sherpa-onnx-v${version}-osx-arm64-static-lib"
     else
       stem="sherpa-onnx-v${version}-osx-x64-static-lib"
