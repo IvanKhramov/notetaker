@@ -187,6 +187,88 @@ pub fn button(ui: &mut egui::Ui, text: &str, style: ButtonStyle) -> egui::Respon
             .stroke(Stroke::NONE),
     )
 }
+pub enum Icon {
+    Help,
+    Settings,
+    Reload,
+}
+pub fn icon_button(ui: &mut egui::Ui, icon: Icon, tooltip: &str) -> egui::Response {
+    let response = ui
+        .scope(|ui| {
+            ui.spacing_mut().button_padding = egui::vec2(4.0, 2.0);
+            ui.spacing_mut().interact_size = egui::vec2(24.0, 24.0);
+            ui.add(
+                egui::Button::new("")
+                    .frame(false)
+                    .min_size(egui::vec2(24.0, 24.0)),
+            )
+        })
+        .inner
+        .on_hover_text(tooltip);
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), tooltip));
+    let center = response.rect.center();
+    let stroke = Stroke::new(1.4, Palette::of(ui).muted);
+    let painter = ui.painter();
+    match icon {
+        Icon::Help => {
+            painter.text(
+                center,
+                egui::Align2::CENTER_CENTER,
+                "?",
+                FontId::proportional(16.0),
+                stroke.color,
+            );
+        }
+        Icon::Settings => {
+            painter.circle_stroke(center, 4.5, stroke);
+            painter.circle_stroke(center, 1.5, stroke);
+            for n in 0..8 {
+                let direction = egui::Vec2::angled(n as f32 * std::f32::consts::TAU / 8.0);
+                painter.line_segment([center + direction * 4.5, center + direction * 7.0], stroke);
+            }
+        }
+        Icon::Reload => {
+            let points = (0..=24)
+                .map(|n| {
+                    let angle = -std::f32::consts::FRAC_PI_2
+                        + std::f32::consts::TAU * (0.2 + n as f32 * 0.8 / 24.0);
+                    center + egui::Vec2::angled(angle) * 6.0
+                })
+                .collect();
+            painter.add(egui::Shape::line(points, stroke));
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    center + egui::vec2(-1.0, -9.0),
+                    center + egui::vec2(-1.0, -3.0),
+                    center + egui::vec2(4.0, -6.0),
+                ],
+                stroke.color,
+                Stroke::NONE,
+            ));
+        }
+    }
+    response
+}
+pub fn nav_item(ui: &mut egui::Ui, selected: bool, text: &str) -> egui::Response {
+    let p = Palette::of(ui);
+    ui.scope(|ui| {
+        ui.spacing_mut().button_padding = egui::vec2(8.0, 4.0);
+        ui.spacing_mut().interact_size.y = 28.0;
+        ui.visuals_mut().selection.bg_fill = p.card;
+        ui.add_sized(
+            [ui.available_width(), 28.0],
+            egui::Button::new(())
+                .left_text(egui::RichText::new(text).color(p.text))
+                .selected(selected)
+                .frame_when_inactive(selected)
+                .frame(true)
+                .stroke(Stroke::NONE)
+                .truncate(),
+        )
+    })
+    .inner
+}
 pub fn chip(ui: &mut egui::Ui, text: &str) {
     let p = Palette::of(ui);
     egui::Frame::new()
@@ -286,6 +368,7 @@ mod tests {
                         "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдеёжзийклмнопрстуфхцчшщъыьэюя +·…–«»"
                     ));
                 }
+                assert!(fonts.has_glyphs(&FontId::proportional(16.0), "?"));
             });
         });
         output.drop_without_applying_deltas();

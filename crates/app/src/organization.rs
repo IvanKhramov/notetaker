@@ -1,5 +1,5 @@
 //! Virtual folders and shared-library controls, with file work off the UI thread.
-use crate::{state::AppState, worker::Command};
+use crate::{state::AppState, theme, worker::Command};
 use eframe::egui;
 use notetaker_core::{
     Library, Meeting, MeetingMeta, Mode, Versioned,
@@ -187,71 +187,98 @@ impl Panel {
         let previous_tag = state.tag_filter.clone();
         let mut destination = None;
         let mut edit_folder = None;
-        egui::CollapsingHeader::new("Папки и теги")
-            .default_open(true)
-            .show(ui, |ui| {
-                if ui
-                    .selectable_label(state.folder_filter.is_none(), "Все папки")
-                    .clicked()
-                {
-                    state.folder_filter = None;
-                }
-                if let Some(s) = &self.snapshot {
-                    let mut names = s.folders.value.keys().cloned().collect::<BTreeSet<_>>();
-                    for meta in s.metas.values() {
-                        if let Some(folder) = &meta.folder {
-                            names.insert(folder.clone());
-                        }
-                    }
-                    for name in names.clone() {
-                        let parts = name.split('/').collect::<Vec<_>>();
-                        for n in 1..parts.len() {
-                            names.insert(parts[..n].join("/"));
-                        }
-                    }
-                    for name in std::iter::once(String::new()).chain(names) {
-                        let count = s
-                            .metas
-                            .values()
-                            .filter(|m| matches_folder(m, Some(&name)))
-                            .count();
-                        let label = if name.is_empty() {
-                            format!("Без папки ({count})")
-                        } else {
-                            format!(
-                                "{}{} ({count})",
-                                "  ".repeat(name.matches('/').count()),
-                                name.rsplit('/').next().unwrap_or(&name)
+        let id = ui.make_persistent_id("Папки и теги");
+        let mut toggle = false;
+        let mut header =
+            egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true)
+                .show_header(ui, |ui| {
+                    toggle = ui
+                        .add(
+                            egui::Label::new(
+                                egui::RichText::new("Папки")
+                                    .small()
+                                    .color(theme::Palette::of(ui).muted),
                             )
-                        };
-                        let response = ui
-                            .selectable_label(state.folder_filter.as_deref() == Some(&name), label);
-                        if response.clicked() {
-                            state.folder_filter = Some(name.clone());
-                        }
-                        if let Some(paths) = response.dnd_release_payload::<Vec<PathBuf>>() {
-                            destination = Some(((*paths).clone(), name.clone()));
-                        }
-                        response.context_menu(|ui| {
-                            if !name.is_empty() && ui.button("Настройки папки").clicked()
-                            {
-                                edit_folder = Some(name.clone());
-                                ui.close();
+                            .sense(egui::Sense::click()),
+                        )
+                        .clicked();
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if theme::icon_button(ui, theme::Icon::Settings, "Папки и общая библиотека")
+                            .clicked()
+                        {
+                            self.settings_open = true;
+                            if let Some(s) = &self.snapshot {
+                                self.settings_revision = s.folders.revision;
                             }
-                            if !self.selected.is_empty()
-                                && ui.button("Переместить выбранные сюда").clicked()
-                            {
-                                destination =
-                                    Some((self.selected.iter().cloned().collect(), name.clone()));
-                                ui.close();
-                            }
-                        });
+                        }
+                    });
+                });
+        if toggle {
+            header.toggle();
+        }
+        header.body_unindented(|ui| {
+            if theme::nav_item(ui, state.folder_filter.is_none(), "Все заметки").clicked()
+            {
+                state.folder_filter = None;
+            }
+            if let Some(s) = &self.snapshot {
+                let mut names = s.folders.value.keys().cloned().collect::<BTreeSet<_>>();
+                for meta in s.metas.values() {
+                    if let Some(folder) = &meta.folder {
+                        names.insert(folder.clone());
                     }
-                    let tags = s
+                }
+                for name in names.clone() {
+                    let parts = name.split('/').collect::<Vec<_>>();
+                    for n in 1..parts.len() {
+                        names.insert(parts[..n].join("/"));
+                    }
+                }
+                for name in std::iter::once(String::new()).chain(names) {
+                    let count = s
                         .metas
                         .values()
-                        .flat_map(|m| m.tags.iter().cloned())
-                        .collect::<BTreeSet<_>>();
+                        .filter(|m| matches_folder(m, Some(&name)))
+                        .count();
+                    let label = if name.is_empty() {
+                        format!("Без папки ({count})")
+                    } else {
+                        format!(
+                            "{}{} ({count})",
+                            "  ".repeat(name.matches('/').count()),
+                            name.rsplit('/').next().unwrap_or(&name)
+                        )
+                    };
+                    let response =
+                        theme::nav_item(ui, state.folder_filter.as_deref() == Some(&name), &label)
+                            .on_hover_text(&label);
+                    if response.clicked() {
+                        state.folder_filter = Some(name.clone());
+                    }
+                    if let Some(paths) = response.dnd_release_payload::<Vec<PathBuf>>() {
+                        destination = Some(((*paths).clone(), name.clone()));
+                    }
+                    response.context_menu(|ui| {
+                        if !name.is_empty() && ui.button("Настройки папки").clicked()
+                        {
+                            edit_folder = Some(name.clone());
+                            ui.close();
+                        }
+                        if !self.selected.is_empty()
+                            && ui.button("Переместить выбранные сюда").clicked()
+                        {
+                            destination =
+                                Some((self.selected.iter().cloned().collect(), name.clone()));
+                            ui.close();
+                        }
+                    });
+                }
+                let tags = s
+                    .metas
+                    .values()
+                    .flat_map(|m| m.tags.iter().cloned())
+                    .collect::<BTreeSet<_>>();
+                if !tags.is_empty() {
                     ui.horizontal_wrapped(|ui| {
                         for tag in tags {
                             if ui
@@ -270,28 +297,26 @@ impl Panel {
                         }
                     });
                 }
-                if !self.selected.is_empty() {
-                    ui.small(format!(
-                        "Выбрано: {}. Меню папки - переместить",
-                        self.selected.len()
-                    ));
-                    if ui.small_button("Снять выбор").clicked() {
-                        self.selected.clear();
-                    }
+            }
+            if !self.selected.is_empty() {
+                ui.small(format!(
+                    "Выбрано: {}. Меню папки - переместить",
+                    self.selected.len()
+                ));
+                if ui.small_button("Снять выбор").clicked() {
+                    self.selected.clear();
                 }
-                if self.snapshot.as_ref().is_some_and(|s| !s.shared) && likely_synced(&self.root) {
-                    ui.colored_label(egui::Color32::YELLOW, "Библиотека похожа на общую. Включите режим синхронизации в настройках папок.");
-                }
-                if ui.small_button("Папки / общая библиотека").clicked() {
-                    self.settings_open = true;
-                    if let Some(s) = &self.snapshot {
-                        self.settings_revision = s.folders.revision;
-                    }
-                }
-                if !self.message.is_empty() {
-                    ui.colored_label(egui::Color32::YELLOW, &self.message);
-                }
-            });
+            }
+            if self.snapshot.as_ref().is_some_and(|s| !s.shared) && likely_synced(&self.root) {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    "Библиотека похожа на общую. Включите режим синхронизации в настройках папок.",
+                );
+            }
+            if !self.message.is_empty() {
+                ui.colored_label(egui::Color32::YELLOW, &self.message);
+            }
+        });
         if state.folder_filter != previous_filter {
             state.record_mode = state
                 .folder_filter

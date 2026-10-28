@@ -86,16 +86,25 @@ impl NotetakerApp {
     }
     fn meetings(&mut self, ui: &mut egui::Ui) {
         let p = Palette::of(ui);
-        ui.heading(RichText::new("notetaker").size(20.0).strong());
+        ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
+        ui.horizontal(|ui| {
+            ui.heading(RichText::new("notetaker").size(20.0).strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if theme::icon_button(ui, theme::Icon::Settings, "Настройки").clicked() {
+                    self.show_settings = true;
+                }
+                self.quickstart.header(ui);
+            });
+        });
         self.quickstart.sidebar(ui, &self.state);
-        ui.add_space(12.0);
-        ui.add_enabled_ui(
-            self.state.ready
-                && !self.state.recording.busy()
-                && !self.state.settings_pending
-                && !self.state.downloading
-                && !self.state.quickstart.probe_busy,
-            |ui| {
+        ui.add_space(4.0);
+        let can_record = self.state.ready
+            && !self.state.recording.busy()
+            && !self.state.settings_pending
+            && !self.state.downloading
+            && !self.state.quickstart.probe_busy;
+        ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
+            ui.add_enabled_ui(can_record, |ui| {
                 if theme::button(ui, "+ Новая заметка", ButtonStyle::Primary).clicked()
                 {
                     self.state.prefill_call_title();
@@ -103,25 +112,26 @@ impl NotetakerApp {
                     self.state.inventory_pending = true;
                     self.state.send(Command::Inventory);
                 }
-                if theme::button(ui, "Импорт записи", ButtonStyle::Secondary).clicked()
-                {
-                    self.show_import = true;
+            });
+        });
+        ui.columns(2, |columns| {
+            for ui in columns.iter_mut() {
+                ui.spacing_mut().button_padding.x = 8.0;
+            }
+            columns[0].with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
+                ui.add_enabled_ui(can_record, |ui| {
+                    if theme::button(ui, "Импорт", ButtonStyle::Secondary).clicked() {
+                        self.show_import = true;
+                    }
+                });
+            });
+            columns[1].with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
+                if theme::button(ui, "Спросить", ButtonStyle::Secondary).clicked() {
+                    self.state.chat.open(None, String::new());
                 }
-            },
-        );
-        if ui.button("Спросить").clicked() {
-            self.state.chat.open(None, String::new());
-        }
-        if ui
-            .selectable_label(self.state.tasks_open, "Задачи")
-            .clicked()
-        {
-            self.people.close();
-            self.state.tasks_open = true;
-            self.state.refresh_tasks();
-        }
-        self.people.sidebar(ui, &mut self.state);
-        self.organization.sidebar(ui, &mut self.state);
+            });
+        });
+        ui.add_space(4.0);
         let search = ui.add(
             egui::TextEdit::singleline(&mut self.state.query)
                 .id_salt("library_search")
@@ -135,11 +145,15 @@ impl NotetakerApp {
             self.state.query_changed = Some(Instant::now());
         }
         if ui
-            .add_enabled(
-                self.state.semantic_ready,
-                egui::Checkbox::new(&mut self.state.semantic_enabled, "По смыслу"),
-            )
-            .changed()
+            .scope(|ui| {
+                ui.spacing_mut().interact_size.y = 20.0;
+                ui.add_enabled(
+                    self.state.semantic_ready,
+                    egui::Checkbox::new(&mut self.state.semantic_enabled, "По смыслу"),
+                )
+                .changed()
+            })
+            .inner
         {
             self.state.query_changed = Some(Instant::now());
         }
@@ -156,27 +170,46 @@ impl NotetakerApp {
         if let Some(note) = &self.state.semantic_note {
             ui.small(note);
         }
+        ui.add_space(4.0);
+        if theme::nav_item(ui, self.state.tasks_open, "Задачи").clicked() {
+            self.people.close();
+            self.state.tasks_open = true;
+            self.state.refresh_tasks();
+        }
+        self.people.sidebar(ui, &mut self.state);
+        ui.add_space(4.0);
+        self.organization.sidebar(ui, &mut self.state);
         egui::Panel::bottom("library_actions")
-            .frame(egui::Frame::new().inner_margin(4))
+            .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(0, 4)))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    if theme::button(ui, "Настройки", ButtonStyle::Secondary).clicked() {
-                        self.show_settings = true;
-                    }
-                    if ui.small_button("Обновить").clicked() {
+                    let status = if self.state.unsaved() {
+                        "Сохранение…"
+                    } else {
+                        &self.state.status
+                    };
+                    let width = (ui.available_width() - 30.0).max(1.0);
+                    ui.add_sized(
+                        [width, 24.0],
+                        egui::Label::new(RichText::new(status).small().color(p.muted)).truncate(),
+                    )
+                    .on_hover_text(status);
+                    if theme::icon_button(ui, theme::Icon::Reload, "Перечитать библиотеку с диска")
+                        .clicked()
+                    {
                         self.state.flush();
                         self.state.refresh();
                     }
                 });
-                ui.small(if self.state.unsaved() {
-                    "Сохранение…"
-                } else {
-                    &self.state.status
-                });
                 if self.state.exit_requested {
-                    ui.small("Завершаем задачи перед выходом…");
+                    ui.label(
+                        RichText::new("Завершаем задачи перед выходом…")
+                            .small()
+                            .color(p.muted),
+                    );
                 }
             });
+        ui.add_space(4.0);
         let mut start_event = None;
         let mut brief_event = None;
         if !self.state.settings.calendars.is_empty() {

@@ -1,5 +1,5 @@
 //! People, series and digest screens. Disk and LLM work stays off the UI thread.
-use crate::{config::Settings, state::AppState, worker::Command};
+use crate::{config::Settings, state::AppState, theme, worker::Command};
 use chrono::{Datelike, Timelike};
 use eframe::egui;
 use notetaker_core::{
@@ -268,10 +268,7 @@ impl Panel {
             ("Серии", View::Series(String::new())),
             ("Дайджест", View::Digest),
         ] {
-            if ui
-                .selectable_label(self.view.as_ref() == Some(&view), label)
-                .clicked()
-            {
+            if theme::nav_item(ui, self.view.as_ref() == Some(&view), label).clicked() {
                 self.view = Some(view);
                 state.tasks_open = false;
                 self.refresh(ui.ctx(), &state.settings);

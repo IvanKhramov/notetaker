@@ -11,7 +11,7 @@ use crate::{
     config::{LlmSettings, Settings},
     maintenance::Maintenance,
     state::AppState,
-    theme::Palette,
+    theme::{self, Palette},
     worker::{self, Command},
 };
 
@@ -313,13 +313,16 @@ impl Panel {
         }
         steps
     }
-    pub fn sidebar(&mut self, ui: &mut egui::Ui, state: &AppState) {
-        if ui.small_button("Быстрый старт").clicked() {
+    pub fn header(&mut self, ui: &mut egui::Ui) {
+        if theme::icon_button(ui, theme::Icon::Help, "Быстрый старт").clicked() {
             self.open = true;
         }
+    }
+    pub fn sidebar(&mut self, ui: &mut egui::Ui, state: &AppState) {
         let missing = essential_missing(&self.steps(state));
         if state.ready && missing > 0 && !self.banner_dismissed {
             ui.group(|ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
                 ui.small(format!(
                     "Настройка не завершена: {missing} {}",
                     if missing == 1 { "шаг" } else { "шага" }
