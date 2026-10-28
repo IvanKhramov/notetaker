@@ -133,7 +133,11 @@ fn move_legacy_file(from: &Path, to: &Path) -> Result<()> {
         to.to_owned()
     };
     fs::copy(from, &destination)?;
-    fs::File::open(&destination)?.sync_all()?;
+    // Windows FlushFileBuffers needs write access; a read-only handle fails.
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&destination)?
+        .sync_all()?;
     fs::remove_file(from)?;
     Ok(())
 }
