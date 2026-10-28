@@ -46,14 +46,14 @@ pub fn proposal(
 
 #[derive(Default)]
 pub struct Monitor {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     channels: Option<(
         std::sync::mpsc::Sender<Command>,
         std::sync::mpsc::Receiver<Update>,
     )>,
     settings: Option<DetectionSettings>,
     calls: Vec<DetectedCall>,
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     generation: u64,
 }
 #[derive(Clone, PartialEq, Eq)]
@@ -63,13 +63,13 @@ struct DetectionSettings {
     any_microphone: bool,
     apps: Vec<String>,
 }
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 struct Update {
     generation: u64,
     events: Vec<DetectEvent>,
     calls: Vec<DetectedCall>,
 }
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 enum Command {
     Configure {
         generation: u64,
@@ -80,9 +80,9 @@ enum Command {
 }
 impl Monitor {
     pub fn start(&mut self) {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         {
-            use notetaker_detect::{CallDetector, DetectConfig, WindowsSnapshot};
+            use notetaker_detect::{CallDetector, DetectConfig};
             use std::{
                 sync::mpsc,
                 thread,
@@ -95,7 +95,11 @@ impl Monitor {
                 let origin = Instant::now();
                 let mut enabled = false;
                 let mut generation = 0;
-                let mut detector = CallDetector::new(WindowsSnapshot, DetectConfig::default());
+                #[cfg(windows)]
+                let provider = notetaker_detect::WindowsSnapshot;
+                #[cfg(target_os = "macos")]
+                let provider = notetaker_detect::MacosSnapshot;
+                let mut detector = CallDetector::new(provider, DetectConfig::default());
                 let mut next_poll = Instant::now();
                 loop {
                     match commands.recv_timeout(next_poll.saturating_duration_since(Instant::now()))
@@ -151,7 +155,7 @@ impl Monitor {
         }
         self.calls.clear();
         self.settings = Some(settings.clone());
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         if let Some((tx, _)) = &self.channels {
             self.generation += 1;
             let _ = tx.send(Command::Configure {
@@ -179,19 +183,19 @@ impl Monitor {
     }
 
     pub fn dismiss(&self, _pid: u32) {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         if let Some((tx, _)) = &self.channels {
             let _ = tx.send(Command::Dismiss(_pid));
         }
     }
     pub fn recording_stopped(&self) {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         if let Some((tx, _)) = &self.channels {
             let _ = tx.send(Command::RecordingStopped);
         }
     }
     pub fn poll(&mut self) -> Vec<DetectEvent> {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         if let Some((_, rx)) = &self.channels {
             let mut events = vec![];
             for update in rx.try_iter() {

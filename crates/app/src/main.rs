@@ -4,7 +4,7 @@ mod ai;
 mod attachments;
 mod chat;
 mod config;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 mod desktop;
 mod detection;
 mod icon;
@@ -20,21 +20,24 @@ mod trackers;
 mod ui;
 #[cfg(windows)]
 mod updates;
+#[cfg(target_os = "macos")]
+#[path = "updates_macos.rs"]
+mod updates;
 mod worker;
 
 fn main() -> eframe::Result {
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     if std::env::args_os().skip(1).any(|arg| arg == "--quit") {
         std::process::exit(
-            if notetaker_runtime::windows::Instance::request_quit().is_ok() {
+            if notetaker_runtime::platform::Instance::request_quit().is_ok() {
                 0
             } else {
                 2
             },
         );
     }
-    #[cfg(windows)]
-    let _instance = match notetaker_runtime::windows::Instance::acquire() {
+    #[cfg(any(windows, unix))]
+    let _instance = match notetaker_runtime::platform::Instance::acquire() {
         Ok(Some(instance)) => instance,
         Ok(None) => return Ok(()),
         Err(error) => {
@@ -43,8 +46,8 @@ fn main() -> eframe::Result {
         }
     };
     let _ = notetaker_runtime::diagnostics::init();
-    #[cfg(windows)]
-    let _ = notetaker_runtime::windows::capture_app_stderr();
+    #[cfg(any(windows, unix))]
+    let _ = notetaker_runtime::platform::capture_app_stderr();
     #[cfg(windows)]
     updates::cleanup_finished();
     let result = eframe::run_native(

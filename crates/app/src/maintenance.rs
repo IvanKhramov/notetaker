@@ -11,9 +11,9 @@ pub struct Maintenance {
     message: Option<String>,
     report: Option<Receiver<anyhow::Result<std::path::PathBuf>>>,
     was_busy: bool,
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     autostart: bool,
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     updates: crate::updates::Updates,
 }
 impl Default for Maintenance {
@@ -42,9 +42,9 @@ impl Default for Maintenance {
             message,
             report: None,
             was_busy: false,
-            #[cfg(windows)]
-            autostart: notetaker_runtime::windows::autostart(),
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "macos"))]
+            autostart: notetaker_runtime::platform::autostart(),
+            #[cfg(any(windows, target_os = "macos"))]
             updates: Default::default(),
         }
     }
@@ -74,11 +74,11 @@ impl Maintenance {
                 }
             });
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, unix))]
         {
-            if notetaker_runtime::windows::Instance::quit_requested() {
+            if notetaker_runtime::platform::Instance::quit_requested() {
                 if busy {
-                    notetaker_runtime::windows::Instance::refuse_quit();
+                    notetaker_runtime::platform::Instance::refuse_quit();
                     self.message = Some("Перед установкой или удалением завершите запись и чистовой проход, затем повторите попытку.".into());
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
@@ -87,15 +87,18 @@ impl Maintenance {
                     return true;
                 }
             }
-            if notetaker_runtime::windows::Instance::show_requested() {
+            if notetaker_runtime::platform::Instance::show_requested() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaintWhileHidden);
             }
+        }
+        #[cfg(any(windows, target_os = "macos"))]
+        {
             self.updates.tick(ctx, enabled, busy)
         }
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "macos")))]
         {
             let _ = (ctx, enabled);
             false
@@ -127,15 +130,15 @@ impl Maintenance {
                     }
                 });
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         self.updates.ui(ctx, busy);
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "macos")))]
         let _ = busy;
     }
     pub fn settings(&mut self, ui: &mut egui::Ui, settings: &mut crate::config::Settings) {
         ui.add_space(16.0);
         crate::theme::section_caption(ui, "Обновления и диагностика");
-        ui.add_enabled_ui(cfg!(windows), |ui| {
+        ui.add_enabled_ui(cfg!(any(windows, target_os = "macos")), |ui| {
             ui.checkbox(&mut settings.check_updates, "Проверять обновления");
         });
         self.windows_settings(ui);
@@ -175,18 +178,25 @@ impl Maintenance {
         }
     }
     pub fn windows_settings(&mut self, ui: &mut egui::Ui) {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         {
             if ui
-                .checkbox(&mut self.autostart, "Запускать при входе в Windows")
+                .checkbox(
+                    &mut self.autostart,
+                    if cfg!(target_os = "macos") {
+                        "Запускать при входе в macOS"
+                    } else {
+                        "Запускать при входе в Windows"
+                    },
+                )
                 .changed()
-                && notetaker_runtime::windows::set_autostart(self.autostart).is_err()
+                && notetaker_runtime::platform::set_autostart(self.autostart).is_err()
             {
-                self.autostart = notetaker_runtime::windows::autostart();
+                self.autostart = notetaker_runtime::platform::autostart();
                 self.message = Some("Не удалось изменить автозапуск.".into());
             }
         }
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "macos")))]
         {
             let mut disabled = false;
             ui.add_enabled(

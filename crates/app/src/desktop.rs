@@ -1,5 +1,4 @@
-//! Windows-only native integrations. Constructed and polled on eframe's Win32
-//! event-loop thread. Native callbacks wake egui via Context::request_repaint.
+//! Native Windows/macOS integrations, owned by eframe's event-loop thread. Native callbacks wake egui via Context::request_repaint.
 use std::{
     collections::HashMap,
     sync::{

@@ -1253,7 +1253,7 @@ fn ensure_embed_worker(events: &Sender<Event>) -> Result<()> {
     {
         let _ = events;
         anyhow::bail!(
-            "Соберите notetaker-embed: cargo build --release -p notetaker-embed-worker; задайте NOTETAKER_EMBED_BIN"
+            "Не найден notetaker-embed рядом с приложением. macOS: переустановите полный .app из DMG. Для сборки: cargo build --release -p notetaker-embed-worker; NOTETAKER_EMBED_BIN задаёт другой путь"
         );
     }
     #[cfg(windows)]

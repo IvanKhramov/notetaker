@@ -85,9 +85,24 @@ impl Default for Settings {
             asr_threads: 0,
             mode: Mode::Local,
             retention_days: Some(7),
-            hotkey: "Ctrl+Alt+R".into(),
-            recap_hotkey: "Ctrl+Alt+M".into(),
-            bookmark_hotkey: "Ctrl+Alt+B".into(),
+            hotkey: if cfg!(target_os = "macos") {
+                "Super+Alt+Shift+R"
+            } else {
+                "Ctrl+Alt+R"
+            }
+            .into(),
+            recap_hotkey: if cfg!(target_os = "macos") {
+                "Super+Alt+Shift+M"
+            } else {
+                "Ctrl+Alt+M"
+            }
+            .into(),
+            bookmark_hotkey: if cfg!(target_os = "macos") {
+                "Super+Alt+Shift+B"
+            } else {
+                "Ctrl+Alt+B"
+            }
+            .into(),
             live_summary: true,
             live_summary_minutes: 3,
             recap_minutes: 5,
@@ -473,7 +488,7 @@ mod tests {
         );
         assert_eq!(
             toml::from_str::<Settings>(&text).unwrap().hotkey,
-            "Ctrl+Alt+R"
+            Settings::default().hotkey
         );
         settings.retention_days = None;
         let forever = toml::to_string(&settings).unwrap();

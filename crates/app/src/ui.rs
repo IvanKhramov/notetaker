@@ -51,11 +51,11 @@ pub struct NotetakerApp {
     live_summary_tab: bool,
     focus_search: bool,
     maintenance: crate::maintenance::Maintenance,
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     desktop: Option<crate::desktop::Desktop>,
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     desktop_attempted: bool,
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     applied_hotkey: String,
 }
 impl NotetakerApp {
@@ -83,11 +83,11 @@ impl NotetakerApp {
             live_summary_tab: true,
             focus_search: false,
             maintenance: Default::default(),
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "macos"))]
             desktop: None,
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "macos"))]
             desktop_attempted: false,
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "macos"))]
             applied_hotkey: String::new(),
         }
     }
@@ -272,7 +272,7 @@ impl NotetakerApp {
                                 ui.horizontal_wrapped(|ui| {
                                     if ui
                                         .add_enabled(
-                                            cfg!(windows)
+                                            cfg!(any(windows, target_os = "macos"))
                                                 && self.can_record()
                                                 && !self.state.draft_busy,
                                             theme::styled_button(
@@ -1486,10 +1486,12 @@ impl NotetakerApp {
             if self.state.inventory_pending { ui.spinner(); }
             if let Some(error) = &self.state.inventory_error { ui.label(error); }
             for warning in &self.state.inventory.warnings { ui.small(warning); }
-            #[cfg(not(windows))]
+            #[cfg(target_os = "macos")]
+            ui.small("macOS: весь системный звук, кроме notetaker. Нужны разрешения Microphone и System Audio Recording.");
+            #[cfg(not(any(windows, target_os = "macos")))]
             ui.label("Захват звука пока реализован только на Windows. Библиотека, поиск, правки и конспекты работают на этой ОС.");
             ui.horizontal(|ui| {
-                if ui.add_enabled(cfg!(windows) && !self.state.recording.busy(), theme::styled_button(Palette::of(ui), "Начать запись", ButtonStyle::Primary)).clicked() { self.state.toggle_recording(); self.show_record = false; }
+                if ui.add_enabled(cfg!(any(windows, target_os = "macos")) && !self.state.recording.busy(), theme::styled_button(Palette::of(ui), "Начать запись", ButtonStyle::Primary)).clicked() { self.state.toggle_recording(); self.show_record = false; }
                 if ui.button("Скачать модель…").clicked() { self.show_settings = true; }
             });
         });
@@ -1579,9 +1581,9 @@ impl NotetakerApp {
                     if let Some(days) = &mut settings.retention_days { ui.add(egui::DragValue::new(days).range(0..=36_500).suffix(" дней")); }
                 });
                 ui.small("0 - удалить аудио после успешного чистового прохода. Срок применяется к новым записям; просроченное аудио очищается после записи.");
-                ui.label("Глобальная клавиша старт/стоп (Windows)"); ui.text_edit_singleline(&mut settings.hotkey);
-                ui.label("Что я пропустил? (Windows)"); ui.text_edit_singleline(&mut settings.recap_hotkey);
-                ui.label("Закладка (Windows)"); ui.text_edit_singleline(&mut settings.bookmark_hotkey);
+                ui.label(if cfg!(target_os = "macos") { "Глобальная клавиша старт/стоп (macOS)" } else { "Глобальная клавиша старт/стоп (Windows)" }); ui.text_edit_singleline(&mut settings.hotkey);
+                ui.label(if cfg!(target_os = "macos") { "Что я пропустил? (macOS)" } else { "Что я пропустил? (Windows)" }); ui.text_edit_singleline(&mut settings.recap_hotkey);
+                ui.label(if cfg!(target_os = "macos") { "Закладка (macOS)" } else { "Закладка (Windows)" }); ui.text_edit_singleline(&mut settings.bookmark_hotkey);
                 let summary_available = self.state.llm_configured && self.state.llm.validate().ok()
                     .and_then(|text| notetaker_llm::Config::parse(&text).ok())
                     .is_some_and(|config| config.select_scenario(settings.mode, notetaker_llm::Scenario::Summary, None).is_ok());
@@ -1598,16 +1600,18 @@ impl NotetakerApp {
                     ui.label("Что я пропустил: последние");
                     ui.add(egui::DragValue::new(&mut settings.recap_minutes).range(1..=30).suffix(" мин"));
                 });
-                ui.small("Например Ctrl+Alt+R. Модификаторы: Ctrl, Alt, Shift, Super; клавиша: A–Z, 0–9, F1–F24.");
+                ui.small(if cfg!(target_os = "macos") { "Например Super+Alt+Shift+R. Super = Cmd, Alt = Option; клавиша: A–Z, 0–9, F1–F24." } else { "Например Ctrl+Alt+R. Модификаторы: Ctrl, Alt, Shift, Super; клавиша: A–Z, 0–9, F1–F24." });
+                #[cfg(target_os = "macos")]
+                ui.small("macOS: запись всего системного звука, кроме notetaker. При тишине проверьте Microphone и System Audio Recording в System Settings > Privacy & Security.");
                 ui.separator();
-                ui.add_enabled_ui(cfg!(windows), |ui| {
+                ui.add_enabled_ui(cfg!(any(windows, target_os = "macos")), |ui| {
                     ui.checkbox(&mut settings.detect_calls, "Предлагать запись при обнаружении звонка");
                     ui.checkbox(&mut settings.detect_any_microphone, "Предлагать для любых приложений с микрофоном");
                     ui.checkbox(&mut settings.detect_browsers, "Учитывать браузеры")
                         .on_hover_text("Включите для Meet, Толка и Телемоста в браузере. Диктовка и голосовые сообщения тоже могут выглядеть как звонок.");
                     ui.label("Свои приложения для звонков");
                     ui.add(egui::TextEdit::multiline(&mut settings.call_apps).desired_rows(3).hint_text("Telemost.exe\nKonturTalk.exe"));
-                    ui.small("Имена exe из Диспетчера задач, по одному на строку. Дополняют список известных приложений.");
+                    ui.small(if cfg!(target_os = "macos") { "Имена процессов, по одному на строку. Определение по микрофону приблизительное, вкладки браузера не читаются." } else { "Имена exe из Диспетчера задач, по одному на строку. Дополняют список известных приложений." });
                 });
                 ui.horizontal(|ui| {
                     ui.label("Автостоп по тишине:");
@@ -1637,7 +1641,7 @@ impl NotetakerApp {
                 ui.add_space(16.0); theme::section_caption(ui, "Календари");
                 ui.small("Приватные ICS-подписки. URL хранится в Credential Manager. Обновление при запуске и каждые 10 минут.");
                 ui.horizontal(|ui| { ui.label("Часовой пояс без TZID:"); ui.text_edit_singleline(&mut self.state.settings_draft.calendar_timezone); });
-                #[cfg(not(windows))]
+                #[cfg(not(any(windows, target_os = "macos")))]
                 ui.small("Сохранение URL доступно на Windows, как и ключей шлюзов.");
                 let mut remove_calendar = None;
                 for calendar in &mut self.state.settings_draft.calendars {
@@ -1655,8 +1659,8 @@ impl NotetakerApp {
                     self.state.calendar_secrets.remove(&id);
                 }
                 let connect = if self.state.settings_draft.calendars.is_empty() {
-                    ui.add_enabled(cfg!(windows), egui::Link::new("Подключить календарь")).clicked()
-                } else { ui.add_enabled(cfg!(windows), egui::Button::new("Добавить календарь")).clicked() };
+                    ui.add_enabled(cfg!(any(windows, target_os = "macos")), egui::Link::new("Подключить календарь")).clicked()
+                } else { ui.add_enabled(cfg!(any(windows, target_os = "macos")), egui::Button::new("Добавить календарь")).clicked() };
                 if connect {
                     self.state.settings_draft.calendars.push(notetaker_llm::calendar::Subscription { id: format!("calendar-{}", uuid::Uuid::now_v7()), name: "Календарь".into() });
                 }
@@ -1726,8 +1730,8 @@ impl NotetakerApp {
                 let can_save = self.state.ready && !self.state.recording.busy() && self.state.enhancing.is_none() && !self.state.chat.busy && !self.state.unsaved() && !self.state.settings_pending;
                 if ui.add_enabled(can_save, theme::styled_button(Palette::of(ui), "Сохранить настройки", ButtonStyle::Primary)).clicked() { self.state.save_settings(); }
                 if self.state.recording.busy() || self.state.enhancing.is_some() { ui.small("Сохранение настроек доступно после завершения записи и конспекта."); }
-                ui.small("Настройки приложения и LLM сохраняются отдельно. Ключи шлюзов хранятся в Credential Manager на Windows; также поддерживается окружение.");
-                #[cfg(not(windows))]
+                ui.small(if cfg!(target_os = "macos") { "Ключи и URL календарей хранятся в macOS Keychain. Настройки приложения и LLM сохраняются отдельно." } else { "Настройки приложения и LLM сохраняются отдельно. Ключи шлюзов хранятся в Credential Manager на Windows; также поддерживается окружение." });
+                #[cfg(not(any(windows, target_os = "macos")))]
                 ui.small("Трей и глобальная клавиша включены только на Windows; GTK/AppIndicator не нужны для сборки Linux.");
             });
         });
@@ -1933,7 +1937,7 @@ impl NotetakerApp {
             self.state.save_bookmark_label();
         }
     }
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     fn desktop(&mut self, ctx: &egui::Context) {
         use crate::desktop::{Action, Desktop};
         if !self.state.ready {
@@ -2015,17 +2019,17 @@ impl eframe::App for NotetakerApp {
                 self.main_rect = Some(rect);
             }
         });
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         self.desktop(ctx);
         if ctx.input(|input| input.viewport().close_requested()) && !self.state.can_exit() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "macos"))]
             if self.desktop.is_some() && !self.state.exit_requested {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             } else {
                 self.state.exit();
             }
-            #[cfg(not(windows))]
+            #[cfg(not(any(windows, target_os = "macos")))]
             self.state.exit();
         }
         if self.state.can_exit() {

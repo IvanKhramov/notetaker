@@ -227,7 +227,7 @@ impl Connections {
                         }
                         ui.label("API-ключ (пусто - использовать сохранённый)");
                         ui.add(egui::TextEdit::singleline(&mut card.key).password(true));
-                        #[cfg(not(windows))]
+                        #[cfg(not(any(windows, target_os = "macos")))]
                         ui.small("На этой ОС задайте api_key_env в Расширенных и переменную окружения перед запуском.");
                         if index == 3 { ui.label("Модель"); ui.text_edit_singleline(&mut card.provider.model); }
                         if !card.models.is_empty() {

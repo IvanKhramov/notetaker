@@ -80,7 +80,19 @@ pub fn run(args: Args) -> Result<()> {
         );
         Ok(())
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        let _ = args;
+        notetaker_runtime::unix::open_url(&format!(
+            "{}/releases/latest",
+            notetaker_runtime::update::REPOSITORY
+        ))?;
+        println!(
+            "Скачайте DMG, завершите запись, закройте notetaker и замените приложение в Applications."
+        );
+        Ok(())
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = args.parent_pid;
         anyhow::bail!("Самообновление доступно только в Windows");

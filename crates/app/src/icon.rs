@@ -1,4 +1,4 @@
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 pub fn image(recording: bool) -> image::RgbaImage {
     let bytes: &[u8] = if recording {
         include_bytes!("../assets/notetaker-recording-32.png")

@@ -17,10 +17,10 @@ pub struct Args {
     dismiss_minutes: u64,
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 pub fn run(args: Args) -> Result<()> {
     use anyhow::Context;
-    use notetaker_detect::{AppRule, CallDetector, DetectConfig, DetectEvent, WindowsSnapshot};
+    use notetaker_detect::{AppRule, CallDetector, DetectConfig, DetectEvent};
     use std::{
         sync::{
             Arc,
@@ -46,7 +46,11 @@ pub fn run(args: Args) -> Result<()> {
         exe,
         browser: false,
     }));
-    let mut detector = CallDetector::new(WindowsSnapshot, config);
+    #[cfg(windows)]
+    let provider = notetaker_detect::WindowsSnapshot;
+    #[cfg(target_os = "macos")]
+    let provider = notetaker_detect::MacosSnapshot;
+    let mut detector = CallDetector::new(provider, config);
     let stop = Arc::new(AtomicBool::new(false));
     let signal = Arc::clone(&stop);
     ctrlc::set_handler(move || signal.store(true, Ordering::Release))?;
@@ -69,7 +73,7 @@ pub fn run(args: Args) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn run(_: Args) -> Result<()> {
     anyhow::bail!("call detection not supported on this OS yet")
 }

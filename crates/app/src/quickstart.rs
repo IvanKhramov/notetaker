@@ -413,7 +413,7 @@ impl Panel {
                     });
                     row(ui, &steps[4], "Календарь (необязательно)", "Приватная HTTPS ICS-подписка, URL хранится в Credential Manager.");
                     if state.settings.calendars.is_empty() {
-                        ui.add_enabled_ui(state.can_save_settings() && cfg!(windows), |ui| {
+                        ui.add_enabled_ui(state.can_save_settings() && cfg!(any(windows, target_os = "macos")), |ui| {
                             ui.add(egui::TextEdit::singleline(&mut self.calendar_url).password(true).hint_text("HTTPS URL ICS"));
                             if ui.add_enabled(!self.calendar_url.trim().is_empty(), egui::Button::new("Подключить")).clicked() {
                                 let id = if let Some(calendar) = state.settings_draft.calendars.first() { calendar.id.clone() } else {
@@ -426,13 +426,13 @@ impl Panel {
                                 save = true;
                             }
                         });
-                        #[cfg(not(windows))]
+                        #[cfg(not(any(windows, target_os = "macos")))]
                         ui.small("Сохранение URL доступно на Windows.");
                     } else {
                         let today = chrono::Local::now().date_naive();
                         let count = state.calendar_events.iter().filter(|event| event.start.with_timezone(&chrono::Local).date_naive() == today).count();
                         ui.label(format!("{count} событий сегодня"));
-                        ui.add_enabled_ui(state.can_save_settings() && cfg!(windows), |ui| {
+                        ui.add_enabled_ui(state.can_save_settings() && cfg!(any(windows, target_os = "macos")), |ui| {
                             ui.add(egui::TextEdit::singleline(&mut self.calendar_url).password(true).hint_text("Новый HTTPS URL ICS (при необходимости)"));
                             if ui.add_enabled(!self.calendar_url.trim().is_empty(), egui::Button::new("Подключить")).clicked() {
                                 let id = state.settings.calendars[0].id.clone();
@@ -445,13 +445,13 @@ impl Panel {
                         if state.calendar_busy { ui.spinner(); }
                         ui.small(&state.calendar_status);
                     }
-                    row(ui, &steps[5], "Звонки", "Предложения записи и запуск приложения вместе с Windows.");
-                    ui.add_enabled_ui(state.can_save_settings() && cfg!(windows), |ui| {
+                    row(ui, &steps[5], "Звонки", if cfg!(target_os = "macos") { "Предложения записи и запуск приложения при входе в macOS." } else { "Предложения записи и запуск приложения вместе с Windows." });
+                    ui.add_enabled_ui(state.can_save_settings() && cfg!(any(windows, target_os = "macos")), |ui| {
                         save |= ui.checkbox(&mut state.settings_draft.detect_calls, "Предлагать запись при звонке").changed();
                     });
                     maintenance.windows_settings(ui);
                     row(ui, self.probe_status.as_ref().unwrap_or(&Status::Missing), "Проверка звука (необязательно)", "5 секунд: говорите и включите звук звонка. Аудио не сохраняется.");
-                    if ui.add_enabled(cfg!(windows) && !state.quickstart.probe_busy && !state.recording.busy() && !state.settings_pending && !state.exit_requested, egui::Button::new("Проверить")).clicked() {
+                    if ui.add_enabled(cfg!(any(windows, target_os = "macos")) && !state.quickstart.probe_busy && !state.recording.busy() && !state.settings_pending && !state.exit_requested, egui::Button::new("Проверить")).clicked() {
                         let (sender, receiver) = mpsc::channel();
                         self.probe = Some(receiver);
                         self.levels = [0.0; 2];

@@ -44,9 +44,9 @@ enum Command {
     Export(cmd_export::Args),
     /// Import audio or video and create a meeting with a final transcript.
     Import(cmd_import::Args),
-    /// Watch microphone usage and print call hints on Windows.
+    /// Watch microphone usage and print call hints on Windows/macOS.
     Watch(cmd_watch::Args),
-    /// Diagnose microphone and system audio capture on Windows.
+    /// Diagnose microphone and system audio capture on Windows/macOS.
     Probe(cmd_probe::Args),
     /// Expand user notes using a transcript, template and configured LLM.
     Enhance(cmd_enhance::Args),
