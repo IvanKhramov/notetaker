@@ -69,9 +69,15 @@ fn enhance_meeting_with_policy(
     provider.config().validate(meta.mode)?;
     let notes = meeting.read_notes()?;
     let transcript = meeting.read_transcript()?;
-    let vocabulary = notetaker_core::Vocabulary::load(
+    let mut vocabulary = notetaker_core::Vocabulary::load(
         meeting.path().parent().context("meeting has no library")?,
     )?;
+    if let Some(folder) = meta.folder.as_ref() {
+        let library = Library::open(meeting.path().parent().context("meeting has no library")?)?;
+        if let Some(settings) = library.load_folders()?.value.get(folder) {
+            vocabulary.merge(&settings.vocabulary);
+        }
+    }
     let mut template = template.clone();
     template.instruction.push_str(&vocabulary.prompt_context());
     let mut named = transcript.clone();

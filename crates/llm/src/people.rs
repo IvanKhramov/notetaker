@@ -18,7 +18,18 @@ pub fn person_brief(
     config: Option<&Config>,
     cancel: Cancellation,
 ) -> Result<PeopleBrief> {
-    let page = library.person_page(person, false)?;
+    person_brief_in_folder(library, person, recent, config, cancel, None)
+}
+
+pub fn person_brief_in_folder(
+    library: &Library,
+    person: Person,
+    recent: usize,
+    config: Option<&Config>,
+    cancel: Cancellation,
+    folder: Option<&str>,
+) -> Result<PeopleBrief> {
+    let page = library.person_page_in_folder(person, false, folder)?;
     let meetings: Vec<_> = page.meetings.iter().take(recent.clamp(1, 100)).collect();
     let mode = if meetings.iter().any(|m| m.meta.mode == Mode::Local) {
         Mode::Local
