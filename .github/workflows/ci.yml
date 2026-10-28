@@ -44,7 +44,7 @@ jobs:
         run: cargo test --workspace
       - name: Build Windows applications
         if: runner.os == 'Windows'
-        run: cargo build --locked --release -p notetaker-cli -p notetaker-asr-worker -p notetaker-app -j 2
+        run: cargo build --locked --release -p notetaker-cli -p notetaker-asr-worker -p notetaker-embed-worker -p notetaker-app -j 2
       - name: Verify portable ASR providers
         if: runner.os == 'Windows'
         shell: pwsh
@@ -60,6 +60,15 @@ jobs:
         with:
           name: notetaker-windows-x64
           path: ${{ steps.package.outputs.payload }}
+          if-no-files-found: error
+      - name: Upload optional embedding worker
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: notetaker-windows-x64-embed
+          path: |
+            ${{ steps.package.outputs.embed }}
+            ${{ steps.package.outputs.embed_checksum }}
           if-no-files-found: error
       - name: Build per-user installer
         if: runner.os == 'Windows'

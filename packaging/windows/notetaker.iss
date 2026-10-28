@@ -51,6 +51,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; Flags: unchecked
 Source: "{#PayloadDir}\notetaker-app.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PayloadDir}\notetaker.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PayloadDir}\notetaker-asr.exe"; DestDir: "{app}"; Flags: ignoreversion
+; Optional custom payload only; the standard installer downloads this worker on demand.
+Source: "{#PayloadDir}\notetaker-embed.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#PayloadDir}\*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\..\LICENSE-MIT"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\LICENSE-APACHE"; DestDir: "{app}"; Flags: ignoreversion

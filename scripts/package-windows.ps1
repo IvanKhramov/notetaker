@@ -26,7 +26,7 @@ try {
     if (-not (Test-Path $vswhere)) { throw 'vswhere is required to verify static CRT linkage' }
     $dumpbin = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC/Tools/MSVC/**/bin/Hostx64/x64/dumpbin.exe' | Select-Object -First 1
     if ($LASTEXITCODE -ne 0 -or -not $dumpbin) { throw 'dumpbin is required to verify static CRT linkage' }
-    foreach ($exe in 'notetaker-app.exe', 'notetaker.exe', 'notetaker-asr.exe') {
+    foreach ($exe in 'notetaker-app.exe', 'notetaker.exe', 'notetaker-asr.exe', 'notetaker-embed.exe') {
         $dependencies = & $dumpbin /nologo /dependents (Join-Path $BinaryDir $exe) 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0) { throw "dumpbin failed for $exe" }
         if ($dependencies -match '(?im)^\s*(?:vcruntime[^\s]*|msvcp[^\s]*|ucrtbase|api-ms-win-crt-[^\s]*)\.dll\s*$') {
@@ -35,7 +35,7 @@ try {
         if ($dependencies -match '(?im)^\s*(?:onnxruntime[^\s]*|DirectML|sherpa-onnx[^\s]*)\.dll\s*$') {
             throw "$exe imports an optional ML runtime in the CPU package: $($Matches[0].Trim())"
         }
-        Copy-Item (Join-Path $BinaryDir $exe) $stage.FullName
+        if ($exe -ne 'notetaker-embed.exe') { Copy-Item (Join-Path $BinaryDir $exe) $stage.FullName }
     }
     # Optional GPU runtimes must never leak into the portable CPU payload.
     $dlls = @(Get-ChildItem $BinaryDir -Filter '*.dll' -File)
@@ -54,6 +54,15 @@ try {
         }
     } finally { Pop-Location }
 
+    # Optional static worker stays out of the main ZIP/installer. Settings fetch it
+    # explicitly, using the exact app version and the SHA-256 release sidecar.
+    $embed = Join-Path $output.FullName "notetaker-embed-$Version-windows-x64.exe"
+    Copy-Item (Join-Path $BinaryDir 'notetaker-embed.exe') $embed -Force
+    & $embed --help
+    if ($LASTEXITCODE -ne 0) { throw 'Optional embedding worker failed to start' }
+    $embedChecksum = "$embed.sha256"
+    $embedHash = (Get-FileHash $embed -Algorithm SHA256).Hash.ToLowerInvariant()
+    "$embedHash  $(Split-Path $embed -Leaf)" | Set-Content -Encoding ascii $embedChecksum
     $zip = Join-Path $output.FullName "notetaker-$Version-windows-x64.zip"
     Compress-Archive -Path (Join-Path $stage.FullName '*') -DestinationPath $zip -Force
     $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -63,6 +72,8 @@ try {
         "payload=$($stage.FullName)" >> $env:GITHUB_OUTPUT
         "zip=$zip" >> $env:GITHUB_OUTPUT
         "checksum=$checksum" >> $env:GITHUB_OUTPUT
+        "embed=$embed" >> $env:GITHUB_OUTPUT
+        "embed_checksum=$embedChecksum" >> $env:GITHUB_OUTPUT
     }
     Write-Host "Packaged $zip"
 } finally { Pop-Location }

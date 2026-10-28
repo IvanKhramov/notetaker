@@ -33,7 +33,7 @@ jobs:
         shell: bash
         run: ./scripts/fetch-sherpa-libs.sh
       - name: Build Windows applications
-        run: cargo build --locked --release -p notetaker-cli -p notetaker-asr-worker -p notetaker-app
+        run: cargo build --locked --release -p notetaker-cli -p notetaker-asr-worker -p notetaker-embed-worker -p notetaker-app
       - name: Verify portable ASR providers
         shell: pwsh
         run: ./scripts/check-asr-providers.ps1
@@ -59,8 +59,10 @@ jobs:
           RELEASE_CHECKSUM: ${{ steps.package.outputs.checksum }}
           RELEASE_SETUP: ${{ steps.installer.outputs.setup }}
           SETUP_CHECKSUM: ${{ steps.installer.outputs.setup_checksum }}
+          EMBED_EXE: ${{ steps.package.outputs.embed }}
+          EMBED_CHECKSUM: ${{ steps.package.outputs.embed_checksum }}
         run: |
-          gh release create $env:RELEASE_TAG $env:RELEASE_SETUP $env:SETUP_CHECKSUM $env:RELEASE_ZIP $env:RELEASE_CHECKSUM --verify-tag --draft --generate-notes --title "notetaker $env:RELEASE_TAG"
+          gh release create $env:RELEASE_TAG $env:RELEASE_SETUP $env:SETUP_CHECKSUM $env:RELEASE_ZIP $env:RELEASE_CHECKSUM $env:EMBED_EXE $env:EMBED_CHECKSUM --verify-tag --draft --generate-notes --title "notetaker $env:RELEASE_TAG"
           if ($LASTEXITCODE -ne 0) { throw 'GitHub Release creation failed' }
 
   winget:

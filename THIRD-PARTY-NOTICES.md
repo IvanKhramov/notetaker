@@ -304,3 +304,13 @@ Regenerate with:
 
 The license is that of emoji-icon-font.ttf: see emoji-icon-font-mit-license.txt.
 ```
+
+## Optional semantic search model
+
+`multilingual-e5-small` by intfloat / Liang Wang et al., MIT:
+https://huggingface.co/intfloat/multilingual-e5-small
+Optional ONNX int8 conversion by Xenova:
+https://huggingface.co/Xenova/multilingual-e5-small
+The model and tokenizer are downloaded separately; they are not installer assets.
+The worker uses ort / ort-sys (MIT OR Apache-2.0), tokenizers (Apache-2.0),
+and the existing static ONNX Runtime CPU SDK (MIT).

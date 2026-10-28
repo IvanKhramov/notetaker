@@ -1,0 +1,211 @@
+# Поиск по смыслу (0.12.0)
+
+Запрос «где обсуждали бюджет» находит «говорили про деньги на Q1», даже если
+слова «бюджет» во встрече нет. Обычный поиск по словам остаётся доступен без
+моделей и сети.
+
+## Подготовка
+
+В настройках или «Быстром старте» откройте необязательный шаг **Поиск по смыслу**
+и скачайте модель. Это явная сетевая операция: 135,4 МБ весов и tokenizer,
+плюс необязательный worker. Оба скачиваются отдельно от установщика.
+После загрузки приложение строит индекс в фоне и показывает число обработанных
+встреч. **По смыслу** становится доступно после индексации и включено по
+умолчанию. Снимите флажок для поиска по словам. «Обновить» учитывает внешние
+изменения файлов. Настройки также предлагают отдельное обновление индекса.
+
+Локально используются `notetaker-embed`, статический ORT и multilingual-e5-small
+int8. ASR продолжает работать в своём процессе. Веса и tokenizer.json находятся
+в общем каталоге моделей, в подкаталоге `multilingual-e5-small`.
+`NOTETAKER_MODELS_DIR` меняет общий каталог, `NOTETAKER_EMBED_BIN` задаёт полный
+путь воркера. Windows Settings скачивает exe точно для текущей версии приложения,
+проверяет SHA-256 sidecar и атомарно устанавливает его в
+`<models>/.workers/<version>/notetaker-embed.exe`. В Linux/macOS воркер собирается
+отдельно. Можно также положить его рядом с приложением. Веса и worker не входят
+в основной ZIP/установщик.
+
+```sh
+notetaker-embed download
+notetaker-embed check-model
+notetaker reindex --semantic
+notetaker search 'где обсуждали бюджет'
+notetaker search 'деньги Q1' --mode keyword
+notetaker search 'расходы команды' --mode semantic --library /path/to/library
+```
+
+Режимы: `keyword`, `semantic`, `hybrid` (по умолчанию). Hybrid объединяет BM25
+и cosine через reciprocal rank fusion, `k=60`, с одинаковым весом двух списков.
+Одна встреча появляется один раз. Возвращаются до трёх лучших фрагментов,
+основная ссылка ведёт к лучшему из них. Нажатие открывает строку заметок,
+конспекта или реплику транскрипта. Если индекс ещё не готов или воркер недоступен,
+остаётся поиск по словам с пояснением.
+
+Чат по всем встречам использует тот же hybrid-поиск и найденные фрагменты.
+Ссылки источников сохраняют их позиции. Чат по одной встрече по-прежнему
+использует полный контекст. Бриф календаря дополняет источники локальным поиском
+по теме. Люди, серии и дайджест выбирают встречи по идентичности, серии и датам;
+эти фильтры не заменяются похожестью текста.
+
+## Приватность и удалённая альтернатива
+
+Local-встречи обрабатываются только локальным воркером. Он не создаёт HTTP-клиент
+при inference. Локальная модель всегда имеет приоритет. Удалённый вариант нужно
+явно настроить в настройках, выбрав существующий OpenAI-совместимый провайдер
+и отдельную модель embeddings. То же в LLM `config.toml`:
+
+```toml
+[embeddings]
+provider = "flant"
+model = "text-embedding-3-small"
+```
+
+Провайдер должен уже существовать в `[[providers]]`; адрес, имя переменной
+ключа и Credential Manager используются как для LLM. POST идёт в
+`<base_url>/embeddings`, обычно `/v1/embeddings`. Redirect запрещён, размер
+ответа и таймаут ограничены. Это не модель для чата. Пустой provider выключает
+удалённые embeddings.
+
+Без установленной локальной модели удалённая индексация отправляет только
+Hybrid-фрагменты. Local исключаются из векторного индекса, но остаются в FTS,
+в том числе в режиме semantic; UI сообщает об этом. Текущий `meta.yaml`
+проверяется перед каждым удалённым вызовом и при выдаче результата. После смены
+Hybrid на Local старые удалённые векторы сразу перестают участвовать в поиске
+и удаляются при следующей индексации. Запрос чата с Local-историей, как и тема
+приватного календарного брифа, не отправляется удалённому embedder.
+
+MCP `search_meetings(query, limit=10, mode="hybrid")` принимает те же три режима,
+возвращает `anchor` и `chunks`. Общая настройка MCP скрывает Local по умолчанию
+до ограничения числа результатов. Смена режима поиска не отменяет этот фильтр.
+MCP обновляет FTS; семантический индекс готовится приложением или CLI.
+
+## Индекс и ограничения
+
+Файлы встреч остаются источником правды, формат версии 1 не меняется.
+SQLite `.notetaker/index.sqlite` имеет схему 4; старый индекс пересоздаётся.
+Отдельной векторной БД и расширений SQLite нет. Не синхронизируйте `.notetaker`:
+индекс содержит копии текста и локальные векторы.
+
+Заметки, конспект и транскрипт разбиваются отдельно, примерно по 400 токенов
+(оценка: до 1200 Unicode-символов), с перекрытием 180 символов. Длинные строки
+и реплики тоже разбиваются. Якорь содержит номер строки или UUID и время
+реплики. E5 добавляет `query:`/`passage:`, использует mean pooling и L2
+нормализацию, максимум 512 реальных токенов. Для необычного текста оценка длины
+может отличаться от tokenizer; текст запроса/чанка ограничивается моделью.
+
+Векторы - little-endian f32 BLOB, 384 измерения для E5. Поиск последовательно
+считает cosine, без приближённого индекса. В памяти остаются три кандидата на
+встречу. Модель, URL удалённого провайдера и pooling/version входят в идентификатор
+пространства: векторы разных моделей не смешиваются.
+
+mtime и длина `meta.yaml`, `notes.md`, `enhanced.md`, `transcript.json` определяют
+изменённые встречи. Текст, изменённый во время inference, не коммитится со старым
+stamp. Удалённые встречи очищаются. Inference не держит SQLite write lock;
+запись транзакционная на одну встречу. Пустые встречи тоже получают stamp.
+Воркеры имеют пониженный приоритет (nice 10 / BELOW_NORMAL_PRIORITY_CLASS),
+работа идёт отдельно от UI. `reindex --semantic` принудительно пересчитывает
+выбранное пространство, обычный `reindex` пересобирает FTS.
+
+Это поиск похожего содержания, не проверка фактов. Короткие запросы могут
+возвращать слабо связанные встречи. Перед передачей найденных данных LLM
+продолжают действовать правила Local для источников и истории.
+
+## Выбор backend и измерения
+
+Проверены публичные API [sherpa-onnx 2.0.0](https://github.com/k2-fsa/sherpa-onnx/blob/v2.0.0/sherpa-onnx/c-api/c-api.h):
+есть speaker embedding для аудио, но нет text embedding или generic ONNX session.
+Нельзя использовать его как sentence encoder без добавления собственной FFI
+к внутреннему ORT. Это усложнило бы обновления и связало ASR с поиском.
+
+Выбран `ort 2.0.0-rc.10` (API 1.22) с CPU ORT 1.28.2 из уже используемого
+sherpa-onnx 2.0.0 static SDK. `ort-sys` закреплён той же rc.10 версией, default
+features и download-binaries выключены. Build script воркера линкует только
+монолитный `onnxruntime`, без sherpa Rust dependency и без нового SDK download.
+ORT сохраняет совместимость старого C API с новым runtime. Процесс отдельный,
+в app/CLI нет ort/tokenizers. Windows использует существующий static-MT SDK;
+никакая ORT DLL в основной пакет не добавляется.
+
+[tract-onnx 0.22.1](https://github.com/sonos/tract/tree/v0.22.1) проверен реальным
+ONNX int8 проходом: работает, но на этой VM слишком медленный. Release worker
+32 354 744 байта, peak RSS 565 МиБ, загрузка 5,249 с, короткая фраза
+932-1295 мс, чанк 245 токенов 14 451-14 840 мс. Это значительно дороже ORT по CPU,
+хотя его Rust-only runtime проще поставить. Финальный dependency graph tract
+не содержит.
+
+`tokenizers 0.22.2` собран без default features, HTTP/HF Hub/Oniguruma; включён
+только fancy-regex. Самодельный SentencePiece/Unigram не выбран: Unicode
+normalization и точная сегментация должны совпадать с обучением. Tokenizer
+находится только в воркере, в app/CLI добавляется stdio-клиент без ML-зависимостей.
+
+[E5-small](https://huggingface.co/intfloat/multilingual-e5-small) обучен для
+multilingual retrieval; [MiniLM-L12-v2](https://huggingface.co/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2)
+ориентирован на similarity/paraphrase. В проверенных
+[Xenova E5](https://huggingface.co/Xenova/multilingual-e5-small/tree/761b726dd34fb83930e26aab4e9ac3899aa1fa78)
+и [Xenova MiniLM](https://huggingface.co/Xenova/paraphrase-multilingual-MiniLM-L12-v2/tree/2c4055b12046f11709e9df2c122e59ffbdc2f900)
+экспортах int8 обе модели занимают около 118 МБ, tokenizer около 17 МБ,
+размерность 384. Замена на MiniLM не даёт выигрыша в размере весов. Для E5
+закреплены revision, SHA-256 обоих файлов и точные размеры. Лицензия E5 - MIT.
+
+ORT - рабочая альтернатива отдельного воркера, с дополнительным нативным runtime
+и проверкой его CRT/поставки. Эталонный замер ORT 1.22.0 через Python, один поток,
+тот же E5 int8 и tokenizer, Linux x64, 4 vCPU QEMU, общая VM, 2026-10-28:
+загрузка 3,009 с, запрос 14,74 мс, 245 токенов 147-225 мс, peak RSS 553 МиБ
+(включает Python). `libonnxruntime.so` 21 050 608 байт, Python binding ещё
+21 923 312 байт; binding не нужен Rust-воркеру. Это измерение native runtime,
+не размер готового Rust ORT-пакета и не оценка Windows DLL.
+
+Cosine русской пары «обсуждали бюджет на следующий квартал» / «говорили про
+деньги на Q1»: ORT 0,859523; с «кот спит на окне, на улице солнечная погода»
+0,757340. Это smoke-тест одной пары, не полная оценка русского retrieval.
+
+Финальный Rust static-ORT worker на той же VM: 39 559 984 байта (37,73 МиБ),
+peak RSS 516 МиБ, загрузка 3,404 с, короткие фразы 20,72-22,64 мс, 245 токенов
+203,48-555,79 мс. Один inference-поток, inter-op parallelism и spinning выключены.
+На общей VM результаты зависят от соседних сборок; это не SLA.
+Основной установщик получает **0 байт ML runtime/весов**: worker публикуется
+отдельным versioned exe и SHA-256, загружается явной кнопкой. Добавляются только
+Rust-код индекса/клиента/UI и общие уже существующие HTTP/SQLite зависимости.
+Windows размер exe может отличаться от Linux и остаётся предметом CI artifact.
+
+Brute-force 100 000 векторов по 384 f32: 42,95 / 46,12 / 46,72 мс,
+146,48 МиБ сырых векторов. Полный SQLite scan с проверкой источника и выбором
+трёх фрагментов: 1151,68 / 1584,23 / 1521,69 мс, БД 201,93 МиБ
+(в fixture одна встреча и 100 000 чанков). В реальной библиотеке добавляются
+чтение metadata разных встреч, FTS и query embedding; приведён scan, не UI latency.
+
+Реальные ignored-тесты Rust прошли: русская пара query/passage даёт
+0,860167, несвязанная фраза 0,757319. Полный путь «Local файлы -> worker ->
+SQLite -> hybrid» нашёл встречу без слова «бюджет»; индексация двух источников
+2,739 с, первый поиск с загрузкой worker 2,034 с, повторный поиск 12,49 мс.
+
+Воспроизведение Rust-проверок после `notetaker-embed download`:
+
+```sh
+export NOTETAKER_MODELS_DIR=/path/to/notetaker-models
+export NOTETAKER_EMBED_BIN="$PWD/target/release/notetaker-embed"
+# SHERPA_ONNX_LIB_DIR указывает на lib существующего sherpa static SDK.
+cargo build --release -p notetaker-embed-worker -j 2
+/usr/bin/time -v "$NOTETAKER_EMBED_BIN" bench
+cargo test --release -p notetaker-embed-worker real_russian_embeddings -- --ignored --nocapture
+cargo test --release -p notetaker-llm real_local_semantic_retrieval -- --ignored --nocapture
+cargo test --release -p notetaker-core benchmark -- --ignored --nocapture
+```
+
+Обычные unit-тесты используют fake embedder и локальный HTTP mock, без весов
+и внешних API. Проверяются RRF, дедупликация, Unicode/длинные чанки и якоря,
+исключение Local, смена privacy, удаление, инкрементальная и полная переиндексация.
+У ignored-тестов нет порога времени.
+
+Windows: CI/release собирают четвёртый exe, проверяют отсутствие dynamic CRT/ML
+DLL imports и запуск `--help`. Worker публикуется отдельным artifact/release asset
+с SHA-256. Inno Setup сохраняет необязательную запись только для custom payload;
+основной staging worker не содержит. Флаги MT остаются в `.cargo/config.toml`;
+модели не добавлены в Inno Setup. Для реального Windows
+ПК нужна проверка inference и нагрузки рядом с записью, а не только Linux bench.
+
+Локальная проверка 2026-10-28: fmt, Clippy workspace/all-targets с `-D warnings`,
+292 теста passed / 12 ignored; отдельно выполнены оба embedding ignored-теста
+и два измерения 100k. Windows-target `cargo check` app/CLI/embed-worker прошёл
+на Linux с `LIBSQLITE3_SYS_USE_PKG_CONFIG=1 PKG_CONFIG_ALLOW_CROSS=1` и существующим
+SDK для metadata check. Это не MSVC linking и не проверка Windows runtime:
+dumpbin, PowerShell/Inno и inference на Windows остаются проверками CI/ПК.
+Удалённый `/embeddings` проверен HTTP mock; живой провайдер не вызывался.

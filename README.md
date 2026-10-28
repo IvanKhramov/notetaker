@@ -49,6 +49,16 @@ Windows: Ctrl+Alt+M - обзор, Ctrl+Alt+B - закладка, Ctrl+Alt+R - з
 конспект получает отмеченные моменты и контекст по 30 секунд с каждой стороны.
 Markdown, JSON, CSV и VTT сохраняют закладки; SRT содержит только реплики.
 
+## Поиск по смыслу (0.12.0)
+
+Необязательный шаг «Поиск по смыслу» в настройках и быстром старте скачивает
+локальную E5 int8 модель (135 МБ) и отдельный необязательный worker.
+Они не входят в основной установщик. Поиск объединяет BM25 и semantic similarity;
+фрагменты ведут к строкам заметок и времени реплик. Local остаётся локальным,
+удалённые embeddings доступны только для Hybrid. CLI: `search --mode hybrid`,
+`reindex --semantic`; MCP: `search_meetings(..., mode="hybrid")`.
+Backend, приватность и измерения: [поиск](docs/search.md).
+
 ## Install
 
 Download `notetaker-0.11.0-windows-x64.zip` from this repository's **Releases**
@@ -93,6 +103,8 @@ sudo apt-get install pkg-config libxcb-render0-dev libxcb-shape0-dev libxcb-xfix
 ```
 
 ```sh
+# Fetch the existing static SDK; export the printed SHERPA_ONNX_LIB_DIR value.
+./scripts/fetch-sherpa-libs.sh
 cargo build --workspace -j 2
 cargo run -p notetaker-app
 cargo run -p notetaker-cli -- --help
