@@ -5,6 +5,8 @@
 
 mod file;
 mod level;
+#[cfg(target_os = "macos")]
+mod macos;
 mod normalize;
 mod policy;
 mod source;
@@ -14,6 +16,8 @@ mod windows;
 
 pub use file::{FileSource, PlaybackPace};
 pub use level::{LevelMeter, Levels, SILENCE_DBFS};
+#[cfg(target_os = "macos")]
+pub use macos::{LiveSource, inventory, live_sources, microphone_processes};
 pub use normalize::Normalizer;
 pub use policy::{FallbackPolicy, FallbackReason};
 pub use source::{AudioSource, SourceTask};
@@ -123,10 +127,10 @@ pub struct Inventory {
     pub warnings: Vec<String>,
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub struct LiveSource;
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 impl AudioSource for LiveSource {
     fn start(&mut self, _: std::sync::mpsc::SyncSender<CaptureMessage>) -> anyhow::Result<()> {
         anyhow::bail!("live capture not supported on this OS yet")
@@ -137,12 +141,12 @@ impl AudioSource for LiveSource {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn live_sources(_: LiveOptions) -> anyhow::Result<[LiveSource; 2]> {
     anyhow::bail!("live capture not supported on this OS yet")
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn inventory() -> anyhow::Result<Inventory> {
     anyhow::bail!("live capture not supported on this OS yet")
 }

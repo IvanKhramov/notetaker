@@ -1,5 +1,9 @@
 //! Polling call hints only: callers decide whether to offer or stop recording.
 //! `now` is elapsed monotonic time from a shared origin, never a FILETIME.
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+pub use macos::MacosSnapshot;
 mod registry;
 mod title;
 #[cfg(windows)]
@@ -26,6 +30,28 @@ pub struct AppRule {
 
 /// Exact executable names, case insensitive. Settings may append or override rules.
 pub const KNOWN_APPS: &[(&str, &str, bool)] = &[
+    #[cfg(target_os = "macos")]
+    ("zoom.us", "Zoom", false),
+    #[cfg(target_os = "macos")]
+    ("Microsoft Teams", "Teams", false),
+    #[cfg(target_os = "macos")]
+    ("MSTeams", "Teams", false),
+    #[cfg(target_os = "macos")]
+    ("Slack", "Slack", false),
+    #[cfg(target_os = "macos")]
+    ("Telegram", "Telegram", false),
+    #[cfg(target_os = "macos")]
+    ("Discord", "Discord", false),
+    #[cfg(target_os = "macos")]
+    ("Safari", "Safari", true),
+    #[cfg(target_os = "macos")]
+    ("Google Chrome", "Chrome", true),
+    #[cfg(target_os = "macos")]
+    ("Microsoft Edge", "Edge", true),
+    #[cfg(target_os = "macos")]
+    ("firefox", "Firefox", true),
+    #[cfg(target_os = "macos")]
+    ("Yandex", "Yandex Browser", true),
     // Best-effort desktop names; confirm in Task Manager > Details.
     ("Telemost.exe", "Телемост", false),
     ("YandexTelemost.exe", "Телемост", false),
@@ -134,6 +160,12 @@ pub struct DetectedCall {
 /// Never offer our own capture or common Windows recording/system processes.
 fn denied_exe(exe: &str) -> bool {
     [
+        #[cfg(target_os = "macos")]
+        "notetaker",
+        #[cfg(target_os = "macos")]
+        "notetaker-app",
+        #[cfg(target_os = "macos")]
+        "notetaker-asr",
         "notetaker.exe",
         "notetaker-app.exe",
         "notetaker-asr-worker.exe",

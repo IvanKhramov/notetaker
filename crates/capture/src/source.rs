@@ -103,7 +103,7 @@ pub(crate) fn send(
 
 /// Retry each interruption on the default device, but stop if that attempt
 /// cannot reach a healthy drain. A later device change gets its own retry.
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "macos", test))]
 pub(crate) fn recover_default(
     mut run: impl FnMut(bool, &mut bool) -> Result<()>,
     mut interrupted: impl FnMut(&anyhow::Error),
