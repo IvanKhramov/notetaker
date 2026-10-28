@@ -92,6 +92,27 @@ impl CredentialStore for OsCredentialStore {
     }
 }
 
+#[cfg(target_os = "macos")]
+impl CredentialStore for OsCredentialStore {
+    fn read(&self, id: &str) -> Result<String> {
+        let bytes = security_framework::passwords::get_generic_password("notetaker/llm", id)
+            .map_err(|_| anyhow::anyhow!("Ключ не найден или доступ к Keychain запрещён"))?;
+        String::from_utf8(bytes).context("Некорректный ключ в Keychain")
+    }
+    fn write(&self, id: &str, key: &str) -> Result<()> {
+        anyhow::ensure!(
+            !key.trim().is_empty() && key.len() <= 2560,
+            "Пустой или слишком длинный ключ"
+        );
+        security_framework::passwords::set_generic_password("notetaker/llm", id, key.as_bytes())
+            .map_err(|_| anyhow::anyhow!("Не удалось сохранить ключ в Keychain"))
+    }
+    fn delete(&self, id: &str) -> Result<()> {
+        security_framework::passwords::delete_generic_password("notetaker/llm", id)
+            .map_err(|_| anyhow::anyhow!("Не удалось удалить ключ из Keychain"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,26 +139,5 @@ mod tests {
                 .as_deref(),
             Some("test-secret")
         );
-    }
-}
-
-#[cfg(target_os = "macos")]
-impl CredentialStore for OsCredentialStore {
-    fn read(&self, id: &str) -> Result<String> {
-        let bytes = security_framework::passwords::get_generic_password("notetaker/llm", id)
-            .map_err(|_| anyhow::anyhow!("Ключ не найден или доступ к Keychain запрещён"))?;
-        String::from_utf8(bytes).context("Некорректный ключ в Keychain")
-    }
-    fn write(&self, id: &str, key: &str) -> Result<()> {
-        anyhow::ensure!(
-            !key.trim().is_empty() && key.len() <= 2560,
-            "Пустой или слишком длинный ключ"
-        );
-        security_framework::passwords::set_generic_password("notetaker/llm", id, key.as_bytes())
-            .map_err(|_| anyhow::anyhow!("Не удалось сохранить ключ в Keychain"))
-    }
-    fn delete(&self, id: &str) -> Result<()> {
-        security_framework::passwords::delete_generic_password("notetaker/llm", id)
-            .map_err(|_| anyhow::anyhow!("Не удалось удалить ключ из Keychain"))
     }
 }
