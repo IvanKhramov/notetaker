@@ -30,7 +30,7 @@ app="$staging/notetaker.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 for binary in notetaker-app notetaker-asr notetaker-embed notetaker; do
   test -x "$binaries/$binary"
-  lipo -verify_arch arm64 "$binaries/$binary"
+  lipo "$binaries/$binary" -verify_arch arm64
   cp "$binaries/$binary" "$app/Contents/MacOS/$binary"
   # Static sherpa/ORT must not leave machine-specific dylib dependencies behind.
   if otool -L "$app/Contents/MacOS/$binary" | tail -n +2 | awk '{print $1}' | grep -Ev '^(/System/Library/|/usr/lib/)' > "$staging/dependencies"; then
