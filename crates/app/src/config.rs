@@ -202,6 +202,8 @@ pub struct LlmSettings {
     pub providers: Vec<ProviderSettings>,
     #[serde(default)]
     pub scenarios: notetaker_llm::Scenarios,
+    #[serde(default)]
+    pub embeddings: notetaker_llm::ModelChoice,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -242,6 +244,7 @@ impl ProviderSettings {
             },
             providers: vec![self.clone()],
             scenarios: Default::default(),
+            embeddings: Default::default(),
         };
         Ok(notetaker_llm::Config::parse(&toml::to_string(&settings)?)?
             .providers
@@ -272,6 +275,7 @@ impl Default for LlmSettings {
             },
             providers: vec![ProviderSettings::default()],
             scenarios: Default::default(),
+            embeddings: Default::default(),
         }
     }
 }

@@ -17,7 +17,7 @@ pub struct Panel {
 }
 pub enum Action {
     Ask,
-    Open(Meeting),
+    Open(Meeting, Option<notetaker_core::Anchor>),
 }
 impl Panel {
     pub fn open(&mut self, scope: Option<Meeting>, title: String) {
@@ -62,7 +62,10 @@ impl Panel {
                                         ))
                                         .clicked()
                                     {
-                                        action = Some(Action::Open(citation.meeting.clone()));
+                                        action = Some(Action::Open(
+                                            citation.meeting.clone(),
+                                            citation.anchor.clone(),
+                                        ));
                                     }
                                 }
                             });

@@ -7,6 +7,7 @@ mod cmd_mcp;
 mod cmd_people;
 mod cmd_probe;
 mod cmd_record;
+mod cmd_search;
 mod cmd_self_update;
 mod cmd_tasks;
 mod cmd_transcribe;
@@ -23,6 +24,10 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Search meetings by meaning, keywords, or both.
+    Search(cmd_search::SearchArgs),
+    /// Rebuild the disposable search index.
+    Reindex(cmd_search::ReindexArgs),
     /// List people in the library.
     People(cmd_people::PeopleArgs),
     /// Show meetings and tasks for a person.
@@ -53,6 +58,8 @@ enum Command {
 
 fn main() -> anyhow::Result<()> {
     match Args::parse().command {
+        Command::Search(args) => cmd_search::search(args),
+        Command::Reindex(args) => cmd_search::reindex(args),
         Command::People(args) => cmd_people::people(args),
         Command::Person(args) => cmd_people::person(args),
         Command::Digest(args) => cmd_people::digest(args),

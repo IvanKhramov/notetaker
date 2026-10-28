@@ -18,6 +18,7 @@ pub struct Citation {
     pub meeting: Meeting,
     pub title: String,
     pub date: String,
+    pub anchor: Option<notetaker_core::Anchor>,
 }
 pub struct ChatResult {
     pub turn: ChatTurn,
@@ -37,11 +38,23 @@ pub fn ask(
 ) -> Result<ChatResult> {
     ensure!(!question.trim().is_empty(), "Введите вопрос");
     ensure!(!cancel.is_cancelled(), "Запрос отменён");
+    let mut retrieved = Vec::new();
     let meetings = if let Some(meeting) = scope {
         vec![meeting.clone()]
     } else {
         library.reindex_incremental()?;
-        let hits = library.retrieve(question, 6, false)?;
+        let allow_remote = !history.iter().any(|turn| turn.mode == Mode::Local);
+        retrieved = crate::search::search(
+            library,
+            question,
+            6,
+            notetaker_core::SearchMode::Hybrid,
+            false,
+            Some(config),
+            allow_remote,
+        )?
+        .hits;
+        let hits = &retrieved;
         let available = library.list_meetings()?;
         hits.iter()
             .filter_map(|hit| available.iter().find(|m| m.path() == hit.path).cloned())
@@ -85,12 +98,21 @@ pub fn ask(
         );
         let mut transcript = meeting.read_transcript()?;
         transcript.default_self_name(&user_name);
-        let text = format!(
-            "Участники: {participants}\nЗаметки:\n{}\nКонспект:\n{}\nТранскрипт:\n{}",
-            notes_without_images(&meeting.read_notes()?),
-            notes_without_images(&meeting.read_enhanced()?),
-            transcript.named_text()
-        );
+        let hit = retrieved.iter().find(|hit| hit.path == meeting.path());
+        let text = if let Some(hit) = hit.filter(|h| !h.chunks.is_empty()) {
+            hit.chunks
+                .iter()
+                .map(|chunk| format!("{:?}: {}", chunk.anchor, notes_without_images(&chunk.text)))
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            format!(
+                "Участники: {participants}\nЗаметки:\n{}\nКонспект:\n{}\nТранскрипт:\n{}",
+                notes_without_images(&meeting.read_notes()?),
+                notes_without_images(&meeting.read_enhanced()?),
+                transcript.named_text()
+            )
+        };
         for line in text.lines() {
             evidence.push_str(&format!("{prefix} {line}\n"));
         }
@@ -99,6 +121,7 @@ pub fn ask(
             meeting: meeting.clone(),
             title: meta.title,
             date,
+            anchor: hit.and_then(|h| h.anchor.clone()),
         });
     }
     let selected = config.select_scenario(mode, Scenario::Chat, None)

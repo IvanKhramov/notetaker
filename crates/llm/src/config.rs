@@ -17,6 +17,9 @@ pub struct Config {
     pub providers: Vec<ProviderConfig>,
     #[serde(default)]
     pub scenarios: Scenarios,
+    /// Opt-in remote embeddings for Hybrid sources only. Empty disables HTTP.
+    #[serde(default)]
+    pub embeddings: ModelChoice,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -130,11 +133,28 @@ impl Config {
                 "selected LLM provider is not configured"
             );
         }
-        for choice in [&config.scenarios.summary, &config.scenarios.chat] {
+        for choice in [
+            &config.scenarios.summary,
+            &config.scenarios.chat,
+            &config.embeddings,
+        ] {
             ensure!(
                 choice.provider.is_empty()
                     || config.providers.iter().any(|p| p.id == choice.provider),
                 "Провайдер сценария не настроен"
+            );
+        }
+        if !config.embeddings.provider.is_empty() {
+            ensure!(
+                !config.embeddings.model.trim().is_empty(),
+                "Укажите модель embeddings"
+            );
+            ensure!(
+                config
+                    .select(Mode::Hybrid, Some(&config.embeddings.provider))?
+                    .kind
+                    == ProviderKind::Openai,
+                "Embeddings требуют OpenAI-совместимый API"
             );
         }
         Ok(config)

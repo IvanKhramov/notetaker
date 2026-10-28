@@ -129,6 +129,28 @@ impl NotetakerApp {
         if search.changed() {
             self.state.query_changed = Some(Instant::now());
         }
+        if ui
+            .add_enabled(
+                self.state.semantic_ready,
+                egui::Checkbox::new(&mut self.state.semantic_enabled, "По смыслу"),
+            )
+            .changed()
+        {
+            self.state.query_changed = Some(Instant::now());
+        }
+        if self.state.semantic_running {
+            if let Some(progress) = &self.state.semantic_progress {
+                ui.small(format!(
+                    "Индекс по смыслу: {}/{}",
+                    progress.completed, progress.total
+                ));
+            } else {
+                ui.small("Подготовка поиска по смыслу…");
+            }
+        }
+        if let Some(note) = &self.state.semantic_note {
+            ui.small(note);
+        }
         egui::Panel::bottom("library_actions")
             .frame(egui::Frame::new().inner_margin(4))
             .show(ui, |ui| {
@@ -264,6 +286,14 @@ impl NotetakerApp {
                                 egui::Label::new(RichText::new(&row.meta.title).strong())
                                     .truncate(),
                             );
+                            if !row.snippet.is_empty() {
+                                ui.add(
+                                    egui::Label::new(
+                                        row.snippet.chars().take(180).collect::<String>(),
+                                    )
+                                    .truncate(),
+                                );
+                            }
                             ui.horizontal(|ui| {
                                 if recording {
                                     theme::recording_dot(ui);
@@ -294,7 +324,7 @@ impl NotetakerApp {
                         .on_hover_text(&row.snippet)
                         .clicked()
                     {
-                        select = Some(row.meeting.clone());
+                        select = Some((row.meeting.clone(), row.anchor.clone()));
                     }
                 }
                 if self.state.rows.is_empty() && !self.state.listing {
@@ -304,9 +334,9 @@ impl NotetakerApp {
                     ui.spinner();
                 }
             });
-        if let Some(meeting) = select {
+        if let Some((meeting, anchor)) = select {
             self.people.close();
-            self.state.select(meeting);
+            self.state.select_anchor(meeting, anchor);
         }
     }
     fn draft_panels(&mut self, root: &mut egui::Ui) {
@@ -670,6 +700,50 @@ impl NotetakerApp {
         let locked =
             self.state.recording.busy() && self.state.recording.path.as_ref() == Some(&path);
         let live = locked && self.state.recording.phase == Phase::Recording;
+        if self
+            .state
+            .search_target
+            .as_ref()
+            .is_some_and(|(p, _)| p == &path)
+            && let Some(document) = self.state.documents.get_mut(&path)
+            && let Some((_, anchor)) = self.state.search_target.take()
+        {
+            match anchor {
+                notetaker_core::Anchor::Notes { line } => {
+                    self.notes_preview = false;
+                    document.inserted_cursor = Some(
+                        document
+                            .data
+                            .notes
+                            .split_inclusive('\n')
+                            .take(line.saturating_sub(1))
+                            .map(|s| s.chars().count())
+                            .sum(),
+                    );
+                }
+                notetaker_core::Anchor::Summary { line } => {
+                    self.enhanced_preview = false;
+                    self.state.task_target = Some((path.clone(), line));
+                }
+                notetaker_core::Anchor::Transcript { segment, start_ms } => {
+                    document.speaker_ui.scroll_to = document
+                        .data
+                        .transcript
+                        .segments
+                        .iter()
+                        .find(|s| s.id == segment)
+                        .or_else(|| {
+                            document
+                                .data
+                                .transcript
+                                .segments
+                                .iter()
+                                .min_by_key(|s| s.start_ms.abs_diff(start_ms))
+                        })
+                        .map(|s| s.id);
+                }
+            }
+        }
         let target_line = self
             .state
             .task_target
@@ -1356,6 +1430,17 @@ impl NotetakerApp {
                 if ui.add_enabled(!self.state.calendar_busy, egui::Button::new("Обновить календари")).clicked() { self.state.refresh_calendar(); }
                 ui.small(&self.state.calendar_status);
                 ui.checkbox(&mut self.state.settings_draft.mcp_exclude_local, "MCP: не отдавать Local-встречи");
+                ui.separator();
+                crate::quickstart::semantic_step(ui,&mut self.state);
+                ui.collapsing("Удалённый поиск по смыслу (только Hybrid)",|ui| {
+                    ui.small("Используется только без локальной модели. Local-встречи остаются в поиске по словам.");
+                    let llm=&mut self.state.llm_draft;
+                    egui::ComboBox::from_id_salt("embedding_provider").selected_text(if llm.embeddings.provider.is_empty() {"Выключено"} else {&llm.embeddings.provider}).show_ui(ui,|ui| {
+                        ui.selectable_value(&mut llm.embeddings.provider,String::new(),"Выключено");
+                        for provider in &llm.providers {if provider.kind=="openai" {ui.selectable_value(&mut llm.embeddings.provider,provider.id.clone(),&provider.id);}}
+                    });
+                    ui.add(egui::TextEdit::singleline(&mut llm.embeddings.model).hint_text("Модель embeddings"));
+                });
                 ui.separator(); ui.heading("Подключение AI");
                 let can_default = self.state.ready && !self.state.recording.busy() && self.state.enhancing.is_none() && !self.state.chat.busy && !self.state.unsaved() && !self.state.settings_pending;
                 let actions = self.state.connections.ui(ui, &self.state.llm_draft.defaults.hybrid, can_default);
@@ -1801,9 +1886,9 @@ impl eframe::App for NotetakerApp {
         if self.state.chat.open {
             match self.state.chat.show(&ctx, can_ask) {
                 Some(crate::chat::Action::Ask) => self.state.ask(),
-                Some(crate::chat::Action::Open(meeting)) => {
+                Some(crate::chat::Action::Open(meeting, anchor)) => {
                     self.people.close();
-                    self.state.select(meeting);
+                    self.state.select_anchor(meeting, anchor);
                 }
                 None => {}
             }
@@ -2026,7 +2111,8 @@ fn notes_editor(
                     })
                 });
             }
-            if let Some(cursor) = document.inserted_cursor.take() {
+            let scroll_cursor = document.inserted_cursor.take();
+            if let Some(cursor) = scroll_cursor {
                 let mut state = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
                 state
                     .cursor
@@ -2042,6 +2128,16 @@ fn notes_editor(
                 .desired_width(f32::INFINITY)
                 .desired_rows(24)
                 .show(ui);
+            if let Some(cursor) = scroll_cursor {
+                output.response.request_focus();
+                ui.scroll_to_rect(
+                    output
+                        .galley
+                        .pos_from_cursor(egui::text::CCursor::new(cursor))
+                        .translate(output.galley_pos.to_vec2()),
+                    Some(egui::Align::Center),
+                );
+            }
             if let Some(range) = output.cursor_range {
                 let [start, end] = range.sorted_cursors();
                 document.notes_cursor = Some(start.index.into()..end.index.into());

@@ -21,7 +21,34 @@ pub fn brief(
     config: Option<&Config>,
     cancel: Cancellation,
 ) -> Result<Brief> {
-    let sources = library.brief_sources(event, 6)?;
+    let mut sources = library.brief_sources(event, 6)?;
+    // Calendar title is private input: semantic expansion uses local inference only.
+    if let Ok(found) = crate::search::search(
+        library,
+        &event.link.title,
+        6,
+        notetaker_core::SearchMode::Hybrid,
+        false,
+        config,
+        false,
+    ) {
+        for hit in found.hits.into_iter().filter(|h| !h.chunks.is_empty()) {
+            if sources.len() >= 6 {
+                break;
+            }
+            if sources.iter().any(|m| m.path() == hit.path) {
+                continue;
+            }
+            if let Some(meeting) = library
+                .list_meetings()?
+                .into_iter()
+                .find(|m| m.path() == hit.path)
+                && meeting.read_meta()?.started_at < event.start
+            {
+                sources.push(meeting);
+            }
+        }
+    }
     let mut mode = Mode::Hybrid;
     let mut evidence = String::from("## Прошлые встречи\n");
     for meeting in &sources {

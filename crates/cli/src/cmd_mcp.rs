@@ -195,17 +195,25 @@ impl Server {
                 #[serde(deny_unknown_fields)]
                 struct Input {
                     query: String,
+                    #[serde(default)]
+                    mode: notetaker_core::SearchMode,
                     #[serde(default = "ten")]
                     limit: usize,
                 }
                 let input: Input = serde_json::from_value(args)?;
                 ensure!(input.query.len() <= 16_384, "Слишком длинный запрос");
                 self.library.reindex_incremental()?;
-                let hits = self.library.retrieve(
+                let config = notetaker_llm::Config::load().ok();
+                let hits = notetaker_llm::search::search(
+                    &self.library,
                     &input.query,
                     input.limit.min(100),
+                    input.mode,
                     self.exclude_local,
-                )?;
+                    config.as_ref(),
+                    true,
+                )?
+                .hits;
                 let available = self.library.list_meetings()?;
                 let mut result = Vec::new();
                 for hit in hits {
@@ -213,7 +221,7 @@ impl Server {
                         && self.allowed(meeting)?
                     {
                         result.push(
-                            json!({"id":hit.meeting_id,"title":hit.title,"snippet":hit.snippet}),
+                            json!({"id":hit.meeting_id,"title":hit.title,"snippet":hit.snippet,"anchor":hit.anchor,"chunks":hit.chunks}),
                         );
                     }
                 }
@@ -324,7 +332,7 @@ fn tools() -> Value {
         {"name":"get_series","description":"Серия по UUID или пути доступной встречи.","inputSchema":{"type":"object","properties":{"meeting":{"type":"string"}},"required":["meeting"],"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}},
         {"name":"get_digest","description":"Дайджест без LLM и записи на диск. Локальные даты start включительно, end исключительно; по умолчанию текущая ISO-неделя.","inputSchema":{"type":"object","properties":{"start":{"type":"string"},"end":{"type":"string"},"prev":{"type":"boolean"},"person":{"type":"string"},"series":{"type":"string"}},"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}},
         {"name":"list_tasks","description":"Задачи из конспектов. Соблюдает фильтр Local.","inputSchema":{"type":"object","properties":{"status":{"type":"string","enum":["all","open","completed","done"]},"owner":{"type":"string"}},"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}},
-        {"name":"search_meetings","description":"Поиск встреч по словам, BM25. Local-встречи скрыты по настройке.","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer","minimum":0,"maximum":100}},"required":["query"],"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}},
+        {"name":"search_meetings","description":"Поиск встреч: keyword, semantic или hybrid (по умолчанию). Local-встречи скрыты по настройке; удалённые embeddings только для Hybrid.","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"mode":{"type":"string","enum":["keyword","semantic","hybrid"],"default":"hybrid"},"limit":{"type":"integer","minimum":0,"maximum":100}},"required":["query"],"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":true}},
         {"name":"get_meeting","description":"Заметки, конспект и транскрипт с именами. Укажите id или path внутри библиотеки.","inputSchema":{"type":"object","properties":{"id":{"type":"string"},"path":{"type":"string"}},"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}},
         {"name":"get_speaker_timeline","description":"Таймлайн спикеров, суммарное время, доли, реплики и монологи. meeting: UUID или путь внутри библиотеки. Политика Local применяется.","inputSchema":{"type":"object","properties":{"meeting":{"type":"string"}},"required":["meeting"],"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}},
         {"name":"list_recent","description":"Последние доступные встречи.","inputSchema":{"type":"object","properties":{"n":{"type":"integer","minimum":0,"maximum":100}},"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}}
@@ -428,6 +436,39 @@ mod tests {
     use super::*;
     use notetaker_core::{Channel, MeetingMeta, Segment, Source, SpeakerId, Transcript};
     use std::io::Cursor;
+    #[test]
+    fn search_modes_default_hybrid_and_reject_unknown_modes() {
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open(root.path()).unwrap();
+        let mut meta = MeetingMeta::new("Бюджет", chrono::Utc::now());
+        meta.mode = Mode::Hybrid;
+        library
+            .create_meeting(meta)
+            .unwrap()
+            .write_notes("Расходы команды")
+            .unwrap();
+        let server = Server {
+            library,
+            exclude_local: true,
+        };
+        for mode in [None, Some("keyword"), Some("semantic"), Some("hybrid")] {
+            let mut args = json!({"query":"Расходы"});
+            if let Some(mode) = mode {
+                args["mode"] = json!(mode);
+            }
+            let hits = server.call("search_meetings", args).unwrap();
+            assert_eq!(hits.as_array().unwrap().len(), 1);
+            assert!(hits[0].get("anchor").is_some());
+        }
+        assert!(
+            server
+                .call(
+                    "search_meetings",
+                    json!({"query":"Расходы","mode":"unsafe"})
+                )
+                .is_err()
+        );
+    }
     #[test]
     fn people_series_and_digest_recheck_privacy_without_reusing_saved_digest() {
         use notetaker_core::calendar::{Attendee, EventLink};

@@ -11,6 +11,7 @@ mod credentials;
 mod drafts;
 pub mod live;
 mod people;
+pub mod search;
 pub use people::{PeopleBrief, person_brief, summarize_digest};
 mod enhance;
 pub use drafts::{Brief, FollowupKind, brief, followup, render_followup, strip_internal};

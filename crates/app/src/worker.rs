@@ -31,6 +31,7 @@ pub struct MeetingRow {
     pub meeting: Meeting,
     pub meta: MeetingMeta,
     pub snippet: String,
+    pub anchor: Option<notetaker_core::Anchor>,
 }
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Revisions {
@@ -159,6 +160,9 @@ pub struct RecordRequest {
 }
 
 pub enum Command {
+    SemanticIndex {
+        root: PathBuf,
+    },
     BookmarkLabel {
         meeting: Meeting,
         id: uuid::Uuid,
@@ -217,6 +221,7 @@ pub enum Command {
     List {
         root: PathBuf,
         query: String,
+        semantic: bool,
         request: u64,
     },
     Load(Meeting),
@@ -259,6 +264,18 @@ pub enum Command {
 // Rare worker-to-UI messages; boxing variants buys nothing measurable.
 #[allow(clippy::large_enum_variant)]
 pub enum Event {
+    SemanticProgress {
+        root: PathBuf,
+        progress: notetaker_core::SemanticProgress,
+    },
+    SemanticDone {
+        root: PathBuf,
+        result: Result<notetaker_core::SemanticProgress, String>,
+    },
+    SearchNote {
+        request: u64,
+        note: Option<String>,
+    },
     BookmarkSaved {
         path: PathBuf,
         result: Result<notetaker_core::Versioned<Transcript>, String>,
@@ -391,6 +408,28 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
         });
         for command in rx {
             match command {
+                Command::SemanticIndex { root } => {
+                    let events = events.clone();
+                    thread::spawn(move || {
+                        let result = (|| -> Result<_> {
+                            let library = Library::open(&root)?;
+                            let config = Config::load().ok();
+                            notetaker_llm::search::reindex(
+                                &library,
+                                false,
+                                config.as_ref(),
+                                &mut |progress| {
+                                    let _ = events.send(Event::SemanticProgress {
+                                        root: root.clone(),
+                                        progress,
+                                    });
+                                },
+                            )
+                        })()
+                        .map_err(error_text);
+                        let _ = events.send(Event::SemanticDone { root, result });
+                    });
+                }
                 Command::BookmarkLabel { meeting, id, label } => {
                     let path = meeting.path().to_owned();
                     let result = (|| -> Result<_> {
@@ -566,10 +605,16 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                 Command::List {
                     root,
                     query,
+                    semantic,
                     request,
                 } => {
                     let templates = templates(&root);
-                    let result = list(&root, &query).map_err(error_text);
+                    let result = list_mode(&root, &query, semantic)
+                        .map(|(rows, note)| {
+                            let _ = events.send(Event::SearchNote { request, note });
+                            rows
+                        })
+                        .map_err(error_text);
                     let _ = events.send(Event::Listed {
                         request,
                         result,
@@ -798,14 +843,38 @@ pub fn summary_can_overwrite(data: &DocumentData) -> bool {
 fn error_text(error: anyhow::Error) -> String {
     notetaker_core::display_text(&format!("{error:#}"))
 }
+#[cfg(test)]
 fn list(root: &Path, query: &str) -> Result<Vec<MeetingRow>> {
+    Ok(list_mode(root, query, false)?.0)
+}
+fn list_mode(
+    root: &Path,
+    query: &str,
+    semantic: bool,
+) -> Result<(Vec<MeetingRow>, Option<String>)> {
     let library = Library::open(root)?;
     let mut rows = Vec::new();
+    let mut note = None;
     let hits = if query.trim().is_empty() {
         None
     } else {
         library.reindex_incremental()?;
-        Some(library.search(query, 500)?)
+        let config = Config::load().ok();
+        let result = notetaker_llm::search::search(
+            &library,
+            query,
+            100,
+            if semantic {
+                notetaker_core::SearchMode::Hybrid
+            } else {
+                notetaker_core::SearchMode::Keyword
+            },
+            false,
+            config.as_ref(),
+            true,
+        )?;
+        note = result.note;
+        Some(result.hits)
     };
     for meeting in library.list_meetings()? {
         let meta = meeting.read_meta()?;
@@ -819,12 +888,24 @@ fn list(root: &Path, query: &str) -> Result<Vec<MeetingRow>> {
         };
         rows.push(MeetingRow {
             meeting,
-            meta,
             snippet,
+            anchor: hits
+                .as_ref()
+                .and_then(|hits| hits.iter().find(|h| h.meeting_id == meta.id))
+                .and_then(|h| h.anchor.clone()),
+            meta,
         });
     }
-    rows.sort_by_key(|row| std::cmp::Reverse(row.meta.started_at));
-    Ok(rows)
+    if let Some(hits) = hits {
+        rows.sort_by_key(|row| {
+            hits.iter()
+                .position(|h| h.meeting_id == row.meta.id)
+                .unwrap_or(usize::MAX)
+        });
+    } else {
+        rows.sort_by_key(|row| std::cmp::Reverse(row.meta.started_at));
+    }
+    Ok((rows, note))
 }
 fn templates(root: &Path) -> Vec<String> {
     let mut names: Vec<String> = ["general", "one-on-one", "client-call", "standup"]
@@ -1124,9 +1205,99 @@ pub fn asr_binary() -> Result<PathBuf> {
     );
     Ok(path)
 }
+fn ensure_embed_worker(events: &Sender<Event>) -> Result<()> {
+    if background_process(&notetaker_core::embedding::worker_path())
+        .arg("--help")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+    {
+        return Ok(());
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = events;
+        anyhow::bail!(
+            "Соберите notetaker-embed: cargo build --release -p notetaker-embed-worker; задайте NOTETAKER_EMBED_BIN"
+        );
+    }
+    #[cfg(windows)]
+    {
+        use std::io::Read;
+        ensure!(
+            std::env::var_os("NOTETAKER_EMBED_BIN").is_none(),
+            "Проверьте путь NOTETAKER_EMBED_BIN"
+        );
+        let version = env!("CARGO_PKG_VERSION");
+        let name = format!("notetaker-embed-{version}-windows-x64.exe");
+        let url = format!(
+            "{}/releases/download/v{version}/{name}",
+            notetaker_runtime::update::REPOSITORY
+        );
+        let client = reqwest::blocking::Client::builder()
+            .https_only(true)
+            .connect_timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(600))
+            .build()?;
+        let _ = events.send(Event::DownloadProgress(
+            "Скачивание необязательного воркера поиска по смыслу".into(),
+        ));
+        let mut checksum = Vec::new();
+        client
+            .get(format!("{url}.sha256"))
+            .send()?
+            .error_for_status()?
+            .take(4097)
+            .read_to_end(&mut checksum)?;
+        ensure!(checksum.len() <= 4096, "Слишком большой SHA256");
+        let checksum = String::from_utf8(checksum)?;
+        let dest = notetaker_core::embedding::worker_install_path()?;
+        let parent = dest.parent().context("Нет каталога воркера")?;
+        fs::create_dir_all(parent)?;
+        let mut file = tempfile::NamedTempFile::new_in(parent)?;
+        let mut response = client
+            .get(url)
+            .send()?
+            .error_for_status()?
+            .take(150 * 1024 * 1024 + 1);
+        let bytes = std::io::copy(&mut response, &mut file)?;
+        ensure!(bytes <= 150 * 1024 * 1024, "Слишком большой воркер");
+        notetaker_runtime::update::verify_sha256(file.path(), &checksum, &name)?;
+        file.as_file().sync_all()?;
+        file.persist(dest).map_err(|e| e.error)?;
+        let _ = events.send(Event::DownloadProgress(
+            "Воркер установлен, SHA-256 проверен".into(),
+        ));
+        Ok(())
+    }
+}
+
 fn download(model: &str, events: &Sender<Event>) -> Result<()> {
-    let mut process = background_process(&asr_binary()?)
-        .args(["download", model])
+    let binary = if model == "semantic" {
+        ensure_embed_worker(events)?;
+        notetaker_core::embedding::worker_path()
+    } else {
+        asr_binary()?
+    };
+    if model == "semantic"
+        && background_process(&binary)
+            .arg("check-model")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    {
+        return Ok(());
+    }
+    let mut command = background_process(&binary);
+    command.arg("download");
+    if model != "semantic" {
+        command.arg(model);
+    }
+    let mut process = command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())

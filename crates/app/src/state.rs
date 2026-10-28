@@ -258,6 +258,13 @@ pub struct AppState {
     pub settings_pending: bool,
     pub rows: Vec<MeetingRow>,
     pub query: String,
+    pub semantic_enabled: bool,
+    pub semantic_ready: bool,
+    pub semantic_running: bool,
+    semantic_dirty: bool,
+    pub semantic_progress: Option<notetaker_core::SemanticProgress>,
+    pub semantic_note: Option<String>,
+    pub search_target: Option<(PathBuf, notetaker_core::Anchor)>,
     pub query_changed: Option<Instant>,
     pub listing: bool,
     request: u64,
@@ -337,6 +344,13 @@ impl AppState {
             settings_pending: false,
             rows: Vec::new(),
             query: String::new(),
+            semantic_enabled: true,
+            semantic_ready: false,
+            semantic_running: false,
+            semantic_dirty: false,
+            semantic_progress: None,
+            semantic_note: None,
+            search_target: None,
             query_changed: None,
             listing: false,
             request: 0,
@@ -407,13 +421,43 @@ impl AppState {
             self.error = Some("Фоновый поток завершился; перезапустите приложение".into());
         }
     }
+    pub fn start_semantic_index(&mut self) {
+        if self.semantic_running {
+            self.semantic_dirty = true;
+            return;
+        }
+        let config =
+            notetaker_llm::Config::parse(&toml::to_string(&self.llm).unwrap_or_default()).ok();
+        if !self.semantic_running && notetaker_llm::search::configured(config.as_ref()) {
+            self.semantic_running = true;
+            self.send(Command::SemanticIndex {
+                root: self.settings.library.clone(),
+            });
+        }
+    }
+    pub fn select_anchor(&mut self, meeting: Meeting, anchor: Option<notetaker_core::Anchor>) {
+        if let Some(anchor) = anchor {
+            self.tab = match anchor {
+                notetaker_core::Anchor::Notes { .. } => Tab::Notes,
+                notetaker_core::Anchor::Summary { .. } => Tab::Enhanced,
+                notetaker_core::Anchor::Transcript { .. } => Tab::Transcript,
+            };
+            self.search_target = Some((meeting.path().to_owned(), anchor));
+        }
+        self.select(meeting);
+    }
     pub fn refresh(&mut self) {
+        self.start_semantic_index();
+        self.refresh_results();
+    }
+    fn refresh_results(&mut self) {
         self.request += 1;
         self.listing = true;
         self.query_changed = None;
         self.send(Command::List {
             root: self.settings.library.clone(),
             query: self.query.clone(),
+            semantic: self.semantic_enabled && self.semantic_ready,
             request: self.request,
         });
     }
@@ -840,8 +884,14 @@ impl AppState {
         self.quickstart.download_model = Some(model.clone());
         self.quickstart.download_error = None;
         self.download_messages.clear();
-        self.download_messages
-            .push_back(format!("Загрузка {model}…"));
+        self.download_messages.push_back(format!(
+            "Загрузка {}…",
+            if model == "semantic" {
+                "модели поиска по смыслу"
+            } else {
+                &model
+            }
+        ));
         self.send(Command::Download(model));
     }
     pub fn can_save_settings(&self) -> bool {
@@ -1054,6 +1104,38 @@ impl AppState {
     }
     fn apply(&mut self, event: Event) {
         match event {
+            Event::SearchNote { request, note } => {
+                if request == self.request {
+                    self.semantic_note = note;
+                }
+            }
+            Event::SemanticProgress { root, progress } => {
+                if root == self.settings.library {
+                    self.semantic_progress = Some(progress);
+                }
+            }
+            Event::SemanticDone { root, result } => {
+                self.semantic_running = false;
+                if root == self.settings.library {
+                    match result {
+                        Ok(progress) => {
+                            let changed = !self.semantic_ready || progress.chunks > 0;
+                            self.semantic_ready = true;
+                            self.semantic_note = (progress.excluded_local>0).then(||"Local-встречи ищутся только по словам; удалённые embeddings доступны только для Hybrid".into());
+                            self.semantic_progress = Some(progress);
+                            if changed && !self.query.trim().is_empty() {
+                                self.refresh_results();
+                            }
+                        }
+                        Err(error) => {
+                            self.semantic_note = Some(error);
+                        }
+                    }
+                }
+                if std::mem::take(&mut self.semantic_dirty) || root != self.settings.library {
+                    self.start_semantic_index();
+                }
+            }
             Event::BookmarkSaved { path, result } => {
                 self.recording.assist.bookmarks_pending =
                     self.recording.assist.bookmarks_pending.saturating_sub(1);
@@ -1305,6 +1387,7 @@ impl AppState {
                         self.exit_requested = false;
                     }
                 }
+                self.start_semantic_index();
             }
             Event::SpeakersEdited { path, result, data } => {
                 if let Some(document) = self.documents.get_mut(&path) {
@@ -1573,6 +1656,7 @@ impl AppState {
                 self.quickstart.models = models;
                 match result {
                     Ok(()) => {
+                        self.start_semantic_index();
                         self.download_messages.push_back("Модель готова".into());
                         self.notices
                             .push((crate::theme::ToastLevel::Success, "Модель готова".into()));
@@ -1625,6 +1709,10 @@ impl AppState {
                             self.selected = None;
                             self.documents.clear();
                             self.rows.clear();
+                            self.semantic_ready = false;
+                            self.semantic_progress = None;
+                            self.semantic_note = None;
+                            self.search_target = None;
                             self.loading.clear();
                         }
                         self.status = "Настройки сохранены".into();
@@ -2000,6 +2088,35 @@ mod tests {
         );
         state.selected = Some(path.clone());
         (state, commands, root, path)
+    }
+    #[test]
+    fn semantic_hit_selects_anchor_and_ready_results_refresh_without_reindex_loop() {
+        let (mut state, commands, _root, path) = fixture();
+        state.settings.library = path.parent().unwrap().to_owned();
+        let meeting = state.documents[&path].data.meeting.clone();
+        state.select_anchor(meeting, Some(notetaker_core::Anchor::Notes { line: 3 }));
+        assert!(state.tab == Tab::Notes);
+        assert!(matches!(
+            state.search_target,
+            Some((_, notetaker_core::Anchor::Notes { line: 3 }))
+        ));
+        state.query = "бюджет".into();
+        state.semantic_running = true;
+        state.apply(Event::SemanticDone {
+            root: state.settings.library.clone(),
+            result: Ok(notetaker_core::SemanticProgress {
+                completed: 1,
+                total: 1,
+                chunks: 2,
+                excluded_local: 0,
+            }),
+        });
+        assert!(state.semantic_ready && !state.semantic_running);
+        assert!(matches!(
+            commands.try_recv().unwrap(),
+            Command::List { semantic: true, .. }
+        ));
+        assert!(commands.try_recv().is_err());
     }
     #[test]
     fn speaker_actions_flush_text_before_edit_and_keep_failed_unsaved_notes() {

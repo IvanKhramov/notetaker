@@ -299,7 +299,9 @@ impl Panel {
             state.connections.provider_error(&state.llm.defaults.hybrid),
             state.quickstart.calendar_error.as_deref(),
         );
-        if let Some(error) = &state.quickstart.download_error {
+        if let Some(error) = &state.quickstart.download_error
+            && state.quickstart.download_model.as_deref() != Some("semantic")
+        {
             let index = if state.quickstart.download_model.as_deref() == Some("diarization") {
                 1
             } else {
@@ -356,6 +358,8 @@ impl Panel {
             .collapsible(false)
             .resizable(true)
             .show(ctx, |ui| {
+                semantic_step(ui,state);
+                ui.separator();
                 ui.heading(format!("Настроено {} из 6", steps.iter().filter(|s| **s == Status::Ready).count()));
                 ui.small("Настройте запись и конспекты здесь. Календарь и проверку звука можно пропустить.");
                 egui::ScrollArea::vertical().id_salt("quickstart_steps").max_height((ctx.content_rect().height() - 220.0).max(140.0)).show(ui, |ui| {
@@ -566,6 +570,56 @@ fn probe(sender: &Sender<ProbeEvent>) -> anyhow::Result<()> {
         "На одном из каналов тишина. Говорите и включите системный звук, затем повторите проверку."
     );
     Ok(())
+}
+
+/// Optional model: excluded from the six required setup steps and auto downloads.
+pub fn semantic_step(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.strong("Поиск по смыслу (необязательно)");
+    ui.small("Локальная модель: 135 МБ. Тексты встреч остаются на компьютере.");
+    if notetaker_core::embedding::installed() {
+        ui.label("Модель установлена");
+        if !notetaker_core::embedding::worker_path().is_file()
+            && ui
+                .add_enabled(
+                    !state.downloading,
+                    egui::Button::new("Установить воркер поиска по смыслу"),
+                )
+                .clicked()
+        {
+            state.download("semantic".into());
+        }
+        if ui
+            .add_enabled(
+                !state.semantic_running,
+                egui::Button::new("Обновить индекс по смыслу"),
+            )
+            .clicked()
+        {
+            state.start_semantic_index();
+        }
+    } else if ui
+        .add_enabled(
+            !state.downloading && !state.recording.busy(),
+            egui::Button::new("Скачать модель поиска по смыслу"),
+        )
+        .clicked()
+    {
+        state.download("semantic".into());
+    }
+    if state.quickstart.download_model.as_deref() == Some("semantic") {
+        if state.downloading {
+            ui.spinner();
+            if let Some(message) = state.download_messages.back() {
+                ui.small(message);
+            }
+        }
+        if let Some(error) = &state.quickstart.download_error {
+            ui.colored_label(egui::Color32::RED, error);
+        }
+    }
+    if state.semantic_running {
+        ui.spinner();
+    }
 }
 
 #[cfg(test)]
