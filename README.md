@@ -61,7 +61,7 @@ Backend, приватность и измерения: [поиск](docs/search.
 
 ## Install
 
-Download `notetaker-0.11.0-windows-x64.zip` from this repository's **Releases**
+Download `notetaker-0.12.0-windows-x64.zip` from this repository's **Releases**
 page and extract it into a folder. Keep all files together and run
 `notetaker-app.exe`. The binaries are unsigned: Windows SmartScreen may warn;
 choose **More info → Run anyway** if you trust the download. A SHA-256 checksum
