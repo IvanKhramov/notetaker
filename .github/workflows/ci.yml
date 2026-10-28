@@ -81,6 +81,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'cargo metadata failed' }
           $version = ($metadata.packages | Where-Object name -eq 'notetaker-app').version
           ./scripts/package-installer.ps1 -Version $version -PayloadDir $env:PAYLOAD_DIR
+      - name: Smoke-test per-user install, upgrade and uninstall
+        if: runner.os == 'Windows'
+        timeout-minutes: 10
+        shell: pwsh
+        env:
+          SETUP_EXE: ${{ steps.installer.outputs.setup }}
+        run: ./scripts/check-installer.ps1 -SetupExe $env:SETUP_EXE
       - name: Upload Windows installer
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
@@ -90,22 +97,3 @@ jobs:
             ${{ steps.installer.outputs.setup }}
             ${{ steps.installer.outputs.setup_checksum }}
           if-no-files-found: error
-      - name: Smoke-test per-user install and uninstall
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          SETUP_EXE: ${{ steps.installer.outputs.setup }}
-        run: |
-          $install = Join-Path $env:RUNNER_TEMP 'notetaker-install-smoke'
-          $process = Start-Process $env:SETUP_EXE -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=`"$install`"", '/TASKS=autostart' -Wait -PassThru
-          if ($process.ExitCode -ne 0) { throw "Installer failed: $($process.ExitCode)" }
-          foreach ($exe in 'notetaker-app.exe', 'notetaker.exe', 'notetaker-asr.exe', 'unins000.exe') {
-            if (-not (Test-Path (Join-Path $install $exe))) { throw "Missing installed $exe" }
-          }
-          $shortcut = Join-Path $env:APPDATA 'Microsoft/Windows/Start Menu/Programs/notetaker.lnk'
-          if (-not (Test-Path $shortcut)) { throw 'Start menu shortcut missing' }
-          $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-          if ((Get-ItemPropertyValue $run -Name notetaker) -ne "`"$install\notetaker-app.exe`"") { throw 'Autostart command mismatch' }
-          $process = Start-Process (Join-Path $install 'unins000.exe') -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
-          if ($process.ExitCode -ne 0) { throw "Uninstaller failed: $($process.ExitCode)" }
-          if (Get-ItemProperty $run -Name notetaker -ErrorAction SilentlyContinue) { throw 'Autostart value survived uninstall' }

@@ -80,7 +80,14 @@ var
 begin
   Result := Exec(Exe, '--quit', '', SW_HIDE, ewWaitUntilTerminated, ExitCode);
   if Result then
+  begin
+    Log(Format('notetaker --quit exited with code %d.', [ExitCode]));
+    // Exit code 0 includes the case where no instance is running.
     Result := ExitCode = 0;
+  end
+  else
+    Log(Format('Could not run notetaker --quit: %d (%s).',
+      [ExitCode, SysErrorMessage(ExitCode)]));
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;

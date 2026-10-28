@@ -30,28 +30,41 @@ pub fn run(args: Args) -> Result<()> {
             args.parent_pid,
             std::time::Duration::from_secs(120),
         )?;
-        let result = std::process::Command::new(&args.installer)
+        notetaker_runtime::windows::Instance::wait_for_exit(std::time::Duration::from_secs(30))?;
+        let logs = notetaker_runtime::diagnostics::directory();
+        let mut installer = std::process::Command::new(&args.installer);
+        installer
             .args([
                 "/VERYSILENT",
                 "/SUPPRESSMSGBOXES",
                 "/NORESTART",
-                "/CLOSEAPPLICATIONS=no",
+                "/NOCLOSEAPPLICATIONS",
             ])
             .arg(if notetaker_runtime::windows::autostart() {
                 "/MERGETASKS=autostart"
             } else {
                 "/MERGETASKS=!autostart"
             })
-            .arg(format!("/DIR={}", args.install.display()))
-            .status();
-        let success = result.is_ok_and(|status| status.success());
-        notetaker_runtime::diagnostics::event(if success {
-            "installer update completed"
-        } else {
-            "installer update failed"
-        });
-        if !success && let Some(logs) = notetaker_runtime::diagnostics::directory() {
-            let _ = std::fs::write(logs.join("update-failed.flag"), b"failed");
+            .arg(format!("/DIR={}", args.install.display()));
+        if let Some(logs) = &logs {
+            installer.arg(format!(
+                "/LOG={}",
+                logs.join("installer-update.log").display()
+            ));
+        }
+        let (success, outcome) = match installer.status() {
+            Ok(status) => (
+                status.success(),
+                status
+                    .code()
+                    .map_or_else(|| "code=unknown".into(), |code| format!("code={code}")),
+            ),
+            Err(error) => (false, format!("spawn_error={error}")),
+        };
+        let event = if success { "completed" } else { "failed" };
+        notetaker_runtime::diagnostics::event(&format!("installer update {event} {outcome}"));
+        if !success && let Some(logs) = logs {
+            let _ = std::fs::write(logs.join("update-failed.flag"), &outcome);
         }
         // Inno owns file replacement. [Run] skips silent installations, so one
         // relaunch here also recovers the previous build on installer failure.

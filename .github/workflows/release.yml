@@ -50,6 +50,12 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
           PAYLOAD_DIR: ${{ steps.package.outputs.payload }}
         run: ./scripts/package-installer.ps1 -Version ($env:RELEASE_TAG.Substring(1)) -PayloadDir $env:PAYLOAD_DIR
+      - name: Smoke-test per-user install, upgrade and uninstall
+        timeout-minutes: 10
+        shell: pwsh
+        env:
+          SETUP_EXE: ${{ steps.installer.outputs.setup }}
+        run: ./scripts/check-installer.ps1 -SetupExe $env:SETUP_EXE
       - name: Create draft release
         shell: pwsh
         env:

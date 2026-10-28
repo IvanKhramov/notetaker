@@ -21,8 +21,20 @@ impl Default for Maintenance {
         let message = diagnostics::directory().and_then(|logs| {
             let flag = logs.join("update-failed.flag");
             if flag.is_file() {
+                let failure = std::fs::read_to_string(&flag).unwrap_or_default();
+                let code = failure
+                    .trim()
+                    .strip_prefix("code=")
+                    .and_then(|code| code.parse::<i32>().ok());
+                let reason = match code {
+                    Some(7) => "Не удалось закрыть работающее приложение. Завершите запись и чистовой проход, закройте приложение и повторите установку.",
+                    Some(2 | 5) => "Установка отменена. Повторите установку вручную со страницы релиза.",
+                    _ if failure.starts_with("spawn_error=") => "Не удалось запустить установщик. Повторите установку вручную со страницы релиза.",
+                    _ => "Повторите установку вручную со страницы релиза.",
+                };
+                let code = code.map(|code| format!(" Код установщика: {code}.")).unwrap_or_default();
                 let _ = std::fs::remove_file(flag);
-                Some("Не удалось установить обновление. Повторите установку вручную со страницы релиза.".into())
+                Some(format!("Не удалось установить обновление.{code} {reason}\nЛог установщика: {}", logs.join("installer-update.log").display()))
             } else { None }
         });
         Self {

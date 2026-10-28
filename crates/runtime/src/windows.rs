@@ -175,10 +175,22 @@ impl Instance {
                     drop(Handle(handle));
                     Ok(true)
                 }
-                Err(_) if GetLastError() == ERROR_FILE_NOT_FOUND => Ok(false),
+                Err(error) if error.code() == ERROR_FILE_NOT_FOUND.to_hresult() => Ok(false),
                 Err(error) => Err(error.into()),
             }
         }
+    }
+    /// Opening the mutex must not keep it alive while waiting for shutdown.
+    pub fn wait_for_exit(timeout: Duration) -> Result<()> {
+        let deadline = std::time::Instant::now() + timeout;
+        while Self::running()? {
+            ensure!(
+                std::time::Instant::now() < deadline,
+                "Приложение не завершилось, обновление отменено"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        Ok(())
     }
 }
 
@@ -186,7 +198,7 @@ pub fn wait_for_exit(pid: u32, timeout: Duration) -> Result<()> {
     unsafe {
         let handle = match OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
             Ok(handle) => Handle(handle),
-            Err(_) if GetLastError() == ERROR_INVALID_PARAMETER => return Ok(()),
+            Err(error) if error.code() == ERROR_INVALID_PARAMETER.to_hresult() => return Ok(()),
             Err(error) => return Err(error.into()),
         };
         ensure!(
@@ -300,4 +312,22 @@ pub fn set_autostart(enabled: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn absent_instance_is_stopped_and_quit_succeeds() {
+        assert!(!Instance::running().unwrap());
+        Instance::request_quit().unwrap();
+        Instance::wait_for_exit(Duration::ZERO).unwrap();
+    }
+
+    #[test]
+    fn absent_process_is_already_stopped() {
+        // PID 0 cannot be opened and returns ERROR_INVALID_PARAMETER.
+        wait_for_exit(0, Duration::ZERO).unwrap();
+    }
 }
