@@ -73,8 +73,8 @@ jobs:
 
   macos:
     if: github.event_name == 'push'
-    # macos-14 is Intel; cross-build arm64 with its macOS SDK.
-    runs-on: macos-14
+    # macos-15 is an Apple Silicon runner; macos-14 retires in November 2026.
+    runs-on: macos-15
     needs: windows
     env:
       MACOSX_DEPLOYMENT_TARGET: '14.4'
