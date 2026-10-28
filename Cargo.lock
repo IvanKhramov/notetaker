@@ -2766,6 +2766,7 @@ dependencies = [
  "notetaker-core",
  "pulldown-cmark",
  "reqwest",
+ "security-framework",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -2801,6 +2802,7 @@ version = "0.14.1"
 dependencies = [
  "anyhow",
  "directories",
+ "libc",
  "semver",
  "serde",
  "sha2 0.10.9",

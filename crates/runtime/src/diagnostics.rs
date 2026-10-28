@@ -16,7 +16,11 @@ pub fn directory() -> Option<PathBuf> {
     {
         std::env::var_os("LOCALAPPDATA").map(|p| PathBuf::from(p).join("notetaker/logs"))
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        directories::UserDirs::new().map(|p| p.home_dir().join("Library/Logs/notetaker"))
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         directories::ProjectDirs::from("", "", "notetaker").map(|p| p.data_local_dir().join("logs"))
     }

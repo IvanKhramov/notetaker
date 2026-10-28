@@ -38,7 +38,31 @@ fn binary_name(kind: ProviderKind) -> &'static str {
 }
 
 pub fn find_cli(kind: ProviderKind) -> Option<PathBuf> {
-    find_in_path(kind, std::env::var_os("PATH").as_deref())
+    #[cfg(target_os = "macos")]
+    let path = Some(macos_cli_path());
+    #[cfg(not(target_os = "macos"))]
+    let path = std::env::var_os("PATH");
+    find_in_path(kind, path.as_deref())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_cli_path() -> std::ffi::OsString {
+    // Finder does not inherit the user's interactive shell PATH.
+    let mut dirs: Vec<_> = std::env::var_os("PATH")
+        .as_deref()
+        .map(std::env::split_paths)
+        .into_iter()
+        .flatten()
+        .collect();
+    if let Some(home) = directories::UserDirs::new() {
+        dirs.extend([
+            home.home_dir().join(".local/bin"),
+            home.home_dir().join(".npm-global/bin"),
+            home.home_dir().join(".cargo/bin"),
+        ]);
+    }
+    dirs.extend(["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"].map(PathBuf::from));
+    std::env::join_paths(dirs).unwrap_or_default()
 }
 
 fn find_in_path(kind: ProviderKind, path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
@@ -95,6 +119,8 @@ fn find_in_path(kind: ProviderKind, path: Option<&std::ffi::OsStr>) -> Option<Pa
 
 fn background(binary: &Path) -> Command {
     let mut command = Command::new(binary);
+    #[cfg(target_os = "macos")]
+    command.env("PATH", macos_cli_path());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -358,7 +384,19 @@ pub fn open_login(kind: ProviderKind) -> Result<()> {
             .spawn()
             .context("Не удалось открыть окно входа")?;
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        let _ = binary;
+        anyhow::bail!(
+            "macOS: откройте Terminal и выполните {}. Затем повторите проверку подключения в notetaker.",
+            if kind == ProviderKind::ClaudeCli {
+                "claude, затем /login"
+            } else {
+                "codex login"
+            }
+        );
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let mut command = Command::new("x-terminal-emulator");
         command.arg("-e").arg(binary);
@@ -369,6 +407,7 @@ pub fn open_login(kind: ProviderKind) -> Result<()> {
             .spawn()
             .context("Не удалось открыть терминал; выполните claude или codex login вручную")?;
     }
+    #[cfg(not(target_os = "macos"))]
     Ok(())
 }
 
