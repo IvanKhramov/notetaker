@@ -55,6 +55,28 @@ fn lock(directory: &Path) -> Result<Option<File>> {
         Err(error.into())
     }
 }
+fn read_command(stream: &mut UnixStream) -> Option<u8> {
+    // Linux accepted sockets block; macOS ones inherit O_NONBLOCK already, so
+    // a failure here (peer gone) still leaves a nonblocking read.
+    let _ = stream.set_nonblocking(true);
+    let deadline = Instant::now() + Duration::from_millis(100);
+    let mut command = [0];
+    loop {
+        match stream.read(&mut command) {
+            Ok(1) => return Some(command[0]),
+            Ok(_) => return None,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) && Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(5))
+            }
+            Err(_) => return None,
+        }
+    }
+}
 fn connect(directory: &Path) -> Result<UnixStream> {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
@@ -106,21 +128,10 @@ impl Instance {
                 let mut quitters = Vec::new();
                 while !state.stop.load(Ordering::Acquire) {
                     while let Ok((mut stream, _)) = listener.accept() {
-                        // Accepted sockets inherit O_NONBLOCK on macOS. Wait for a
-                        // client that connects before it has written its command.
-                        if stream.set_nonblocking(false).is_err()
-                            || stream
-                                .set_read_timeout(Some(Duration::from_millis(100)))
-                                .is_err()
-                            || stream
-                                .set_write_timeout(Some(Duration::from_millis(100)))
-                                .is_err()
-                        {
-                            continue;
-                        }
-                        let mut command = [0];
-                        if stream.read_exact(&mut command).is_ok() {
-                            match command[0] {
+                        // Accepted sockets may inherit O_NONBLOCK, and macOS rejects
+                        // socket options once the peer has closed. Poll briefly instead.
+                        if let Some(command) = read_command(&mut stream) {
+                            match command {
                                 b'S' => state.show.store(true, Ordering::Release),
                                 b'Q' => {
                                     state.quit.store(true, Ordering::Release);
