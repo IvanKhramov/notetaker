@@ -86,8 +86,7 @@ begin
     Result := ExitCode = 0;
   end
   else
-    Log(Format('Could not run notetaker --quit: %d (%s).',
-      [ExitCode, SysErrorMessage(ExitCode)]));
+    Log(Format('Could not run notetaker --quit: %d (%s).', [ExitCode, SysErrorMessage(ExitCode)]));
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
