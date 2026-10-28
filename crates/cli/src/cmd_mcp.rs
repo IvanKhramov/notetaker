@@ -66,14 +66,11 @@ impl Server {
             && (!self.exclude_local || meeting.read_meta()?.mode != Mode::Local))
     }
     fn call(&self, name: &str, mut args: Value) -> Result<Value> {
-        let folder = if name != "search_meetings" {
-            args.as_object_mut()
-                .and_then(|a| a.remove("folder"))
-                .map(serde_json::from_value::<String>)
-                .transpose()?
-        } else {
-            None
-        };
+        let folder = args
+            .as_object_mut()
+            .and_then(|a| a.remove("folder"))
+            .map(serde_json::from_value::<String>)
+            .transpose()?;
         match name {
             "list_people" => {
                 #[derive(Deserialize)]
@@ -220,7 +217,11 @@ impl Server {
                     &input.query,
                     input.limit.min(100),
                     input.mode,
-                    self.exclude_local,
+                    &notetaker_core::SearchFilter {
+                        folder,
+                        exclude_local: self.exclude_local,
+                        ..Default::default()
+                    },
                     config.as_ref(),
                     true,
                 )?
@@ -355,9 +356,8 @@ fn tools() -> Value {
         {"name":"list_recent","description":"Последние доступные встречи.","inputSchema":{"type":"object","properties":{"n":{"type":"integer","minimum":0,"maximum":100}},"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}}
     ]});
     for tool in result["tools"].as_array_mut().expect("tool list") {
-        if tool["name"] != "search_meetings" {
-            tool["inputSchema"]["properties"]["folder"] = json!({"type":"string","description":"Папка с подпапками; пустая строка - без папки"});
-        }
+        tool["inputSchema"]["properties"]["folder"] =
+            json!({"type":"string","description":"Папка с подпапками; пустая строка - без папки"});
     }
     result
 }
@@ -927,5 +927,69 @@ mod tests {
                 .is_err()
         );
         assert!(server.call("list_recent", json!({"folder":42})).is_err());
+    }
+    #[test]
+    fn search_folder_applies_before_limits_and_keeps_local_policy() {
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open(root.path()).unwrap();
+        for i in 0..105 {
+            let mut meta = MeetingMeta::new(format!("Бюджет {i}"), chrono::Utc::now());
+            meta.mode = Mode::Hybrid;
+            meta.folder = Some("client-other".into());
+            library
+                .create_meeting(meta)
+                .unwrap()
+                .write_notes("бюджет")
+                .unwrap();
+        }
+        let mut meta = MeetingMeta::new("Целевой план", chrono::Utc::now());
+        meta.mode = Mode::Hybrid;
+        meta.folder = Some("client/project".into());
+        let target = library.create_meeting(meta).unwrap();
+        target.write_notes("бюджет").unwrap();
+        let mut meta = MeetingMeta::new("Бюджет личный", chrono::Utc::now());
+        meta.folder = Some("client".into());
+        library
+            .create_meeting(meta)
+            .unwrap()
+            .write_notes("бюджет SECRET")
+            .unwrap();
+        let server = Server {
+            library,
+            exclude_local: true,
+        };
+        for mode in ["keyword", "semantic", "hybrid"] {
+            let hits = server
+                .call(
+                    "search_meetings",
+                    json!({"query":"бюджет", "folder":"client", "mode":mode, "limit":1}),
+                )
+                .unwrap();
+            assert_eq!(hits.as_array().unwrap().len(), 1);
+            assert_eq!(hits[0]["id"], target.read_meta().unwrap().id.to_string());
+            let hits = server
+                .call(
+                    "search_meetings",
+                    json!({"query":"бюджет", "folder":"", "mode":mode, "limit":1}),
+                )
+                .unwrap();
+            assert!(hits.as_array().unwrap().is_empty());
+        }
+        assert!(
+            server
+                .call("search_meetings", json!({"query":"бюджет", "folder":42}))
+                .is_err()
+        );
+        let schema = tools();
+        let search = schema["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "search_meetings")
+            .unwrap();
+        assert_eq!(
+            search["inputSchema"]["properties"]["folder"]["type"],
+            "string"
+        );
     }
 }

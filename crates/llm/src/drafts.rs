@@ -28,7 +28,7 @@ pub fn brief(
         &event.link.title,
         6,
         notetaker_core::SearchMode::Hybrid,
-        false,
+        &notetaker_core::SearchFilter::default(),
         config,
         false,
     ) {

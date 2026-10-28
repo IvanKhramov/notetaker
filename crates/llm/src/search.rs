@@ -2,7 +2,8 @@
 use crate::{Config, OsCredentialStore, ProviderKind, resolve_key};
 use anyhow::{Context, Result, ensure};
 use notetaker_core::{
-    Embedder, Hit, Library, Mode, SearchMode, SemanticProgress, embedding::LocalEmbedder,
+    Embedder, Hit, Library, Mode, SearchFilter, SearchMode, SemanticProgress,
+    embedding::LocalEmbedder,
 };
 use std::{
     io::Read,
@@ -100,14 +101,14 @@ pub fn search(
     query: &str,
     limit: usize,
     mode: SearchMode,
-    exclude_local: bool,
+    filter: &SearchFilter,
     config: Option<&Config>,
     allow_remote: bool,
 ) -> Result<SearchOutcome> {
     library.reindex_incremental()?;
     let keyword = || -> Result<SearchOutcome> {
         Ok(SearchOutcome {
-            hits: library.retrieve(query, limit, exclude_local)?,
+            hits: library.retrieve_filtered(query, limit, filter)?,
             note: None,
         })
     };
@@ -125,7 +126,7 @@ pub fn search(
                 *worker = LocalEmbedder::start().ok();
             }
             if let Some(embedder) = worker.as_mut() {
-                match library.search_with(query, limit, mode, exclude_local, Some(embedder)) {
+                match library.search_filtered(query, limit, mode, filter, Some(embedder)) {
                     Ok(hits) => return Ok(SearchOutcome { hits, note: None }),
                     Err(_) => *worker = None,
                 }
@@ -149,9 +150,7 @@ pub fn search(
                 Some("Индекс по смыслу ещё не готов. Local-встречи ищутся только по словам".into());
             return Ok(outcome);
         }
-        if let Ok(hits) =
-            library.search_with(query, limit, mode, exclude_local, Some(&mut embedder))
-        {
+        if let Ok(hits) = library.search_filtered(query, limit, mode, filter, Some(&mut embedder)) {
             return Ok(SearchOutcome {hits,note:Some("Local-встречи ищутся только по словам; удалённые embeddings доступны только для Hybrid".into())});
         }
     }
@@ -302,7 +301,7 @@ mod tests {
             "где обсуждали бюджет",
             10,
             SearchMode::Hybrid,
-            false,
+            &SearchFilter::default(),
             None,
             false,
         )?;
@@ -321,7 +320,7 @@ mod tests {
             "где обсуждали бюджет",
             10,
             SearchMode::Hybrid,
-            false,
+            &SearchFilter::default(),
             None,
             false,
         )?;

@@ -345,7 +345,7 @@ fn chat_streams_with_citations_attendees_and_local_fallback() {
     let mut streamed = String::new();
     let result = crate::ask(
         &library,
-        Some(&meeting),
+        crate::ChatScope::Meeting(&meeting),
         "Что с выпуском?",
         &[],
         &config,
@@ -362,4 +362,51 @@ fn chat_streams_with_citations_attendees_and_local_fallback() {
     assert!(prompt.contains("Участники: Иван"));
     assert!(prompt.contains("Иван: готово"));
     assert!(prompt.contains("[1: План,"));
+}
+
+#[test]
+fn folder_chat_retrieves_before_limit_and_keeps_local_completion() {
+    use crate::{Cancellation, ChatScope, Config, ask};
+    use notetaker_core::{Library, MeetingMeta, Mode};
+    let root = tempfile::tempdir().unwrap();
+    let library = Library::open(root.path()).unwrap();
+    for i in 0..8 {
+        let mut meta = MeetingMeta::new(format!("Выпуск {i}"), chrono::Utc::now());
+        meta.mode = Mode::Hybrid;
+        meta.folder = Some("client-other".into());
+        library
+            .create_meeting(meta)
+            .unwrap()
+            .write_notes("Выпуск OUTSIDE")
+            .unwrap();
+    }
+    let mut meta = MeetingMeta::new("Целевой план", chrono::Utc::now());
+    meta.folder = Some("client/project".into());
+    let target = library.create_meeting(meta).unwrap();
+    target.write_notes("Выпуск INSIDE").unwrap();
+    let server = Mock::start(
+        "200 OK",
+        "application/json",
+        r#"{"choices":[{"message":{"content":"Готово [1]"}}]}"#,
+        "",
+    );
+    let config = Config::parse(&format!("[defaults]\nlocal='local'\nhybrid='cloud'\n[[providers]]\nid='local'\nkind='openai'\nbase_url='{}'\nmodel='local-chat'\n[[providers]]\nid='cloud'\nkind='openai'\nbase_url='https://example.invalid/v1'\nmodel='cloud'", server.base)).unwrap();
+    let result = ask(
+        &library,
+        ChatScope::Folder("client"),
+        "Выпуск",
+        &[],
+        &config,
+        Cancellation::default(),
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(result.turn.mode, Mode::Local);
+    assert_eq!(result.citations.len(), 1);
+    assert_eq!(result.citations[0].meeting.path(), target.path());
+    let (_, body) = server.handle.join().unwrap();
+    assert_eq!(body["model"], "local-chat");
+    let prompt = body["messages"][1]["content"].as_str().unwrap();
+    assert!(prompt.contains("INSIDE"));
+    assert!(!prompt.contains("OUTSIDE"));
 }

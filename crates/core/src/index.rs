@@ -21,6 +21,22 @@ pub struct Hit {
     pub chunks: Vec<crate::Chunk>,
 }
 
+/// Source metadata is checked before ranking limits, including with a stale index.
+#[derive(Clone, Debug, Default)]
+pub struct SearchFilter {
+    pub folder: Option<String>,
+    pub tag: Option<String>,
+    pub exclude_local: bool,
+}
+
+impl SearchFilter {
+    pub fn matches(&self, meta: &crate::MeetingMeta) -> bool {
+        crate::folders::matches_folder(meta, self.folder.as_deref())
+            && self.tag.as_ref().is_none_or(|tag| meta.tags.contains(tag))
+            && (!self.exclude_local || meta.mode != crate::Mode::Local)
+    }
+}
+
 impl Library {
     pub fn index_path(&self) -> PathBuf {
         self.local_state_dir().join("index.sqlite")
@@ -84,7 +100,23 @@ impl Library {
     /// Natural-language retrieval with safe OR terms and weighted FTS5 BM25.
     /// Read privacy from source metadata before returning snippets or applying limit.
     pub fn retrieve(&self, question: &str, limit: usize, exclude_local: bool) -> Result<Vec<Hit>> {
-        self.retrieve_query(retrieval_query(question), limit, exclude_local)
+        self.retrieve_filtered(
+            question,
+            limit,
+            &SearchFilter {
+                exclude_local,
+                ..Default::default()
+            },
+        )
+    }
+
+    pub fn retrieve_filtered(
+        &self,
+        question: &str,
+        limit: usize,
+        filter: &SearchFilter,
+    ) -> Result<Vec<Hit>> {
+        self.retrieve_query(retrieval_query(question), limit, filter)
     }
 
     pub(crate) fn retrieve_titles(&self, title: &str, limit: usize) -> Result<Vec<Hit>> {
@@ -94,10 +126,15 @@ impl Library {
         } else {
             format!("title : ({query})")
         };
-        self.retrieve_query(query, limit, false)
+        self.retrieve_query(query, limit, &SearchFilter::default())
     }
 
-    fn retrieve_query(&self, query: String, limit: usize, exclude_local: bool) -> Result<Vec<Hit>> {
+    fn retrieve_query(
+        &self,
+        query: String,
+        limit: usize,
+        filter: &SearchFilter,
+    ) -> Result<Vec<Hit>> {
         if query.is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
@@ -122,7 +159,7 @@ impl Library {
             let Ok(meta) = meeting.read_meta() else {
                 continue;
             };
-            if exclude_local && meta.mode == crate::Mode::Local {
+            if !filter.matches(&meta) {
                 continue;
             }
             hits.push(Hit {

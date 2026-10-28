@@ -34,7 +34,12 @@ impl Panel {
         self.scope_title = title;
         self.open = true;
     }
-    pub fn show(&mut self, ctx: &egui::Context, can_ask: bool) -> Option<Action> {
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        can_ask: bool,
+        folder: Option<&str>,
+    ) -> Option<Action> {
         let mut action = None;
         egui::Window::new("Спросить")
             .open(&mut self.open)
@@ -42,6 +47,12 @@ impl Panel {
             .show(ctx, |ui| {
                 ui.label(if self.scope.is_some() {
                     format!("Про встречу: {}", self.scope_title)
+                } else if let Some(folder) = folder {
+                    if folder.is_empty() {
+                        "По встречам без папки".into()
+                    } else {
+                        format!("По папке: {folder}")
+                    }
                 } else {
                     "По всем встречам".into()
                 });

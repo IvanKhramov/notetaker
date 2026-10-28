@@ -229,6 +229,7 @@ pub struct AppState {
     pub connections: crate::ai::Connections,
     pub chat: crate::chat::Panel,
     pub folder_filter: Option<String>,
+    pub tag_filter: Option<String>,
     pub tasks_open: bool,
     pub tasks: Vec<notetaker_core::Task>,
     pub tasks_busy: bool,
@@ -317,6 +318,7 @@ impl AppState {
             connections: crate::ai::Connections::default(),
             chat: Default::default(),
             folder_filter: None,
+            tag_filter: None,
             tasks_open: false,
             tasks: Vec::new(),
             tasks_busy: false,
@@ -454,7 +456,7 @@ impl AppState {
         self.start_semantic_index();
         self.refresh_results();
     }
-    fn refresh_results(&mut self) {
+    pub fn refresh_results(&mut self) {
         self.request += 1;
         self.listing = true;
         self.query_changed = None;
@@ -462,6 +464,11 @@ impl AppState {
             root: self.settings.library.clone(),
             query: self.query.clone(),
             semantic: self.semantic_enabled && self.semantic_ready,
+            filter: notetaker_core::SearchFilter {
+                folder: self.folder_filter.clone(),
+                tag: self.tag_filter.clone(),
+                ..Default::default()
+            },
             request: self.request,
         });
     }
@@ -798,6 +805,7 @@ impl AppState {
         self.send(Command::Chat {
             root: self.settings.library.clone(),
             scope: self.chat.scope.clone(),
+            folder: self.folder_filter.clone(),
             question: self.chat.pending.clone(),
             history: self.chat.messages.iter().map(|m| m.turn.clone()).collect(),
             cancel: self.chat.cancel.clone(),
@@ -1713,6 +1721,8 @@ impl AppState {
                         self.llm_draft = llm;
                         if changed_library {
                             self.chat = Default::default();
+                            self.folder_filter = None;
+                            self.tag_filter = None;
                             self.tasks.clear();
                             self.brief = None;
                             self.followup_text.clear();
@@ -2500,6 +2510,25 @@ mod tests {
             templates: vec![],
         });
         assert!(state.error.is_none());
+    }
+    #[test]
+    fn search_and_chat_commands_carry_selected_filters() {
+        let (mut state, commands, _root, _path) = fixture();
+        state.folder_filter = Some("client".into());
+        state.tag_filter = Some("важное".into());
+        state.query = "бюджет".into();
+        state.refresh_results();
+        let Command::List { filter, .. } = commands.try_recv().unwrap() else {
+            panic!("expected search");
+        };
+        assert_eq!(filter.folder.as_deref(), Some("client"));
+        assert_eq!(filter.tag.as_deref(), Some("важное"));
+        state.chat.question = "бюджет".into();
+        state.ask();
+        let Command::Chat { folder, .. } = commands.try_recv().unwrap() else {
+            panic!("expected chat");
+        };
+        assert_eq!(folder.as_deref(), Some("client"));
     }
     #[test]
     fn auto_summary_respects_mode_setting_and_user_edits() {

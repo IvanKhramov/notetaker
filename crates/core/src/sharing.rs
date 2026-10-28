@@ -52,6 +52,13 @@ impl Library {
             &serde_json::to_string_pretty(&LibrarySettings { shared })?,
             loaded.revision,
         )?;
+        if loaded.value.shared != shared {
+            // A previous stay in this mode may have left semantic sources here.
+            // Do not reuse them: the background semantic job rebuilds from files.
+            self.open_index()?.execute_batch(
+                "BEGIN IMMEDIATE; DELETE FROM semantic_chunks; DELETE FROM semantic_sources; COMMIT;",
+            )?;
+        }
         // Rebuild instead of copying a SQLite database that may be open elsewhere.
         self.reindex_full()
     }

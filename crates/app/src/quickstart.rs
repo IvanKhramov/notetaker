@@ -341,6 +341,7 @@ impl Panel {
         ctx: &egui::Context,
         state: &mut AppState,
         maintenance: &mut Maintenance,
+        organization: &mut crate::organization::Panel,
     ) -> bool {
         if !self.open || !state.ready {
             return false;
@@ -358,11 +359,13 @@ impl Panel {
             .collapsible(false)
             .resizable(true)
             .show(ctx, |ui| {
-                semantic_step(ui,state);
-                ui.separator();
                 ui.heading(format!("Настроено {} из 6", steps.iter().filter(|s| **s == Status::Ready).count()));
                 ui.small("Настройте запись и конспекты здесь. Календарь и проверку звука можно пропустить.");
                 egui::ScrollArea::vertical().id_salt("quickstart_steps").max_height((ctx.content_rect().height() - 220.0).max(140.0)).show(ui, |ui| {
+                    semantic_step(ui, state);
+                    ui.separator();
+                    organization.shared_step(ui, !state.semantic_running && state.can_save_settings());
+                    ui.separator();
                     row(ui, &steps[0], "Распознавание речи", "Модели работают локально. Для Авто нужны обе модели и Whisper tiny (~103 МБ).");
                     model_control(ui, state, "gigaam-v3", "GigaAM v3 · русский");
                     model_control(ui, state, "parakeet-v3", "Parakeet v3 · многоязычный");

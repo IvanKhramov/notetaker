@@ -1,10 +1,12 @@
 use anyhow::Result;
 use clap::Parser;
-use notetaker_core::{Library, SearchMode};
+use notetaker_core::{Library, SearchFilter, SearchMode};
 
 #[derive(Parser)]
 pub struct SearchArgs {
     pub query: String,
+    #[arg(long)]
+    pub folder: Option<String>,
     #[arg(long, default_value = "hybrid")]
     pub mode: SearchMode,
     #[arg(long)]
@@ -50,7 +52,10 @@ pub fn search(args: SearchArgs) -> Result<()> {
         &args.query,
         args.limit.min(100),
         args.mode,
-        false,
+        &SearchFilter {
+            folder: args.folder,
+            ..Default::default()
+        },
         config.as_ref(),
         true,
     )?;
@@ -86,4 +91,20 @@ pub fn reindex(args: ReindexArgs) -> Result<()> {
         library.reindex_full()?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_accepts_optional_folder_including_unassigned() {
+        let args = SearchArgs::try_parse_from(["search", "бюджет"]).unwrap();
+        assert!(args.folder.is_none());
+        for folder in ["client/project", ""] {
+            let args =
+                SearchArgs::try_parse_from(["search", "бюджет", "--folder", folder]).unwrap();
+            assert_eq!(args.folder.as_deref(), Some(folder));
+        }
+    }
 }

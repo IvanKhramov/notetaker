@@ -14,6 +14,7 @@ pub mod embedding;
 mod export;
 mod identity;
 mod index;
+pub use index::SearchFilter;
 mod semantic;
 pub use identity::configured_user_name;
 pub use semantic::{

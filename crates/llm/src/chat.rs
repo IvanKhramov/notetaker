@@ -25,11 +25,19 @@ pub struct ChatResult {
     pub citations: Vec<Citation>,
 }
 
+#[derive(Default)]
+pub enum ChatScope<'a> {
+    #[default]
+    All,
+    Meeting(&'a Meeting),
+    Folder(&'a str),
+}
+
 /// History is passed by value from the UI session and never written to disk.
 /// Local evidence anywhere in that history keeps the entire conversation local.
 pub fn ask(
     library: &Library,
-    scope: Option<&Meeting>,
+    scope: ChatScope<'_>,
     question: &str,
     history: &[ChatTurn],
     config: &Config,
@@ -39,7 +47,7 @@ pub fn ask(
     ensure!(!question.trim().is_empty(), "Введите вопрос");
     ensure!(!cancel.is_cancelled(), "Запрос отменён");
     let mut retrieved = Vec::new();
-    let meetings = if let Some(meeting) = scope {
+    let meetings = if let ChatScope::Meeting(meeting) = scope {
         vec![meeting.clone()]
     } else {
         library.reindex_incremental()?;
@@ -49,7 +57,14 @@ pub fn ask(
             question,
             6,
             notetaker_core::SearchMode::Hybrid,
-            false,
+            &notetaker_core::SearchFilter {
+                folder: if let ChatScope::Folder(folder) = scope {
+                    Some(folder.into())
+                } else {
+                    None
+                },
+                ..Default::default()
+            },
             Some(config),
             allow_remote,
         )?
@@ -282,7 +297,7 @@ mod tests {
         assert!(
             ask(
                 &library,
-                Some(&meeting),
+                ChatScope::Meeting(&meeting),
                 "кластер",
                 &[],
                 &config,
@@ -302,7 +317,7 @@ mod tests {
         assert!(
             ask(
                 &library,
-                None,
+                ChatScope::All,
                 "кластер",
                 &history,
                 &config,

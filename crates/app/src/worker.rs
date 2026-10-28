@@ -203,6 +203,7 @@ pub enum Command {
     Chat {
         root: PathBuf,
         scope: Option<Meeting>,
+        folder: Option<String>,
         question: String,
         history: Vec<notetaker_llm::ChatTurn>,
         cancel: Cancellation,
@@ -222,6 +223,7 @@ pub enum Command {
         root: PathBuf,
         query: String,
         semantic: bool,
+        filter: notetaker_core::SearchFilter,
         request: u64,
     },
     Load(Meeting),
@@ -544,6 +546,7 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                 Command::Chat {
                     root,
                     scope,
+                    folder,
                     question,
                     history,
                     cancel,
@@ -555,7 +558,13 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                             let config = Config::load()?;
                             notetaker_llm::ask(
                                 &library,
-                                scope.as_ref(),
+                                if let Some(meeting) = scope.as_ref() {
+                                    notetaker_llm::ChatScope::Meeting(meeting)
+                                } else if let Some(folder) = folder.as_deref() {
+                                    notetaker_llm::ChatScope::Folder(folder)
+                                } else {
+                                    notetaker_llm::ChatScope::All
+                                },
                                 &question,
                                 &history,
                                 &config,
@@ -606,10 +615,11 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                     root,
                     query,
                     semantic,
+                    filter,
                     request,
                 } => {
                     let templates = templates(&root);
-                    let result = list_mode(&root, &query, semantic)
+                    let result = list_mode(&root, &query, semantic, &filter)
                         .map(|(rows, note)| {
                             let _ = events.send(Event::SearchNote { request, note });
                             rows
@@ -845,12 +855,13 @@ fn error_text(error: anyhow::Error) -> String {
 }
 #[cfg(test)]
 fn list(root: &Path, query: &str) -> Result<Vec<MeetingRow>> {
-    Ok(list_mode(root, query, false)?.0)
+    Ok(list_mode(root, query, false, &notetaker_core::SearchFilter::default())?.0)
 }
 fn list_mode(
     root: &Path,
     query: &str,
     semantic: bool,
+    filter: &notetaker_core::SearchFilter,
 ) -> Result<(Vec<MeetingRow>, Option<String>)> {
     let library = Library::open(root)?;
     let mut rows = Vec::new();
@@ -869,7 +880,7 @@ fn list_mode(
             } else {
                 notetaker_core::SearchMode::Keyword
             },
-            false,
+            filter,
             config.as_ref(),
             true,
         )?;
@@ -878,6 +889,9 @@ fn list_mode(
     };
     for meeting in library.list_meetings()? {
         let meta = meeting.read_meta()?;
+        if !filter.matches(&meta) {
+            continue;
+        }
         let snippet = if let Some(hits) = &hits {
             let Some(hit) = hits.iter().find(|hit| hit.meeting_id == meta.id) else {
                 continue;

@@ -19,7 +19,7 @@ pub use drafts::{Brief, FollowupKind, brief, followup, render_followup, strip_in
 mod provider;
 mod template;
 
-pub use chat::{ChatResult, ChatTurn, Citation, ask};
+pub use chat::{ChatResult, ChatScope, ChatTurn, Citation, ask};
 pub use config::{
     Config, Defaults, KeySource, ModelChoice, ProviderConfig, ProviderKind, Scenario, Scenarios,
 };

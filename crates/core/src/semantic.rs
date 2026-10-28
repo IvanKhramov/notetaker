@@ -253,12 +253,31 @@ impl Library {
         limit: usize,
         mode: SearchMode,
         exclude_local: bool,
+        embedder: Option<&mut dyn Embedder>,
+    ) -> Result<Vec<Hit>> {
+        self.search_filtered(
+            query,
+            limit,
+            mode,
+            &crate::SearchFilter {
+                exclude_local,
+                ..Default::default()
+            },
+            embedder,
+        )
+    }
+    pub fn search_filtered(
+        &self,
+        query: &str,
+        limit: usize,
+        mode: SearchMode,
+        filter: &crate::SearchFilter,
         mut embedder: Option<&mut dyn Embedder>,
     ) -> Result<Vec<Hit>> {
         if query.trim().is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
-        let lexical = self.retrieve(query, 100, exclude_local)?;
+        let lexical = self.retrieve_filtered(query, 100, filter)?;
         if mode == SearchMode::Keyword {
             return Ok(lexical.into_iter().take(limit).collect());
         }
@@ -269,7 +288,7 @@ impl Library {
             return Ok(lexical.into_iter().take(limit).collect());
         }
         let vector = normalize(embedder.embed(query, true)?)?;
-        let mut semantic = self.semantic_hits(&vector, embedder.model_id(), exclude_local)?;
+        let mut semantic = self.semantic_hits(&vector, embedder.model_id(), filter)?;
         if mode == SearchMode::Semantic {
             if !embedder.is_local() {
                 let local_keyword = lexical
@@ -289,7 +308,12 @@ impl Library {
         }
         Ok(fuse(lexical, semantic, limit.min(100)))
     }
-    fn semantic_hits(&self, query: &[f32], model: &str, exclude_local: bool) -> Result<Vec<Hit>> {
+    fn semantic_hits(
+        &self,
+        query: &[f32],
+        model: &str,
+        filter: &crate::SearchFilter,
+    ) -> Result<Vec<Hit>> {
         let connection = self.open_index()?;
         let mut stmt = connection.prepare(
             "SELECT path,stamp,local,chunk,vector FROM semantic_chunks WHERE model=?1 ORDER BY id",
@@ -308,7 +332,7 @@ impl Library {
                     return None;
                 }
                 let meta = meeting.read_meta().ok()?;
-                if exclude_local && meta.mode == Mode::Local {
+                if !filter.matches(&meta) {
                     return None;
                 }
                 Some((meta, source_stamp(&meeting).ok()?))
@@ -575,6 +599,208 @@ mod tests {
         assert_eq!(count, 1);
     }
     #[test]
+    fn folder_tag_and_privacy_filters_precede_both_candidate_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::open(dir.path()).unwrap();
+        // More than either ranking's candidate cap. All rank above the target.
+        for i in 0..105 {
+            let m = meeting(&lib, &format!("Бюджет {i}"), "бюджет деньги", Mode::Hybrid);
+            m.update_meta(|meta| {
+                meta.folder = Some("client-other".into());
+                meta.tags = vec!["важное".into()];
+            })
+            .unwrap();
+            let m = meeting(
+                &lib,
+                &format!("Бюджет тег {i}"),
+                "бюджет деньги",
+                Mode::Hybrid,
+            );
+            m.update_meta(|meta| {
+                meta.folder = Some("client/project".into());
+                meta.tags = vec!["другое".into()];
+            })
+            .unwrap();
+        }
+        let target = meeting(&lib, "Цель", "бюджет и сроки", Mode::Hybrid);
+        target
+            .update_meta(|meta| {
+                meta.folder = Some("client/project".into());
+                meta.tags = vec!["важное".into()];
+            })
+            .unwrap();
+        let wrong_tag = meeting(&lib, "Бюджет без тега", "бюджет", Mode::Hybrid);
+        wrong_tag
+            .update_meta(|meta| meta.folder = Some("client".into()))
+            .unwrap();
+        let private = meeting(&lib, "Бюджет личный", "бюджет SECRET", Mode::Local);
+        private
+            .update_meta(|meta| {
+                meta.folder = Some("client".into());
+                meta.tags = vec!["важное".into()];
+            })
+            .unwrap();
+        let unassigned = meeting(&lib, "Без папки", "бюджет", Mode::Hybrid);
+        let mut fake = Fake {
+            local: true,
+            calls: 0,
+        };
+        lib.reindex_semantic(&mut fake, false, &mut |_| {}).unwrap();
+        let vector: Vec<u8> = [0.6f32, 0.8].iter().flat_map(|v| v.to_le_bytes()).collect();
+        lib.open_index()
+            .unwrap()
+            .execute(
+                "UPDATE semantic_chunks SET vector=?1 WHERE path=?2",
+                params![vector, target.path().to_str().unwrap()],
+            )
+            .unwrap();
+        for mode in [
+            SearchMode::Keyword,
+            SearchMode::Semantic,
+            SearchMode::Hybrid,
+        ] {
+            let unfiltered = lib
+                .search_with("бюджет", 100, mode, false, Some(&mut fake))
+                .unwrap();
+            assert!(
+                unfiltered
+                    .iter()
+                    .all(|hit| hit.meeting_id != target.read_meta().unwrap().id)
+            );
+        }
+        let filter = crate::SearchFilter {
+            folder: Some("client".into()),
+            tag: Some("важное".into()),
+            exclude_local: true,
+        };
+        for mode in [
+            SearchMode::Keyword,
+            SearchMode::Semantic,
+            SearchMode::Hybrid,
+        ] {
+            let hits = lib
+                .search_filtered("бюджет", 1, mode, &filter, Some(&mut fake))
+                .unwrap();
+            assert_eq!(hits.len(), 1, "{mode:?}");
+            assert_eq!(
+                hits[0].meeting_id,
+                target.read_meta().unwrap().id,
+                "{mode:?}"
+            );
+            let fallback = lib
+                .search_filtered("бюджет", 1, mode, &filter, None)
+                .unwrap();
+            assert_eq!(fallback[0].meeting_id, target.read_meta().unwrap().id);
+            let hits = lib
+                .search_filtered(
+                    "бюджет",
+                    1,
+                    mode,
+                    &crate::SearchFilter {
+                        folder: Some(String::new()),
+                        ..Default::default()
+                    },
+                    Some(&mut fake),
+                )
+                .unwrap();
+            assert_eq!(hits[0].meeting_id, unassigned.read_meta().unwrap().id);
+            let hits = lib
+                .search_filtered(
+                    "бюджет",
+                    1,
+                    mode,
+                    &crate::SearchFilter {
+                        folder: Some("missing".into()),
+                        ..Default::default()
+                    },
+                    Some(&mut fake),
+                )
+                .unwrap();
+            assert!(hits.is_empty());
+        }
+        // Metadata changes must apply even without synchronizing the index.
+        target
+            .update_meta(|meta| meta.folder = Some("other".into()))
+            .unwrap();
+        assert!(
+            lib.retrieve_filtered("бюджет", 1, &filter)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            lib.search_filtered("бюджет", 1, SearchMode::Hybrid, &filter, Some(&mut fake))
+                .unwrap()
+                .is_empty()
+        );
+        target
+            .update_meta(|meta| {
+                meta.folder = Some("client/project".into());
+                meta.tags.clear();
+            })
+            .unwrap();
+        assert!(
+            lib.retrieve_filtered("бюджет", 1, &filter)
+                .unwrap()
+                .is_empty()
+        );
+    }
+    #[test]
+    fn sharing_rebuilds_semantics_in_machine_state_without_copying_vectors() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::open(dir.path()).unwrap();
+        meeting(&lib, "План", "деньги", Mode::Local);
+        let mut fake = Fake {
+            local: true,
+            calls: 0,
+        };
+        lib.reindex_semantic(&mut fake, false, &mut |_| {}).unwrap();
+        let old_index = lib.index_path();
+        assert!(lib.semantic_ready(fake.model_id()).unwrap());
+        lib.set_shared(true).unwrap();
+        assert_eq!(
+            lib.index_path(),
+            lib.private_state_dir().join("index.sqlite")
+        );
+        assert!(!lib.index_path().starts_with(lib.root()));
+        assert!(!lib.semantic_ready(fake.model_id()).unwrap());
+        let old_bytes = std::fs::read(&old_index).unwrap();
+        lib.reindex_semantic(&mut fake, false, &mut |_| {}).unwrap();
+        assert_eq!(fake.calls, 2);
+        assert_eq!(std::fs::read(&old_index).unwrap(), old_bytes);
+        assert!(lib.semantic_ready(fake.model_id()).unwrap());
+        let reopened = Library::open(dir.path()).unwrap();
+        assert_eq!(reopened.index_path(), lib.index_path());
+        reopened
+            .reindex_semantic(&mut fake, false, &mut |_| {})
+            .unwrap();
+        assert_eq!(fake.calls, 2); // Same machine reuses its shared-mode cache.
+        lib.set_shared(false).unwrap();
+        lib.set_shared(true).unwrap();
+        assert!(!lib.semantic_ready(fake.model_id()).unwrap());
+        lib.reindex_semantic(&mut fake, false, &mut |_| {}).unwrap();
+        assert_eq!(fake.calls, 3); // A mode change always starts a clean rebuild.
+        let connection = lib.open_index().unwrap();
+        for table in ["semantic_sources", "semantic_chunks"] {
+            let count: i64 = connection
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 1);
+        }
+        let fresh_dir = tempfile::tempdir().unwrap();
+        let fresh = Library::open(fresh_dir.path()).unwrap();
+        fresh.set_shared(true).unwrap();
+        meeting(&fresh, "Общий план", "деньги", Mode::Hybrid);
+        let mut remote = Fake {
+            local: false,
+            calls: 0,
+        };
+        fresh
+            .reindex_semantic(&mut remote, false, &mut |_| {})
+            .unwrap();
+        assert!(fresh.semantic_ready(remote.model_id()).unwrap());
+        assert!(!fresh.root().join(".notetaker/index.sqlite").exists());
+    }
+    #[test]
     fn remote_semantic_keeps_local_keyword_matches_and_rrf_deduplicates() {
         let dir = tempfile::tempdir().unwrap();
         let lib = Library::open(dir.path()).unwrap();
@@ -646,7 +872,9 @@ mod tests {
         drop(connection);
         for _ in 0..3 {
             let start = std::time::Instant::now();
-            let hits = lib.semantic_hits(&query, "bench", false).unwrap();
+            let hits = lib
+                .semantic_hits(&query, "bench", &crate::SearchFilter::default())
+                .unwrap();
             assert_eq!(hits.len(), 1);
             assert_eq!(hits[0].chunks.len(), 3);
             eprintln!(

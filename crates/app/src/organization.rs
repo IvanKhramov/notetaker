@@ -44,7 +44,6 @@ pub struct Panel {
     snapshot: Option<Snapshot>,
     receiver: Option<Receiver<Result<Snapshot, String>>>,
     checked: Option<Instant>,
-    pub tag: Option<String>,
     selected: BTreeSet<PathBuf>,
     settings_open: bool,
     folder_name: String,
@@ -92,6 +91,7 @@ impl Panel {
                 ..Default::default()
             };
             state.folder_filter = None;
+            state.tag_filter = None;
             state.record_mode_edited = false;
         }
         if let Some(result) = self
@@ -110,6 +110,15 @@ impl Panel {
             self.checked = Some(Instant::now());
             match result {
                 Ok(snapshot) => {
+                    if self
+                        .snapshot
+                        .as_ref()
+                        .is_some_and(|s| s.shared != snapshot.shared)
+                    {
+                        state.semantic_ready = false;
+                        state.semantic_progress = None;
+                        state.semantic_note = None;
+                    }
                     if let Some(name) = self.pending_folder_name.take() {
                         self.folder_name = name.clone();
                         self.edit_name = name;
@@ -162,7 +171,10 @@ impl Panel {
     }
     pub fn visible(&self, meta: &MeetingMeta, state: &AppState) -> bool {
         matches_folder(meta, state.folder_filter.as_deref())
-            && self.tag.as_ref().is_none_or(|tag| meta.tags.contains(tag))
+            && state
+                .tag_filter
+                .as_ref()
+                .is_none_or(|tag| meta.tags.contains(tag))
     }
     pub fn task_visible(&self, path: &PathBuf, state: &AppState) -> bool {
         self.snapshot
@@ -172,6 +184,7 @@ impl Panel {
     }
     pub fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
         let previous_filter = state.folder_filter.clone();
+        let previous_tag = state.tag_filter.clone();
         let mut destination = None;
         let mut edit_folder = None;
         egui::CollapsingHeader::new("Папки и теги")
@@ -243,12 +256,12 @@ impl Panel {
                         for tag in tags {
                             if ui
                                 .selectable_label(
-                                    self.tag.as_ref() == Some(&tag),
+                                    state.tag_filter.as_ref() == Some(&tag),
                                     format!("#{tag}"),
                                 )
                                 .clicked()
                             {
-                                self.tag = if self.tag.as_ref() == Some(&tag) {
+                                state.tag_filter = if state.tag_filter.as_ref() == Some(&tag) {
                                     None
                                 } else {
                                     Some(tag)
@@ -291,6 +304,9 @@ impl Panel {
                 .and_then(|s| s.mode)
                 .unwrap_or(state.settings.mode);
             state.record_mode_edited = false;
+        }
+        if state.folder_filter != previous_filter || state.tag_filter != previous_tag {
+            state.refresh_results();
         }
         if let Some(name) = edit_folder {
             self.edit_folder(&name);
@@ -443,7 +459,8 @@ impl Panel {
             ctx.request_repaint();
         });
     }
-    fn folder_settings(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+    pub fn shared_step(&mut self, ui: &mut egui::Ui, enabled: bool) {
+        ui.strong("Общая библиотека (необязательно)");
         let mut shared = self.snapshot.as_ref().is_some_and(|s| s.shared);
         if likely_synced(&self.root) && !shared {
             ui.colored_label(
@@ -453,12 +470,12 @@ impl Panel {
         }
         if ui
             .add_enabled(
-                self.receiver.is_none(),
+                enabled && self.receiver.is_none() && self.snapshot.is_some(),
                 egui::Checkbox::new(&mut shared, "Общая (синхронизируется)"),
             )
             .changed()
         {
-            self.launch(ctx, move |l| {
+            self.launch(ui.ctx(), move |l| {
                 l.set_shared(shared)?;
                 Ok(())
             });
@@ -466,6 +483,9 @@ impl Panel {
         ui.small(
             "Индекс пересоздаётся локально. Голоса всегда хранятся только на этом компьютере.",
         );
+    }
+    fn folder_settings(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, can_share: bool) {
+        self.shared_step(ui, can_share);
         ui.separator();
         if self.receiver.is_some() || self.destinations_rx.is_some() {
             ui.spinner();
@@ -673,12 +693,12 @@ impl Panel {
                 ui.small(&self.message);
             });
     }
-    pub fn windows(&mut self, ctx: &egui::Context) {
+    pub fn windows(&mut self, ctx: &egui::Context, can_share: bool) {
         let mut settings_open = self.settings_open;
         egui::Window::new("Папки и общая библиотека")
             .open(&mut settings_open)
             .default_width(620.0)
-            .show(ctx, |ui| self.folder_settings(ctx, ui));
+            .show(ctx, |ui| self.folder_settings(ctx, ui, can_share));
         self.settings_open = settings_open;
         if let Some(path) = self.tags_path.clone() {
             let mut open = true;

@@ -1459,6 +1459,7 @@ impl NotetakerApp {
                 ui.checkbox(&mut self.state.settings_draft.mcp_exclude_local, "MCP: не отдавать Local-встречи");
                 ui.separator();
                 crate::quickstart::semantic_step(ui,&mut self.state);
+                self.organization.shared_step(ui, !self.state.semantic_running && self.state.can_save_settings());
                 ui.collapsing("Удалённый поиск по смыслу (только Hybrid)",|ui| {
                     ui.small("Используется только без локальной модели. Local-встречи остаются в поиске по словам.");
                     let llm=&mut self.state.llm_draft;
@@ -1839,7 +1840,10 @@ impl eframe::App for NotetakerApp {
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        self.organization.windows(&ctx);
+        self.organization.windows(
+            &ctx,
+            !self.state.semantic_running && self.state.can_save_settings(),
+        );
         self.trackers.poll(&ctx, &mut self.state);
         self.maintenance.dialogs(
             &ctx,
@@ -1914,7 +1918,11 @@ impl eframe::App for NotetakerApp {
             && !self.state.recording.busy()
             && !self.state.unsaved();
         if self.state.chat.open {
-            match self.state.chat.show(&ctx, can_ask) {
+            match self
+                .state
+                .chat
+                .show(&ctx, can_ask, self.state.folder_filter.as_deref())
+            {
                 Some(crate::chat::Action::Ask) => self.state.ask(),
                 Some(crate::chat::Action::Open(meeting, anchor)) => {
                     self.people.close();
@@ -1935,10 +1943,12 @@ impl eframe::App for NotetakerApp {
         }
         self.indicator(&ctx);
         self.call_notification(&ctx);
-        if self
-            .quickstart
-            .show(&ctx, &mut self.state, &mut self.maintenance)
-        {
+        if self.quickstart.show(
+            &ctx,
+            &mut self.state,
+            &mut self.maintenance,
+            &mut self.organization,
+        ) {
             self.show_settings = true;
         }
     }
