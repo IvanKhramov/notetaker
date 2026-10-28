@@ -13,13 +13,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use objc2::{AnyThread, runtime::AnyObject};
 use objc2_av_foundation::{AVAuthorizationStatus, AVCaptureDevice, AVMediaTypeAudio};
 use objc2_core_audio::*;
 use objc2_core_audio_types::*;
 use objc2_core_foundation::{CFDictionary, CFRetained, CFString};
 use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString, NSUUID};
+use rtrb::{Producer, RingBuffer};
 
 use crate::{
     AudioFrame, AudioSource, CaptureEvent, CaptureMessage, Channel, DeviceInfo, FRAME_SAMPLES,
@@ -69,8 +70,8 @@ fn property<T: Copy>(object: u32, selector: u32, scope: u32) -> Result<T> {
     // Only plain HAL scalars, CF pointers and ASBD are read here.
     Ok(unsafe { value.assume_init() })
 }
-fn objects(object: u32, selector: u32) -> Result<Vec<u32>> {
-    let address = address(selector, GLOBAL);
+fn objects(object: u32, selector: u32, scope: u32) -> Result<Vec<u32>> {
+    let address = address(selector, scope);
     let mut size = 0;
     unsafe {
         status(
@@ -124,16 +125,51 @@ fn default_device(channel: Channel) -> Result<u32> {
     Ok(device)
 }
 
-/// Device activity is a hint. Process input activity excludes our own capture.
-pub fn microphone_processes() -> Result<Vec<u32>> {
-    let device = default_device(Channel::Mic)?;
-    if property::<u32>(device, kAudioDevicePropertyDeviceIsRunningSomewhere, GLOBAL)? == 0 {
-        return Ok(vec![]);
+fn stream_formats(device: u32, scope: u32) -> Result<Vec<AudioStreamBasicDescription>> {
+    objects(device, kAudioDevicePropertyStreams, scope)?
+        .into_iter()
+        .map(|stream| property(stream, kAudioStreamPropertyVirtualFormat, GLOBAL))
+        .collect()
+}
+
+fn input_rate(formats: &[AudioStreamBasicDescription]) -> Result<u32> {
+    let first = formats.first().context("Нет входных аудиопотоков")?;
+    for (index, format) in formats.iter().enumerate() {
+        let width = if format.mFormatFlags & kAudioFormatFlagIsNonInterleaved != 0 {
+            1
+        } else {
+            format.mChannelsPerFrame
+        };
+        ensure!(
+            format.mFormatID == kAudioFormatLinearPCM
+                && format.mFormatFlags & kAudioFormatFlagIsFloat != 0
+                && format.mBitsPerChannel == 32
+                && format.mFormatFlags & kAudioFormatFlagIsBigEndian == 0
+                && format.mChannelsPerFrame > 0
+                && format.mBytesPerFrame == width * size_of::<f32>() as u32
+                && format.mSampleRate.is_finite()
+                && format.mSampleRate >= 1.0
+                && format.mSampleRate <= f64::from(u32::MAX)
+                && format.mSampleRate.fract() == 0.0,
+            "Входной поток {index}: неподдерживаемый формат {format:?}; нужен 32-bit float PCM без padding с целой частотой"
+        );
+        ensure!(
+            format.mSampleRate == first.mSampleRate,
+            "Входной поток {index}: частота {} отличается от {}; потоки с разными частотами не поддерживаются",
+            format.mSampleRate,
+            first.mSampleRate
+        );
     }
+    Ok(first.mSampleRate as u32)
+}
+
+/// Process input activity covers all devices and excludes our own capture.
+pub fn microphone_processes() -> Result<Vec<u32>> {
     let mut pids = Vec::new();
     for process in objects(
         kAudioObjectSystemObject as u32,
         kAudioHardwarePropertyProcessObjectList,
+        GLOBAL,
     )? {
         if property::<u32>(process, kAudioProcessPropertyPID, GLOBAL).ok()
             != Some(std::process::id())
@@ -165,13 +201,14 @@ pub fn inventory() -> Result<Inventory> {
     for id in objects(
         kAudioObjectSystemObject as u32,
         kAudioHardwarePropertyDevices,
+        GLOBAL,
     )? {
         for (channel, scope) in [
             (Channel::Mic, INPUT),
             (Channel::System, kAudioObjectPropertyScopeOutput),
         ] {
-            if !property::<AudioStreamBasicDescription>(id, kAudioDevicePropertyStreamFormat, scope)
-                .is_ok_and(|f| f.mChannelsPerFrame > 0)
+            if !stream_formats(id, scope)
+                .is_ok_and(|formats| formats.iter().any(|f| f.mChannelsPerFrame > 0))
             {
                 continue;
             }
@@ -292,9 +329,8 @@ struct Packet {
     host: u64,
 }
 struct Callback {
-    sender: SyncSender<Packet>,
+    producer: Producer<Packet>,
     failed: Arc<AtomicBool>,
-    channels: usize,
 }
 unsafe extern "C-unwind" fn input(
     _: u32,
@@ -306,34 +342,32 @@ unsafe extern "C-unwind" fn input(
     context: *mut c_void,
 ) -> i32 {
     // SAFETY: Stream owns Callback until after AudioDeviceStop/DestroyIOProcID.
-    // HAL owns the variable-length buffer list and all its planes for this call.
+    // HAL serializes this IOProc and owns the buffer list and its planes.
+    // Only this callback accesses the producer until the IOProc is destroyed.
     unsafe {
-        let state = &*context.cast::<Callback>();
+        let state = &mut *context.cast::<Callback>();
         let list = data.as_ref();
         let buffers =
             std::slice::from_raw_parts(list.mBuffers.as_ptr(), list.mNumberBuffers as usize);
-        if buffers.is_empty() {
+        // HAL can leave unused streams null. Mix only buffers with input data.
+        let active = || {
+            buffers
+                .iter()
+                .filter(|b| !b.mData.is_null() && b.mDataByteSize != 0)
+        };
+        let Some(first) = active().next() else {
             return 0;
-        }
-        let channels: usize = buffers.iter().map(|b| b.mNumberChannels as usize).sum();
-        if channels != state.channels {
+        };
+        if active().any(|b| b.mNumberChannels == 0) {
             state.failed.store(true, Ordering::Relaxed);
             return 0;
         }
-        if channels == 0
-            || buffers
-                .iter()
-                .any(|b| b.mNumberChannels == 0 || b.mData.is_null())
-        {
-            return 0;
-        }
-        let frames = buffers[0].mDataByteSize as usize
-            / (size_of::<f32>() * buffers[0].mNumberChannels as usize);
-        if frames == 0 {
-            return 0;
-        }
-        if frames * channels > MAX_SAMPLES
-            || buffers.iter().any(|b| {
+        let channels: usize = active().map(|b| b.mNumberChannels as usize).sum();
+        let frames =
+            first.mDataByteSize as usize / (size_of::<f32>() * first.mNumberChannels as usize);
+        if frames == 0
+            || frames > MAX_SAMPLES
+            || active().any(|b| {
                 b.mDataByteSize as usize != frames * b.mNumberChannels as usize * size_of::<f32>()
             })
         {
@@ -342,7 +376,7 @@ unsafe extern "C-unwind" fn input(
         }
         let mut packet = Packet {
             samples: [0.0; MAX_SAMPLES],
-            count: frames * channels,
+            count: frames,
             host: if time
                 .as_ref()
                 .mFlags
@@ -353,17 +387,18 @@ unsafe extern "C-unwind" fn input(
                 0
             },
         };
-        let mut offset = 0;
-        for buffer in buffers {
+        for buffer in active() {
             let width = buffer.mNumberChannels as usize;
             let samples = std::slice::from_raw_parts(buffer.mData.cast::<f32>(), frames * width);
-            for frame in 0..frames {
-                packet.samples[frame * channels + offset..frame * channels + offset + width]
-                    .copy_from_slice(&samples[frame * width..frame * width + width]);
+            for (mono, frame) in packet.samples[..frames]
+                .iter_mut()
+                .zip(samples.chunks_exact(width))
+            {
+                *mono += frame.iter().sum::<f32>() / channels as f32;
             }
-            offset += width;
         }
-        if state.sender.try_send(packet).is_err() {
+        // rtrb only moves into preallocated storage and updates atomic indices.
+        if state.producer.push(packet).is_err() {
             state.failed.store(true, Ordering::Relaxed);
         }
     }
@@ -378,17 +413,13 @@ struct Stream {
     callback: Box<Callback>,
 }
 impl Stream {
-    fn new(device: u32, sender: SyncSender<Packet>, failed: Arc<AtomicBool>) -> Self {
+    fn new(device: u32, producer: Producer<Packet>, failed: Arc<AtomicBool>) -> Self {
         Self {
             device,
             tap: 0,
             aggregate: false,
             proc: None,
-            callback: Box::new(Callback {
-                sender,
-                failed,
-                channels: 0,
-            }),
+            callback: Box::new(Callback { producer, failed }),
         }
     }
     fn tap(&mut self) -> Result<AudioStreamBasicDescription> {
@@ -396,6 +427,7 @@ impl Stream {
             let processes = objects(
                 kAudioObjectSystemObject as u32,
                 kAudioHardwarePropertyProcessObjectList,
+                GLOBAL,
             )?;
             let own = processes
                 .into_iter()
@@ -531,25 +563,17 @@ fn capture(
     } else {
         default
     };
-    let (tx, rx) = mpsc::sync_channel(64);
+    let (tx, mut rx) = RingBuffer::new(64);
     let failed = Arc::new(AtomicBool::new(false));
     let mut stream = Stream::new(device, tx, Arc::clone(&failed));
-    let format: AudioStreamBasicDescription = if channel == Channel::System {
-        stream.tap()?
+    let formats = if channel == Channel::System {
+        vec![stream.tap()?]
     } else {
-        property(device, kAudioDevicePropertyStreamFormat, INPUT)?
+        stream_formats(device, INPUT)?
     };
-    ensure!(
-        format.mFormatID == kAudioFormatLinearPCM
-            && format.mFormatFlags & kAudioFormatFlagIsFloat != 0
-            && format.mBitsPerChannel == 32
-            && format.mFormatFlags & kAudioFormatFlagIsBigEndian == 0,
-        "Устройство должно предоставлять 32-bit float PCM"
-    );
-    let rate = format.mSampleRate as u32;
-    let channels = format.mChannelsPerFrame as usize;
-    stream.callback.channels = channels;
-    let mut normalizer = Normalizer::new(rate, channels)?;
+    let rate = input_rate(&formats)?;
+    // The callback mixes every active buffer to mono before queueing.
+    let mut normalizer = Normalizer::new(rate, 1)?;
     let anchor_host = unsafe { AudioConvertHostTimeToNanos(AudioGetCurrentHostTime()) };
     let anchor_at = options.origin.elapsed();
     stream.start()?;
@@ -565,15 +589,10 @@ fn capture(
             !failed.load(Ordering::Relaxed),
             "Потеря аудиопакетов или неподдерживаемый размер буфера"
         );
-        match rx.recv_timeout(Duration::from_millis(50)) {
+        match rx.pop() {
             Ok(packet) => {
                 received = Instant::now();
-                ensure!(
-                    packet.count.is_multiple_of(channels),
-                    "Изменился формат аудиопотока"
-                );
-                let length =
-                    Duration::from_secs_f64((packet.count / channels) as f64 / f64::from(rate));
+                let length = Duration::from_secs_f64(packet.count as f64 / f64::from(rate));
                 let at = if packet.host != 0 {
                     let host = unsafe { AudioConvertHostTimeToNanos(packet.host) };
                     if host >= anchor_host {
@@ -601,7 +620,7 @@ fn capture(
                         stop,
                         CaptureMessage::Event(CaptureEvent::Discontinuity { channel, at }),
                     );
-                    normalizer = Normalizer::new(rate, channels)?;
+                    normalizer = Normalizer::new(rate, 1)?;
                     pending.clear();
                     start = None;
                     produced = 0;
@@ -622,10 +641,9 @@ fn capture(
                     }
                 }
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                bail!("Аудиопоток завершился. {PERMISSION}")
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            // Do not wake the consumer from the real-time callback: waking a
+            // channel or parked thread can take a lock in the OS/runtime.
+            Err(rtrb::PopError::Empty) => std::thread::park_timeout(Duration::from_millis(5)),
         }
         ensure!(
             received.elapsed() < Duration::from_secs(15),
@@ -640,12 +658,12 @@ fn capture(
                 property::<u32>(stream.device, kAudioDevicePropertyDeviceIsAlive, GLOBAL)? != 0,
                 "Устройство отключено"
             );
-            let current: AudioStreamBasicDescription = if channel == Channel::System {
-                property(stream.tap, kAudioTapPropertyFormat, GLOBAL)?
+            let current = if channel == Channel::System {
+                vec![property(stream.tap, kAudioTapPropertyFormat, GLOBAL)?]
             } else {
-                property(device, kAudioDevicePropertyStreamFormat, INPUT)?
+                stream_formats(device, INPUT)?
             };
-            ensure!(current == format, "Изменился формат устройства");
+            ensure!(current == formats, "Изменился формат устройства");
             if channel == Channel::Mic {
                 unsafe {
                     ensure!(
@@ -682,13 +700,13 @@ mod tests {
     use super::*;
 
     #[repr(C)]
-    struct Planes {
+    struct Planes<const N: usize> {
         count: u32,
-        buffers: [AudioBuffer; 2],
+        buffers: [AudioBuffer; N],
     }
 
     #[test]
-    fn callback_interleaves_planes_and_reports_queue_overflow() {
+    fn callback_mixes_planes_and_reports_ring_overflow() {
         let left = [0.1_f32, 0.2];
         let right = [0.3_f32, 0.4];
         let planes = Planes {
@@ -699,12 +717,11 @@ mod tests {
                 mData: data.cast_mut().cast(),
             }),
         };
-        let (sender, receiver) = mpsc::sync_channel(1);
+        let (producer, mut consumer) = RingBuffer::new(1);
         let failed = Arc::new(AtomicBool::new(false));
         let mut callback = Callback {
-            sender,
+            producer,
             failed: Arc::clone(&failed),
-            channels: 2,
         };
         // AudioTimeStamp contains only numeric fields; all-zero means no flags.
         let mut time: AudioTimeStamp = unsafe { std::mem::zeroed() };
@@ -723,8 +740,8 @@ mod tests {
                 context,
             );
         }
-        let packet = receiver.try_recv().unwrap();
-        assert_eq!(&packet.samples[..packet.count], &[0.1, 0.3, 0.2, 0.4]);
+        let packet = consumer.pop().unwrap();
+        assert_eq!(&packet.samples[..packet.count], &[0.2, 0.3]);
         assert_eq!(packet.host, 123);
         assert!(!failed.load(Ordering::Relaxed));
         for _ in 0..2 {
@@ -741,5 +758,118 @@ mod tests {
             }
         }
         assert!(failed.load(Ordering::Relaxed));
+    }
+
+    fn run_callback<const N: usize>(buffers: [AudioBuffer; N]) -> (Option<Packet>, bool) {
+        let planes = Planes {
+            count: N as u32,
+            buffers,
+        };
+        let (producer, mut consumer) = RingBuffer::new(1);
+        let failed = Arc::new(AtomicBool::new(false));
+        let mut callback = Callback {
+            producer,
+            failed: Arc::clone(&failed),
+        };
+        // SAFETY: a zero timestamp has no valid fields, which input handles.
+        let time: AudioTimeStamp = unsafe { std::mem::zeroed() };
+        let data = NonNull::from(&planes).cast::<AudioBufferList>();
+        unsafe {
+            input(
+                0,
+                NonNull::from(&time),
+                data,
+                NonNull::from(&time),
+                data,
+                NonNull::from(&time),
+                ptr::from_mut(&mut callback).cast(),
+            );
+        }
+        (consumer.pop().ok(), failed.load(Ordering::Relaxed))
+    }
+
+    fn buffer(samples: &[f32], channels: u32) -> AudioBuffer {
+        AudioBuffer {
+            mNumberChannels: channels,
+            mDataByteSize: std::mem::size_of_val(samples) as u32,
+            mData: samples.as_ptr().cast_mut().cast(),
+        }
+    }
+
+    #[test]
+    fn callback_mixes_multiple_streams_with_different_channel_counts() {
+        let stereo = [0.1, 0.2, 0.3, 0.4];
+        let mono = [0.6, 0.8];
+        let (packet, failed) = run_callback([buffer(&stereo, 2), buffer(&mono, 1)]);
+        assert!(!failed);
+        let packet = packet.unwrap();
+        assert_eq!(packet.count, 2);
+        for (actual, expected) in packet.samples[..2].iter().zip([0.3, 0.5]) {
+            assert!((actual - expected).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn callback_skips_unused_streams() {
+        let samples = [0.2, 0.4];
+        let unused = AudioBuffer {
+            mNumberChannels: 2,
+            mDataByteSize: 16,
+            mData: ptr::null_mut(),
+        };
+        let (packet, failed) = run_callback([unused, buffer(&samples, 1)]);
+        assert!(!failed);
+        let packet = packet.unwrap();
+        assert_eq!(&packet.samples[..packet.count], &samples);
+    }
+
+    #[test]
+    fn callback_rejects_mismatched_or_invalid_buffer_sizes() {
+        let samples = [0.2, 0.4];
+        for buffers in [
+            [buffer(&samples, 1), buffer(&samples[..1], 1)],
+            [buffer(&samples, 0), buffer(&samples, 1)],
+            [buffer(&samples[..1], 2), buffer(&samples, 1)],
+        ] {
+            let (packet, failed) = run_callback(buffers);
+            assert!(packet.is_none());
+            assert!(failed);
+        }
+    }
+
+    fn float_format(channels: u32) -> AudioStreamBasicDescription {
+        AudioStreamBasicDescription {
+            mSampleRate: 48_000.0,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: 4 * channels,
+            mFramesPerPacket: 1,
+            mBytesPerFrame: 4 * channels,
+            mChannelsPerFrame: channels,
+            mBitsPerChannel: 32,
+            mReserved: 0,
+        }
+    }
+
+    #[test]
+    fn validates_every_stream_format_and_a_common_sample_rate() {
+        let stereo = float_format(2);
+        let mono = float_format(1);
+        assert_eq!(input_rate(&[stereo, mono]).unwrap(), 48_000);
+        let mut planar = stereo;
+        planar.mFormatFlags |= kAudioFormatFlagIsNonInterleaved;
+        planar.mBytesPerFrame = 4;
+        planar.mBytesPerPacket = 4;
+        assert_eq!(input_rate(&[planar, mono]).unwrap(), 48_000);
+        assert!(input_rate(&[]).is_err());
+        let mut unsupported = mono;
+        unsupported.mFormatFlags = kAudioFormatFlagIsSignedInteger;
+        assert!(input_rate(&[stereo, unsupported]).is_err());
+        let mut other_rate = mono;
+        other_rate.mSampleRate = 44_100.0;
+        assert!(input_rate(&[stereo, other_rate]).is_err());
+        let mut padded = stereo;
+        padded.mBytesPerFrame = 12;
+        assert!(input_rate(&[padded]).is_err());
     }
 }
