@@ -263,6 +263,11 @@ impl<'a> Dialog<'a> {
         self.window = self.window.resizable(resizable);
         self
     }
+    #[cfg(any(windows, target_os = "macos"))]
+    pub fn anchor(mut self, align: egui::Align2, offset: impl Into<egui::Vec2>) -> Self {
+        self.window = self.window.anchor(align, offset);
+        self
+    }
     /// Returns true when the header close button was pressed.
     pub fn show(self, ctx: &egui::Context, contents: impl FnOnce(&mut egui::Ui)) -> bool {
         if self.open.as_deref() == Some(&false) {
