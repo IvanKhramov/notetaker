@@ -349,9 +349,31 @@ impl Panel {
             );
         }
         ui.add_enabled_ui(enabled, |ui| {
-            ui.horizontal_wrapped(|ui| {
+            ui.scope(|ui| {
+                ui.spacing_mut().interact_size.y = 26.0;
+                ui.spacing_mut().button_padding = egui::vec2(9.0, 4.0);
+                ui.spacing_mut().icon_width = 10.0;
+                ui.visuals_mut().widgets.inactive.bg_stroke = egui::Stroke::NONE;
+                ui.visuals_mut().widgets.inactive.corner_radius = 12.into();
                 egui::ComboBox::from_id_salt("meeting_folder")
-                    .selected_text(meta.folder.as_deref().unwrap_or("Без папки"))
+                    .selected_text(
+                        egui::RichText::new(meta.folder.as_deref().unwrap_or("Без папки"))
+                            .size(11.5)
+                            .color(crate::theme::Palette::of(ui).muted),
+                    )
+                    .width(0.0)
+                    .height(220.0)
+                    .icon(|ui, rect, _visuals, _open| {
+                        let c = rect.center();
+                        ui.painter().line_segment(
+                            [c + egui::vec2(-3.0, -1.5), c + egui::vec2(0.0, 1.5)],
+                            egui::Stroke::new(1.0, crate::theme::Palette::of(ui).muted),
+                        );
+                        ui.painter().line_segment(
+                            [c + egui::vec2(0.0, 1.5), c + egui::vec2(3.0, -1.5)],
+                            egui::Stroke::new(1.0, crate::theme::Palette::of(ui).muted),
+                        );
+                    })
                     .show_ui(ui, |ui| {
                         let names = std::iter::once(String::new())
                             .chain(

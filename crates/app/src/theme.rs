@@ -211,12 +211,18 @@ pub enum ButtonStyle {
     Primary,
     Secondary,
     Ghost,
+    Stop,
 }
 pub fn button(ui: &mut egui::Ui, text: &str, style: ButtonStyle) -> egui::Response {
     ui.add(styled_button(Palette::of(ui), text, style))
 }
 pub fn styled_button(p: Palette, text: &str, style: ButtonStyle) -> egui::Button<'_> {
     let (fill, ink, border) = match style {
+        ButtonStyle::Stop => (
+            Color32::from_rgb(22, 22, 20),
+            Color32::WHITE,
+            Stroke::new(1.0, p.muted.gamma_multiply(0.55)),
+        ),
         ButtonStyle::Primary => (p.text, p.card, Stroke::NONE),
         ButtonStyle::Secondary => (p.soft, p.text, Stroke::new(1.0, p.border)),
         ButtonStyle::Ghost => (Color32::TRANSPARENT, p.muted, Stroke::NONE),
@@ -245,15 +251,22 @@ pub fn card(p: Palette, selected: bool) -> egui::Frame {
         .inner_margin(egui::Margin::symmetric(0, 10))
 }
 
-pub fn chip(ui: &mut egui::Ui, text: &str) {
-    let p = Palette::of(ui);
+pub fn chip_frame(p: Palette) -> egui::Frame {
     egui::Frame::new()
         .fill(p.soft)
-        .corner_radius(20)
+        .stroke(Stroke::NONE)
+        .corner_radius(12)
         .inner_margin(egui::Margin::symmetric(9, 4))
-        .show(ui, |ui| {
-            ui.label(egui::RichText::new(text).size(11.5).color(p.muted));
-        });
+}
+
+pub fn chip(ui: &mut egui::Ui, text: &str) {
+    let p = Palette::of(ui);
+    chip_frame(p).show(ui, |ui| {
+        ui.add_sized(
+            [0.0, 18.0],
+            egui::Label::new(egui::RichText::new(text).size(11.5).color(p.muted)),
+        );
+    });
 }
 pub fn filter_chip(
     ui: &mut egui::Ui,

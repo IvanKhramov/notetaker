@@ -256,12 +256,16 @@ impl NotetakerApp {
                                     .truncate(),
                                 );
                             }
-                            if ui
-                                .add_enabled(
-                                    cfg!(any(windows, target_os = "macos")) && self.can_record(),
-                                    theme::styled_button(p, "Записать", ButtonStyle::Ghost),
-                                )
-                                .clicked()
+                            if cfg!(any(windows, target_os = "macos"))
+                                && self.can_record()
+                                && ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new("Записать").color(p.accent),
+                                        )
+                                        .frame(false),
+                                    )
+                                    .clicked()
                             {
                                 start_event = Some(event.clone());
                             }
@@ -412,6 +416,7 @@ impl NotetakerApp {
                     [(ui.available_width() - space).max(60.0), 32.0],
                     egui::TextEdit::singleline(&mut self.ask_text)
                         .frame(egui::Frame::NONE)
+                        .align(egui::Align2::LEFT_CENTER)
                         .hint_text(
                             if note || (self.chat_page && self.state.chat.scope.is_some()) {
                                 "Спросить про эту встречу…"
@@ -452,7 +457,7 @@ impl NotetakerApp {
                 let stopping =
                     !r.importing && matches!(r.phase, Phase::Starting | Phase::Recording);
                 if stopping {
-                    stop = ui.button("Стоп").clicked();
+                    stop = theme::button(ui, "Стоп", ButtonStyle::Stop).clicked();
                 } else if !r.busy()
                     && ui
                         .add_enabled(
@@ -595,6 +600,9 @@ impl NotetakerApp {
         egui::ScrollArea::vertical()
             .id_salt("all_tasks")
             .show(ui, |ui| {
+                if tasks.is_empty() && !self.state.tasks_busy {
+                    ui.weak("Нет задач по выбранным фильтрам");
+                }
                 let mut previous = None;
                 for task in tasks {
                     let title = group(task);
@@ -647,19 +655,24 @@ impl NotetakerApp {
                                     open = Some(task.clone());
                                 }
                             });
-                            ui.label(
-                                RichText::new(format!(
-                                    "{} · {} · {}:{}",
-                                    task.owner,
-                                    task.due.map_or_else(
-                                        || task.due_text.clone(),
-                                        |date| date.format("%d.%m.%Y").to_string()
-                                    ),
-                                    task.meeting_title,
-                                    task.line
-                                ))
-                                .small()
-                                .color(Palette::of(ui).muted),
+                            let due = task.due.map_or_else(
+                                || task.due_text.clone(),
+                                |date| date.format("%d.%m.%Y").to_string(),
+                            );
+                            let metadata = [
+                                task.owner.as_str(),
+                                due.as_str(),
+                                task.meeting_title.as_str(),
+                            ]
+                            .into_iter()
+                            .filter(|part| !part.is_empty())
+                            .collect::<Vec<_>>()
+                            .join(" · ");
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(metadata).small().color(Palette::of(ui).muted),
+                                )
+                                .wrap(),
                             );
                             if let Some(url) = &task.issue_url {
                                 ui.hyperlink_to("В трекере", url);
@@ -678,6 +691,7 @@ impl NotetakerApp {
                                 send_task = Some(task.clone());
                             }
                         });
+                        ui.separator();
                     });
                 }
                 if self.state.tasks_busy {
@@ -727,7 +741,9 @@ impl NotetakerApp {
                     ButtonStyle::Ghost,
                 ))
                 .ui(ui, |ui| {
-                    if ui.button("Редактировать мои заметки").clicked() {
+                    ui.set_width(280.0);
+                    if theme::nav_row(ui, "Редактировать мои заметки", false).clicked()
+                    {
                         self.state.tab = Tab::Notes;
                         ui.close();
                     }
@@ -742,26 +758,28 @@ impl NotetakerApp {
                         self.enhanced_preview = false;
                         ui.close();
                     }
-                    if ui.button("Читать документ").clicked() {
+                    if theme::nav_row(ui, "Читать документ", false).clicked() {
                         self.state.tab = Tab::Enhanced;
                         self.enhanced_preview = true;
                         ui.close();
                     }
                     ui.separator();
-                    egui::ComboBox::from_id_salt("template")
-                        .selected_text(&document.template)
-                        .show_ui(ui, |ui| {
-                            for name in &self.state.templates {
-                                ui.selectable_value(&mut document.template, name.clone(), name);
-                            }
-                        });
+                    theme::setting_row(ui, "Шаблон", |ui| {
+                        egui::ComboBox::from_id_salt("template")
+                            .selected_text(&document.template)
+                            .show_ui(ui, |ui| {
+                                for name in &self.state.templates {
+                                    ui.selectable_value(&mut document.template, name.clone(), name);
+                                }
+                            });
+                    });
                     enhance = ui
                         .add_enabled(can_enhance, egui::Button::new("Пересоздать конспект"))
                         .clicked();
                     if enhance {
                         ui.close();
                     }
-                    if ui.button("Копировать").clicked() {
+                    if theme::nav_row(ui, "Копировать", false).clicked() {
                         ui.ctx().copy_text(if document.data.enhanced.is_empty() {
                             document.data.notes.clone()
                         } else {
@@ -769,7 +787,7 @@ impl NotetakerApp {
                         });
                         ui.close();
                     }
-                    if ui.button("Показать в папке").clicked() {
+                    if theme::nav_row(ui, "Показать в папке", false).clicked() {
                         export = Some(Command::Reveal(path.clone()));
                         ui.close();
                     }
@@ -778,7 +796,8 @@ impl NotetakerApp {
                             self.people
                                 .header(ui, &document.data.meta, !locked && can_enhance);
                     });
-                    if ui.button("Экспорт конспекта Markdown").clicked() {
+                    if theme::nav_row(ui, "Экспорт конспекта Markdown", false).clicked()
+                    {
                         export = Some(Command::Export {
                             meeting: document.data.meeting.clone(),
                             text: document.data.enhanced.clone(),
@@ -1108,7 +1127,7 @@ impl NotetakerApp {
     }
     fn recording_dialog(&mut self, ctx: &egui::Context) {
         let mut open = self.show_record;
-        theme::window(ctx, "Новая запись").open(&mut open).collapsible(false).show(ctx, |ui| {
+        theme::window(ctx, "Новая запись").open(&mut open).show(ctx, |ui| {
             ui.label("Название"); ui.text_edit_singleline(&mut self.state.title);
             model_selector(ui, "record_model", &mut self.state.record_model);
             self.state.record_mode_edited |= mode_selector(ui, &mut self.state.record_mode);
@@ -1139,9 +1158,9 @@ impl NotetakerApp {
     fn settings_dialog(&mut self, ctx: &egui::Context) {
         let mut open = self.show_settings;
         let mut quickstart = false;
-        theme::window(ctx, "Настройки").collapsible(false).open(&mut open).default_width(640.0).default_height(580.0).resizable(true).show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                if ui.button("Быстрый старт").clicked() { self.quickstart.open = true; quickstart = true; }
+        theme::window(ctx, "Настройки").open(&mut open).default_width(640.0).default_height(580.0).resizable(true).show(ctx, |ui| {
+            ui.scope(|ui| {
+                theme::setting_row(ui, "Быстрый старт", |ui| { if theme::button(ui, "Открыть ›", ButtonStyle::Ghost).clicked() { self.quickstart.open = true; quickstart = true; } });
                 let settings = &mut self.state.settings_draft;
                 theme::setting_row(ui, "Тема", |ui| {
                     egui::ComboBox::from_id_salt("theme").selected_text(settings.theme.label()).show_ui(ui, |ui| {
@@ -1710,7 +1729,7 @@ fn recording_pill(ui: &mut egui::Ui, elapsed: Duration) -> (bool, bool) {
                 theme::waveform(ui);
                 ui.add(egui::Label::new(timestamp(elapsed.as_millis() as u64)).selectable(false));
                 ui.add_space(16.0);
-                stop = ui.button("Стоп").clicked();
+                stop = theme::button(ui, "Стоп", ButtonStyle::Stop).clicked();
             });
         });
     (background.clicked(), stop)
@@ -1776,19 +1795,88 @@ fn enhanced_document(
     viewer: &mut Option<String>,
 ) {
     let p = Palette::of(ui);
-    for (own, text) in document_runs(notes, enhanced) {
-        ui.scope(|ui| {
-            ui.spacing_mut().item_spacing.y = 3.0;
-            ui.style_mut()
-                .text_styles
-                .insert(egui::TextStyle::Heading, theme::semibold(16.0));
+    // Keep adjacent items together even when their source changes. Rendering each
+    // authorship run as Markdown starts a new list and adds a paragraph gap.
+    let runs = document_runs(notes, enhanced);
+    let lines: Vec<_> = runs
+        .iter()
+        .flat_map(|(own, text)| text.lines().map(move |line| (*own, line)))
+        .collect();
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.y = 6.0;
+        let mut index = 0;
+        while index < lines.len() {
+            let (own, line) = lines[index];
             let ink = if own { p.text } else { p.muted };
-            ui.visuals_mut().override_text_color = Some(ink);
-            ui.visuals_mut().widgets.noninteractive.fg_stroke.color = ink;
-            ui.visuals_mut().widgets.active.fg_stroke.color = ink;
-            markdown_preview(ui, cache, &text, path, viewer);
-        });
-    }
+            if line.trim().is_empty() {
+                index += 1;
+                continue;
+            }
+            ui.scope(|ui| {
+                ui.visuals_mut().override_text_color = Some(ink);
+                ui.visuals_mut().widgets.noninteractive.fg_stroke.color = ink;
+                ui.visuals_mut().widgets.active.fg_stroke.color = ink;
+                if let Some((level, title)) = note_heading(line) {
+                    if index > 0 {
+                        ui.add_space(14.0);
+                    }
+                    ui.label(
+                        RichText::new(title)
+                            .font(theme::semibold(if level == 1 { 20.0 } else { 18.0 }))
+                            .color(ink),
+                    );
+                    index += 1;
+                } else if let Some((_, task, body)) = note_item(line)
+                    // Multi-line and nested lists stay with the full Markdown renderer.
+                    && lines.get(index + 1).is_none_or(|(_, next)| !next.starts_with([' ', '\t']))
+                {
+                    ui.horizontal_top(|ui| {
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(14.0, 22.0), egui::Sense::hover());
+                        note_marker(ui.painter(), rect.center(), task, ink);
+                        ui.scope(|ui| {
+                            ui.spacing_mut().item_spacing.y = 0.0;
+                            markdown_preview(ui, cache, body, path, viewer);
+                        });
+                    });
+                    index += 1;
+                } else {
+                    let start = index;
+                    // Preserve tables, fenced code, nested lists, links and images.
+                    let mut fence = None;
+                    loop {
+                        let current = lines[index].1.trim_start();
+                        if current.starts_with("```") || current.starts_with("~~~") {
+                            let marker = &current[..3];
+                            if fence == Some(marker) {
+                                fence = None;
+                            } else if fence.is_none() {
+                                fence = Some(marker);
+                            }
+                        }
+                        index += 1;
+                        if index == lines.len()
+                            || (fence.is_none() && lines[index].1.trim().is_empty())
+                        {
+                            break;
+                        }
+                    }
+                    for run in lines[start..index].chunk_by(|a, b| a.0 == b.0) {
+                        let ink = if run[0].0 { p.text } else { p.muted };
+                        ui.visuals_mut().override_text_color = Some(ink);
+                        ui.visuals_mut().widgets.noninteractive.fg_stroke.color = ink;
+                        ui.visuals_mut().widgets.active.fg_stroke.color = ink;
+                        let text = run
+                            .iter()
+                            .map(|(_, line)| *line)
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        markdown_preview(ui, cache, &text, path, viewer);
+                    }
+                }
+            });
+        }
+    });
 }
 
 fn mode_label(mode: Mode) -> &'static str {
@@ -1961,6 +2049,116 @@ fn markdown_preview(
     }
 }
 
+/// Only recognize ATX headings, not inline hashes or a thematic break.
+fn note_heading(line: &str) -> Option<(usize, &str)> {
+    let level = line.bytes().take_while(|b| *b == b'#').count();
+    (1..=6).contains(&level).then_some(())?;
+    line.get(level..)?
+        .strip_prefix(' ')
+        .map(|title| (level, title))
+}
+
+/// Prefix slices refer to the original source, so text and cursor indices agree.
+fn note_item(line: &str) -> Option<(&str, Option<bool>, &str)> {
+    let body = line
+        .strip_prefix("- ")
+        .or_else(|| line.strip_prefix("* "))
+        .or_else(|| line.strip_prefix("+ "))?;
+    for (marker, checked) in [("[ ] ", false), ("[x] ", true), ("[X] ", true)] {
+        if let Some(body) = body.strip_prefix(marker) {
+            return Some((&line[..2 + marker.len()], Some(checked), body));
+        }
+    }
+    Some((&line[..2], None, body))
+}
+
+fn note_marker(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    task: Option<bool>,
+    ink: egui::Color32,
+) {
+    if let Some(checked) = task {
+        painter.circle_stroke(center, 5.0, egui::Stroke::new(1.0, ink));
+        if checked {
+            painter.line_segment(
+                [
+                    center + egui::vec2(-2.5, 0.0),
+                    center + egui::vec2(-0.5, 2.0),
+                ],
+                egui::Stroke::new(1.0, ink),
+            );
+            painter.line_segment(
+                [
+                    center + egui::vec2(-0.5, 2.0),
+                    center + egui::vec2(3.0, -2.0),
+                ],
+                egui::Stroke::new(1.0, ink),
+            );
+        }
+    } else {
+        painter.circle_filled(center, 2.0, ink);
+    }
+}
+
+fn note_layout(text: &str, p: Palette, width: f32) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = width;
+    let body = egui::TextFormat {
+        font_id: egui::FontId::proportional(14.0),
+        color: p.text,
+        line_height: Some(24.0),
+        ..Default::default()
+    };
+    let mut fenced = false;
+    for line in text.split_inclusive('\n') {
+        if line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~") {
+            fenced = !fenced;
+        }
+        if !fenced && let Some((level, title)) = note_heading(line) {
+            let prefix = &line[..line.len() - title.len()];
+            job.append(
+                prefix,
+                0.0,
+                egui::TextFormat {
+                    font_id: egui::FontId::proportional(7.0),
+                    color: p.muted.gamma_multiply(0.2),
+                    line_height: Some(30.0),
+                    ..Default::default()
+                },
+            );
+            job.append(
+                title,
+                0.0,
+                egui::TextFormat {
+                    font_id: theme::semibold(if level == 1 { 20.0 } else { 18.0 }),
+                    line_height: Some(30.0),
+                    ..body.clone()
+                },
+            );
+        } else if !fenced && let Some((prefix, _, text)) = note_item(line) {
+            // Keep every source character. Decorations are drawn over the reserved
+            // marker span after layout, never substituted into the text buffer.
+            job.append(
+                prefix,
+                0.0,
+                egui::TextFormat {
+                    color: egui::Color32::TRANSPARENT,
+                    ..body.clone()
+                },
+            );
+            job.append(
+                text,
+                if prefix.len() == 2 { 12.0 } else { 0.0 },
+                body.clone(),
+            );
+        } else {
+            job.append(line, 0.0, body.clone());
+        }
+    }
+    job
+}
+
 fn notes_editor(
     ui: &mut egui::Ui,
     document: &mut Document,
@@ -1996,14 +2194,39 @@ fn notes_editor(
                     )));
                 state.store(ui.ctx(), id);
             }
+            let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, width: f32| {
+                ui.fonts_mut(|fonts| {
+                    fonts.layout_job(note_layout(buffer.as_str(), Palette::of(ui), width))
+                })
+            };
             let output = egui::TextEdit::multiline(&mut document.data.notes)
                 .id(id)
                 .hint_text("Пишите важное здесь…")
+                .layouter(&mut layouter)
                 .font(egui::TextStyle::Body)
                 .frame(egui::Frame::NONE)
                 .desired_width(f32::INFINITY)
                 .desired_rows(24)
                 .show(ui);
+            let mut offset = 0;
+            let mut fenced = false;
+            let painter = ui
+                .painter()
+                .with_clip_rect(output.response.rect.intersect(ui.clip_rect()));
+            for line in document.data.notes.split_inclusive('\n') {
+                if line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~") {
+                    fenced = !fenced;
+                }
+                if !fenced && let Some((_, task, _)) = note_item(line) {
+                    let start = output
+                        .galley
+                        .pos_from_cursor(egui::text::CCursor::new(offset));
+                    let center = egui::pos2(start.left() + 7.0, start.center().y)
+                        + output.galley_pos.to_vec2();
+                    note_marker(&painter, center, task, Palette::of(ui).muted);
+                }
+                offset += line.chars().count();
+            }
             if let Some(cursor) = scroll_cursor {
                 output.response.request_focus();
                 ui.scroll_to_rect(
@@ -2357,6 +2580,7 @@ mod tests {
             template: "general".into(),
         };
         let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
         let mut viewer = None;
         let image = std::sync::Arc::new(egui::ColorImage::filled([2, 2], egui::Color32::WHITE));
         for focused in [false, true] {
@@ -2381,6 +2605,66 @@ mod tests {
             output.drop_without_applying_deltas();
         }
         assert_eq!(document.data.notes, "Текст");
+    }
+
+    #[test]
+    fn live_note_layout_preserves_unicode_cursor_and_selection() {
+        use eframe::egui::{
+            self,
+            text::{CCursor, CCursorRange},
+        };
+        let source = "## Решения\n- Кириллица и emoji 🦀 с переносом длинной строки\n* [ ] Анна: проверить GPU\n";
+        for dark in [false, true] {
+            let ctx = egui::Context::default();
+            crate::theme::install(&ctx);
+            let p = crate::theme::Palette::for_dark(dark);
+            let mut text = source.to_owned();
+            let id = egui::Id::unique("styled-note-test");
+            let start = source.find("Кириллица").unwrap();
+            let start = source[..start].chars().count();
+            let end = start + "Кириллица".chars().count();
+            let first = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let job = super::note_layout(source, p, 170.0);
+                assert_eq!(job.text, source);
+                let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+                for index in [start, end, source.chars().count() - 1] {
+                    let rect = galley.pos_from_cursor(CCursor::new(index));
+                    assert_eq!(
+                        galley.cursor_from_pos(rect.center().to_vec2()).index,
+                        index.into()
+                    );
+                }
+                let mut state = egui::TextEdit::load_state(&ctx, id).unwrap_or_default();
+                state.cursor.set_char_range(Some(CCursorRange::two(
+                    CCursor::new(start),
+                    CCursor::new(end),
+                )));
+                state.store(&ctx, id);
+                ui.memory_mut(|memory| memory.request_focus(id));
+            });
+            first.drop_without_applying_deltas();
+            let second = ctx.run_ui(
+                egui::RawInput {
+                    events: vec![egui::Event::Text("Текст".into())],
+                    ..Default::default()
+                },
+                |ui| {
+                    let mut layouter =
+                        |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, width: f32| {
+                            ui.fonts_mut(|fonts| {
+                                fonts.layout_job(super::note_layout(buffer.as_str(), p, width))
+                            })
+                        };
+                    egui::TextEdit::multiline(&mut text)
+                        .id(id)
+                        .desired_width(170.0)
+                        .layouter(&mut layouter)
+                        .show(ui);
+                },
+            );
+            second.drop_without_applying_deltas();
+            assert_eq!(text, source.replacen("Кириллица", "Текст", 1));
+        }
     }
 
     #[test]
