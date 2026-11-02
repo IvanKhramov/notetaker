@@ -723,6 +723,15 @@ impl NotetakerApp {
         let global_allowed = !self.state.unsaved();
         let speaker_busy = self.state.documents.values().any(|d| d.speaker_ui.busy);
         let can_cancel = self.state.generation_cancellable();
+        let tracker_tasks = self
+            .state
+            .tasks
+            .iter()
+            .filter(|task| task.path == path && !task.completed && task.issue_url.is_none())
+            .cloned()
+            .collect::<Vec<_>>();
+        let can_send_tasks = !tracker_tasks.is_empty() && self.trackers.can_prepare(&self.state);
+        let mut send_tasks = false;
         let Some(document) = self.state.documents.get_mut(&path) else {
             ui.spinner();
             return;
@@ -789,6 +798,16 @@ impl NotetakerApp {
                     }
                     if theme::nav_row(ui, "Показать в папке", false).clicked() {
                         export = Some(Command::Reveal(path.clone()));
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(
+                            can_send_tasks,
+                            egui::Button::new("Отправить задачи в трекер…"),
+                        )
+                        .clicked()
+                    {
+                        send_tasks = true;
                         ui.close();
                     }
                     ui.menu_button("Серия встречи", |ui| {
@@ -858,7 +877,9 @@ impl NotetakerApp {
             // Folder assignment keeps its existing atomic save and sync-conflict handling.
             self.organization.meeting(ui, &mut self.state);
         });
-        self.trackers.meeting(ui, &self.state);
+        if send_tasks {
+            self.trackers.prepare(ui.ctx(), &self.state, tracker_tasks);
+        }
         let Some(document) = self.state.documents.get_mut(&path) else {
             return;
         };

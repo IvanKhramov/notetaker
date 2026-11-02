@@ -35,12 +35,14 @@ impl Panel {
             ctx.request_repaint();
         });
     }
+    pub fn can_prepare(&self, state: &AppState) -> bool {
+        self.receiver.is_none()
+            && !state.unsaved()
+            && !state.recording.busy()
+            && state.enhancing.is_none()
+    }
     pub fn prepare(&mut self, ctx: &egui::Context, state: &AppState, tasks: Vec<Task>) {
-        if self.receiver.is_some()
-            || state.unsaved()
-            || state.recording.busy()
-            || state.enhancing.is_some()
-        {
+        if !self.can_prepare(state) {
             return;
         }
         self.open = true;
@@ -69,46 +71,6 @@ impl Panel {
                 "Нет новых открытых задач для отправки"
             );
             Ok(Response::Preview(previews))
-        });
-    }
-    pub fn meeting(&mut self, ui: &mut egui::Ui, state: &AppState) {
-        let Some(path) = state.selected.as_ref() else {
-            return;
-        };
-        let tasks = state
-            .tasks
-            .iter()
-            .filter(|t| &t.path == path)
-            .cloned()
-            .collect::<Vec<_>>();
-        // Refresh runs when a meeting opens, so summary actions use source revisions.
-        if tasks.is_empty() {
-            return;
-        }
-        egui::CollapsingHeader::new("Задачи в трекер").show(ui, |ui| {
-            ui.add_enabled_ui(
-                self.receiver.is_none()
-                    && !state.unsaved()
-                    && !state.recording.busy()
-                    && state.enhancing.is_none(),
-                |ui| {
-                    if ui.button("Отправить все новые задачи встречи").clicked()
-                    {
-                        self.prepare(ui.ctx(), state, tasks.clone());
-                    }
-                    for task in &tasks {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(&task.text);
-                            if let Some(url) = &task.issue_url {
-                                ui.hyperlink_to("В трекере", url);
-                            } else if !task.completed && ui.button("Отправить в трекер").clicked()
-                            {
-                                self.prepare(ui.ctx(), state, vec![task.clone()]);
-                            }
-                        });
-                    }
-                },
-            );
         });
     }
     pub fn poll(&mut self, ctx: &egui::Context, state: &mut AppState) {
