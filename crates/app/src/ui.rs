@@ -1853,6 +1853,16 @@ impl NotetakerApp {
                 .with_active(false),
             |ui, _| {
                 let p = Palette::of(ui);
+                // Undecorated window: let empty space move it. Registered first so
+                // the buttons drawn later stay on top.
+                let background = ui.interact(
+                    ui.max_rect(),
+                    ui.scope_id().with("drag"),
+                    egui::Sense::drag(),
+                );
+                if background.drag_started() {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
                 egui::Frame::new()
                     .fill(p.card)
                     .stroke(egui::Stroke::new(1.0, p.border))
@@ -1861,6 +1871,23 @@ impl NotetakerApp {
                     .show(ui, |ui| {
                         ui.set_width(690.0);
                         ui.horizontal(|ui| {
+                            let (rect, grip) =
+                                ui.allocate_exact_size(egui::vec2(12.0, 28.0), egui::Sense::drag());
+                            for x in [-2.5, 2.5] {
+                                for y in [-6.0, 0.0, 6.0] {
+                                    ui.painter().circle_filled(
+                                        rect.center() + egui::vec2(x, y),
+                                        1.6,
+                                        p.muted,
+                                    );
+                                }
+                            }
+                            let grip = grip
+                                .on_hover_cursor(egui::CursorIcon::Grab)
+                                .on_hover_text("Перетащите, чтобы сдвинуть");
+                            if grip.drag_started() {
+                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                            }
                             theme::recording_dot(ui);
                             ui.label(
                                 RichText::new(timestamp(
@@ -1870,7 +1897,9 @@ impl NotetakerApp {
                             );
                             ui.add_sized(
                                 [145.0, 28.0],
-                                egui::Label::new(RichText::new(title).color(p.muted)).truncate(),
+                                egui::Label::new(RichText::new(title).color(p.muted))
+                                    .truncate()
+                                    .selectable(false),
                             );
                             recap = ui
                                 .add_enabled(
