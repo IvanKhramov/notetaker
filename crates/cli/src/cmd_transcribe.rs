@@ -32,7 +32,7 @@ pub fn run(args: Args) -> Result<()> {
     Ok(())
 }
 
-fn worker_binary() -> Result<PathBuf> {
+pub(crate) fn worker_binary() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("NOTETAKER_ASR_BIN") {
         return Ok(path.into());
     }

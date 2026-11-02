@@ -7,6 +7,7 @@ mod cmd_mcp;
 mod cmd_people;
 mod cmd_probe;
 mod cmd_record;
+mod cmd_rediarize;
 mod cmd_search;
 mod cmd_self_update;
 mod cmd_tasks;
@@ -54,6 +55,8 @@ enum Command {
     Record(cmd_record::Args),
     /// Transcribe a mono WAV using the isolated local ASR worker.
     Transcribe(cmd_transcribe::Args),
+    /// Reassign speakers in an existing meeting from retained system audio.
+    Rediarize(cmd_rediarize::Args),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -73,5 +76,6 @@ fn main() -> anyhow::Result<()> {
         Command::Enhance(args) => cmd_enhance::run(args),
         Command::Record(args) => cmd_record::run(args),
         Command::Transcribe(args) => cmd_transcribe::run(args),
+        Command::Rediarize(args) => cmd_rediarize::run(args),
     }
 }
