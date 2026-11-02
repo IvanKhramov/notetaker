@@ -1,7 +1,7 @@
-use std::{collections::BTreeMap, path::Path, sync::mpsc::Sender};
+use std::{collections::BTreeMap, path::Path, sync::mpsc::Sender, time::Duration};
 
 use anyhow::{Context, Result};
-use notetaker_asr_proto::{Diarization, TimeRange};
+use notetaker_asr_proto::{AsrClient, Diarization, TimeRange};
 use notetaker_core::{Channel, Library, Meeting, SELF_THRESHOLD, Transcript};
 
 use crate::{Asr, PipelineEvent};
@@ -42,6 +42,52 @@ fn assign(transcript: &mut Transcript, result: &Diarization) {
         {
             segment.speaker.0 = speaker.into();
         }
+    }
+}
+
+/// Repeat speaker assignment from retained system audio, without running ASR.
+/// The caller should back up the transcript before replacing speaker identities.
+pub fn rediarize(meeting: &Meeting, client: &mut AsrClient, speakers: Option<u32>) -> Result<()> {
+    let work = tempfile::tempdir_in(meeting.path().join("audio"))?;
+    let wav = work.path().join("system.wav");
+    let count = crate::decode::decode(&meeting.system_audio_path(), &wav, |_| Ok(()))?;
+    client.set_timeout(
+        Duration::from_secs(300)
+            .saturating_add(Duration::from_millis(count / 16).saturating_mul(4)),
+    );
+    let result = client.diarize(&wav, "system", speakers, false)?;
+    // Old sN embeddings refer to the previous clustering. Never reuse them for
+    // enrollment after IDs have changed. No new biometric data is collected.
+    let library = Library::open(meeting.path().parent().context("meeting has no library")?)?;
+    library.write_meeting_voices(meeting, BTreeMap::new())?;
+    meeting.update_transcript(|transcript| {
+        reset_system_speakers(transcript);
+        assign(transcript, &result);
+    })?;
+    Ok(())
+}
+
+fn reset_system_speakers(transcript: &mut Transcript) {
+    let has_mic = transcript
+        .segments
+        .iter()
+        .any(|s| s.channel == Channel::Mic);
+    for segment in &mut transcript.segments {
+        if segment.channel == Channel::System {
+            segment.speaker.0 = "them".into();
+        }
+    }
+    transcript
+        .speaker_names
+        .retain(|id, _| has_mic && id == "me");
+    transcript
+        .speaker_suggestions
+        .retain(|id, _| has_mic && id == "me");
+    transcript
+        .speaker_voice_ids
+        .retain(|id, _| has_mic && id == "me");
+    if !has_mic || transcript.self_speaker.as_deref() != Some("me") {
+        transcript.self_speaker = None;
     }
 }
 
@@ -215,6 +261,33 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["s1", "me", "them"]
         );
+        let original = transcript.segments.clone();
+        transcript.speaker_names = BTreeMap::from([
+            ("s1".into(), "Remote".into()),
+            ("me".into(), "Owner".into()),
+        ]);
+        transcript
+            .speaker_suggestions
+            .insert("s2".into(), "Old".into());
+        transcript
+            .speaker_voice_ids
+            .insert("s1".into(), "old-voice".into());
+        transcript.self_speaker = Some("s1".into());
+        reset_system_speakers(&mut transcript);
+        assert_eq!(
+            transcript.speaker_names,
+            BTreeMap::from([("me".into(), "Owner".into())])
+        );
+        assert!(transcript.speaker_suggestions.is_empty());
+        assert!(transcript.speaker_voice_ids.is_empty());
+        assert!(transcript.self_speaker.is_none());
+        for (old, new) in original.iter().zip(&transcript.segments) {
+            let mut expected = old.clone();
+            if expected.channel == Channel::System {
+                expected.speaker.0 = "them".into();
+            }
+            assert_eq!(&expected, new);
+        }
     }
     struct Fake {
         fail: bool,
