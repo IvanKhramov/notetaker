@@ -228,6 +228,11 @@ pub enum Command {
     },
     Load(Meeting),
     Save(Box<Save>),
+    Rediarize {
+        meeting: Meeting,
+        expected: Transcript,
+        speakers: Option<u32>,
+    },
     EditSpeakers {
         meeting: Meeting,
         expected: Transcript,
@@ -332,6 +337,11 @@ pub enum Event {
     Saved {
         path: PathBuf,
         result: SaveResult,
+    },
+    Rediarized {
+        path: PathBuf,
+        result: Result<(), String>,
+        data: Option<notetaker_core::Versioned<Transcript>>,
     },
     SpeakersEdited {
         path: PathBuf,
@@ -668,6 +678,42 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                     let _ = events.send(Event::Saved {
                         path: save.meeting.path().to_owned(),
                         result,
+                    });
+                }
+                Command::Rediarize {
+                    meeting,
+                    expected,
+                    speakers,
+                } => {
+                    let events = events.clone();
+                    // Long model work must not block saves and navigation.
+                    thread::spawn(move || {
+                        let path = meeting.path().to_owned();
+                        let result = (|| -> Result<_> {
+                            ensure!(
+                                meeting.read_transcript()? == expected,
+                                "Текст изменился. Дождитесь сохранения и повторите пересчёт."
+                            );
+                            let mut client = notetaker_asr_proto::AsrClient::spawn_command(
+                                background_process(&asr_binary()?),
+                                Duration::from_secs(300),
+                            )?;
+                            let outcome =
+                                notetaker_pipeline::rediarize(&meeting, &mut client, speakers);
+                            let shutdown = client.shutdown();
+                            outcome?;
+                            // The transcript is already saved; a shutdown error
+                            // must not leave the UI showing obsolete speaker IDs.
+                            if let Err(error) = shutdown {
+                                notetaker_runtime::diagnostics::worker_stderr(&format!(
+                                    "diarization worker shutdown: {error}"
+                                ));
+                            }
+                            Ok(())
+                        })()
+                        .map_err(error_text);
+                        let data = meeting.load_transcript().ok();
+                        let _ = events.send(Event::Rediarized { path, result, data });
                     });
                 }
                 Command::EditSpeakers {

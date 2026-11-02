@@ -1,4 +1,10 @@
-use std::{collections::BTreeMap, path::Path, sync::mpsc::Sender, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs::OpenOptions,
+    path::{Path, PathBuf},
+    sync::mpsc::Sender,
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use notetaker_asr_proto::{AsrClient, Diarization, TimeRange};
@@ -46,8 +52,12 @@ fn assign(transcript: &mut Transcript, result: &Diarization) {
 }
 
 /// Repeat speaker assignment from retained system audio, without running ASR.
-/// The caller should back up the transcript before replacing speaker identities.
-pub fn rediarize(meeting: &Meeting, client: &mut AsrClient, speakers: Option<u32>) -> Result<()> {
+/// Returns the exact transcript backup created before replacing speaker identities.
+pub fn rediarize(
+    meeting: &Meeting,
+    client: &mut AsrClient,
+    speakers: Option<u32>,
+) -> Result<PathBuf> {
     let work = tempfile::tempdir_in(meeting.path().join("audio"))?;
     let wav = work.path().join("system.wav");
     let count = crate::decode::decode(&meeting.system_audio_path(), &wav, |_| Ok(()))?;
@@ -56,37 +66,89 @@ pub fn rediarize(meeting: &Meeting, client: &mut AsrClient, speakers: Option<u32
             .saturating_add(Duration::from_millis(count / 16).saturating_mul(4)),
     );
     let result = client.diarize(&wav, "system", speakers, false)?;
+    apply_rediarization(meeting, &result)
+}
+
+fn apply_rediarization(meeting: &Meeting, result: &Diarization) -> Result<PathBuf> {
+    // Load after the expensive pass so text edits made during analysis survive.
+    // A later concurrent write is rejected by save_transcript's revision check.
+    let loaded = meeting.load_transcript()?;
+    let backup = meeting.path().join(format!(
+        "transcript.before-diarization-{}.json",
+        chrono::Utc::now().format("%Y%m%dT%H%M%S%.9fZ")
+    ));
+    let mut source = std::fs::File::open(meeting.path().join("transcript.json"))?;
+    let mut destination = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&backup)?;
+    std::io::copy(&mut source, &mut destination)?;
+    destination.sync_all()?;
+    let mut transcript = loaded.value;
+    let mic_ids = microphone_ids(&transcript);
+    let mut result = result.clone();
+    let mut names = BTreeMap::new();
+    let mut next = 1;
+    for turn in &mut result.turns {
+        turn.speaker = names
+            .entry(turn.speaker.clone())
+            .or_insert_with(|| {
+                while mic_ids.contains(&format!("s{next}")) {
+                    next += 1;
+                }
+                let id = format!("s{next}");
+                next += 1;
+                id
+            })
+            .clone();
+    }
+    reset_system_speakers(&mut transcript);
+    assign(&mut transcript, &result);
     // Old sN embeddings refer to the previous clustering. Never reuse them for
     // enrollment after IDs have changed. No new biometric data is collected.
     let library = Library::open(meeting.path().parent().context("meeting has no library")?)?;
     library.write_meeting_voices(meeting, BTreeMap::new())?;
-    meeting.update_transcript(|transcript| {
-        reset_system_speakers(transcript);
-        assign(transcript, &result);
-    })?;
-    Ok(())
+    meeting.save_transcript(&transcript, loaded.revision)?;
+    library.reindex_incremental()?;
+    Ok(backup)
+}
+
+fn microphone_ids(transcript: &Transcript) -> BTreeSet<String> {
+    transcript
+        .segments
+        .iter()
+        .filter(|s| s.channel == Channel::Mic)
+        .map(|s| s.speaker.0.clone())
+        .collect()
 }
 
 fn reset_system_speakers(transcript: &mut Transcript) {
-    let has_mic = transcript
-        .segments
-        .iter()
-        .any(|s| s.channel == Channel::Mic);
+    let mic_ids = microphone_ids(transcript);
+    // A user may have merged/reassigned the mic to an sN ID. Preserve its
+    // identity and metadata, and reserve it when numbering remote voices.
+    let mut unknown = "them".to_string();
+    while mic_ids.contains(&unknown) {
+        unknown.push('_');
+    }
     for segment in &mut transcript.segments {
         if segment.channel == Channel::System {
-            segment.speaker.0 = "them".into();
+            segment.speaker.0.clone_from(&unknown);
         }
     }
     transcript
         .speaker_names
-        .retain(|id, _| has_mic && id == "me");
+        .retain(|id, _| mic_ids.contains(id));
     transcript
         .speaker_suggestions
-        .retain(|id, _| has_mic && id == "me");
+        .retain(|id, _| mic_ids.contains(id));
     transcript
         .speaker_voice_ids
-        .retain(|id, _| has_mic && id == "me");
-    if !has_mic || transcript.self_speaker.as_deref() != Some("me") {
+        .retain(|id, _| mic_ids.contains(id));
+    if transcript
+        .self_speaker
+        .as_ref()
+        .is_none_or(|id| !mic_ids.contains(id))
+    {
         transcript.self_speaker = None;
     }
 }
@@ -197,6 +259,78 @@ mod tests {
     use super::*;
     use notetaker_asr_proto::SpeakerTurn;
     use notetaker_core::{Segment, Source, SpeakerId};
+    #[test]
+    fn repeat_assignment_keeps_exact_backups_edits_mic_and_other_meeting_files() {
+        for mic_id in ["me", "s1", "them"] {
+            let dir = tempfile::tempdir().unwrap();
+            let library = Library::open(dir.path()).unwrap();
+            let meeting = library
+                .create_meeting(notetaker_core::MeetingMeta::new(
+                    "Repeat",
+                    chrono::Utc::now(),
+                ))
+                .unwrap();
+            let mut original = Transcript::default();
+            for (id, channel) in [("old", Channel::System), (mic_id, Channel::Mic)] {
+                original.segments.push(Segment {
+                    id: uuid::Uuid::now_v7(),
+                    speaker: SpeakerId(id.into()),
+                    channel,
+                    start_ms: 100,
+                    end_ms: 2000,
+                    text: "Исправленный текст".into(),
+                    source: Source::Final,
+                    edited: true,
+                    lang: Some("ru".into()),
+                });
+                original.speaker_names.insert(id.into(), id.into());
+                original
+                    .speaker_voice_ids
+                    .insert(id.into(), format!("voice-{id}"));
+                original
+                    .speaker_suggestions
+                    .insert(id.into(), format!("name-{id}"));
+            }
+            original.self_speaker = Some(mic_id.into());
+            original.bookmarks.push(notetaker_core::Bookmark {
+                id: uuid::Uuid::now_v7(),
+                at_ms: 500,
+                label: Some("Решение".into()),
+            });
+            meeting.write_transcript(&original).unwrap();
+            meeting.write_notes("Личные заметки").unwrap();
+            meeting.write_enhanced("Конспект").unwrap();
+            let other_files = ["notes.md", "enhanced.md", "meta.yaml"]
+                .map(|file| std::fs::read(meeting.path().join(file)).unwrap());
+            let original_bytes = std::fs::read(meeting.path().join("transcript.json")).unwrap();
+            let result = Diarization {
+                turns: vec![SpeakerTurn {
+                    start_ms: 0,
+                    end_ms: 3000,
+                    speaker: "s1".into(),
+                }],
+                ..Default::default()
+            };
+            let backup = apply_rediarization(&meeting, &result).unwrap();
+            assert_eq!(std::fs::read(&backup).unwrap(), original_bytes);
+            let mut expected = original;
+            expected.segments[0].speaker.0 = if mic_id == "s1" { "s2" } else { "s1" }.into();
+            expected.speaker_names.remove("old");
+            expected.speaker_voice_ids.remove("old");
+            expected.speaker_suggestions.remove("old");
+            assert_eq!(meeting.read_transcript().unwrap(), expected);
+            for (file, bytes) in ["notes.md", "enhanced.md", "meta.yaml"]
+                .iter()
+                .zip(other_files)
+            {
+                assert_eq!(std::fs::read(meeting.path().join(file)).unwrap(), bytes);
+            }
+            let next = apply_rediarization(&meeting, &result).unwrap();
+            assert_ne!(backup, next);
+            assert_eq!(std::fs::read(&backup).unwrap(), original_bytes);
+        }
+    }
+
     #[test]
     fn overlap_sums_turns_and_preserves_uncovered_and_mic() {
         let mut transcript = Transcript::default();

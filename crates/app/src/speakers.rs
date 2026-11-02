@@ -12,6 +12,8 @@ pub struct SpeakerUi {
     pub scroll_to: Option<Uuid>,
     pub undo: Option<SpeakerUndo>,
     pub busy: bool,
+    pub recalculating: bool,
+    pub pending_count: Option<Option<u32>>,
 }
 impl SpeakerUi {
     pub fn select(&mut self, transcript: &Transcript, index: usize, shift: bool, ctrl: bool) {
@@ -49,9 +51,6 @@ pub fn color(_id: &str) -> Color32 {
     Color32::from_rgb(138, 135, 127)
 }
 
-fn duration(ms: u64) -> String {
-    format!("{}:{:02}", ms / 60_000, ms / 1000 % 60)
-}
 fn label<'a>(text: &'a Transcript, id: &'a str) -> &'a str {
     match text.speaker_name(id) {
         "me" => "Я",
@@ -163,51 +162,129 @@ pub fn rename_menu(
     edit
 }
 
+/// The count describes remote transcript IDs, independent of the microphone.
+fn remote_count(transcript: &Transcript) -> usize {
+    transcript
+        .segments
+        .iter()
+        .filter(|s| s.channel == notetaker_core::Channel::System)
+        .map(|s| &s.speaker.0)
+        .collect::<BTreeSet<_>>()
+        .len()
+}
+
+pub fn count_control(
+    ui: &mut egui::Ui,
+    document: &mut crate::state::Document,
+    unavailable: Option<&str>,
+) -> Option<Option<u32>> {
+    use crate::theme::{self, ButtonStyle, Palette};
+    let mut apply = None;
+    ui.horizontal_wrapped(|ui| {
+        let response = ui
+            .add_enabled_ui(unavailable.is_none(), |ui| {
+                let label = format!("Собеседников: {}", remote_count(&document.data.transcript));
+                let button = theme::styled_button(Palette::of(ui), &label, ButtonStyle::Ghost)
+                    .right_text(" ");
+                let (response, _) =
+                    egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
+                        ui.set_width(140.0);
+                        for count in std::iter::once(None).chain((1..=8).map(Some)) {
+                            let label = count.map_or_else(|| "Авто".into(), |n| n.to_string());
+                            if theme::nav_row(ui, &label, false).clicked() {
+                                document.speaker_ui.pending_count = Some(count);
+                                ui.close();
+                            }
+                        }
+                    });
+                // Draw the chevron: the embedded text font has no ▾ glyph.
+                let c = response.rect.right_center() - egui::vec2(11.0, 0.0);
+                ui.painter().add(egui::Shape::convex_polygon(
+                    vec![
+                        c + egui::vec2(-3.0, -1.5),
+                        c + egui::vec2(3.0, -1.5),
+                        c + egui::vec2(0.0, 2.0),
+                    ],
+                    ui.visuals().weak_text_color(),
+                    egui::Stroke::NONE,
+                ));
+                response
+            })
+            .inner;
+        if let Some(reason) = unavailable {
+            response.on_disabled_hover_text(reason);
+        }
+        if document.speaker_ui.recalculating {
+            ui.weak("Пересчитываю спикеров…");
+        }
+    });
+    if let Some(count) = document.speaker_ui.pending_count {
+        ui.weak("Имена собеседников и связи с голосами будут сброшены.");
+        ui.horizontal(|ui| {
+            let label =
+                count.map_or_else(|| "Применить: авто".into(), |n| format!("Применить: {n}"));
+            if ui
+                .add_enabled(
+                    unavailable.is_none(),
+                    theme::styled_button(Palette::of(ui), &label, ButtonStyle::Ghost),
+                )
+                .clicked()
+            {
+                apply = Some(count);
+                document.speaker_ui.pending_count = None;
+            }
+            if theme::button(ui, "Отмена", ButtonStyle::Ghost).clicked() {
+                document.speaker_ui.pending_count = None;
+            }
+        });
+    }
+    ui.add_space(8.0);
+    apply
+}
+
 pub fn controls(
     ui: &mut egui::Ui,
     transcript: &Transcript,
     meta: &MeetingMeta,
     state: &mut SpeakerUi,
-    voices: Option<&notetaker_core::VoiceLibrary>,
-    global_allowed: bool,
 ) -> Option<SpeakerEdit> {
     let mut edit = None;
     let timeline = transcript.speaker_timeline();
-    egui::CollapsingHeader::new("Спикеры - кто сколько говорил").id_salt(meta.id).default_open(true).show(ui, |ui| {
-        egui::ScrollArea::vertical().id_salt((meta.id,"speaker-stats")).max_height(160.0).show(ui, |ui| {
-            egui::Grid::new((meta.id,"speaker-table")).striped(true).show(ui, |ui| {
-                for heading in ["Спикер", "Время", "Доля", "Реплики", "Ходы", "Длинный монолог", ""] { ui.weak(heading); }
-                ui.end_row();
-                for speaker in &timeline.speakers {
-                    ui.push_id(&speaker.id, |ui| {
-                        if let Some(rename) = rename_menu(ui,transcript,meta,&speaker.id,voices,global_allowed) { edit = Some(rename); }
-                    });
-                    ui.label(duration(speaker.total_ms));
-                    ui.label(format!("{:.1}%",speaker.share_percent));
-                    ui.label(speaker.segment_count.to_string());
-                    ui.label(speaker.turns.to_string());
-                    ui.label(duration(speaker.longest_monologue_ms));
-                    ui.menu_button("Объединить с...", |ui| {
-                        for other in &timeline.speakers {
-                            if other.id != speaker.id && ui.button(RichText::new(&other.name).color(color(&other.id))).clicked() {
-                                edit = Some(SpeakerEdit::Merge { from:speaker.id.clone(), into:other.id.clone() });
-                                ui.close();
-                            }
+    ui.horizontal_wrapped(|ui| {
+        egui::containers::menu::MenuButton::from_button(crate::theme::styled_button(
+            crate::theme::Palette::of(ui),
+            "Объединить собеседников…",
+            crate::theme::ButtonStyle::Ghost,
+        ))
+        .ui(ui, |ui| {
+            for speaker in &timeline.speakers {
+                ui.menu_button(&speaker.name, |ui| {
+                    for other in &timeline.speakers {
+                        if other.id != speaker.id && ui.button(&other.name).clicked() {
+                            edit = Some(SpeakerEdit::Merge {
+                                from: speaker.id.clone(),
+                                into: other.id.clone(),
+                            });
+                            ui.close();
                         }
-                    });
-                    ui.end_row();
-                }
-            });
+                    }
+                });
+            }
         });
-        ui.small("Доля от суммы времени спикеров. Пересечения засчитываются каждому. Ход: соседние реплики одного спикера с паузой до 1 с.");
     });
+    if state.undo.is_none() && state.selected.is_empty() {
+        return edit;
+    }
     ui.horizontal_wrapped(|ui| {
         if let Some(undo) = &state.undo
             && ui.button("Отменить объединение").clicked()
         {
             edit = Some(SpeakerEdit::Undo(Box::new(undo.clone())));
         }
-        ui.label(format!("Выбрано реплик: {}", state.selected.len()));
+        if state.selected.is_empty() {
+            return;
+        }
+        ui.weak(format!("Выбрано реплик: {}", state.selected.len()));
         ui.add_enabled_ui(!state.selected.is_empty(), |ui| {
             ui.menu_button("Это говорил...", |ui| {
                 let mut assign = |ui: &mut egui::Ui, speaker: String, name: Option<String>| {
@@ -251,81 +328,6 @@ pub fn controls(
             }
         });
     });
-    ui.small("Нажмите время реплики для выбора; Shift - диапазон, Ctrl - добавить или убрать.");
-    egui::CollapsingHeader::new("Таймлайн")
-        .id_salt((meta.id, "timeline"))
-        .default_open(true)
-        .show(ui, |ui| {
-            egui::ScrollArea::vertical()
-                .id_salt((meta.id, "timeline-lanes"))
-                .max_height(120.0)
-                .show(ui, |ui| {
-                    let width = ui.available_width().max(1.0);
-                    let (rect, _) = ui.allocate_exact_size(
-                        egui::vec2(width, timeline.speakers.len() as f32 * 24.0),
-                        egui::Sense::hover(),
-                    );
-                    let label_width = (width * 0.25).min(130.0);
-                    let bar_width = (width - label_width).max(1.0);
-                    for (lane, speaker) in timeline.speakers.iter().enumerate() {
-                        let top = rect.top() + lane as f32 * 24.0;
-                        let label_rect = egui::Rect::from_min_size(
-                            egui::pos2(rect.left(), top),
-                            egui::vec2(label_width - 4.0, 22.0),
-                        );
-                        ui.painter().with_clip_rect(label_rect).text(
-                            label_rect.left_center(),
-                            egui::Align2::LEFT_CENTER,
-                            &speaker.name,
-                            egui::FontId::proportional(12.0),
-                            color(&speaker.id),
-                        );
-                        let left = rect.left() + label_width;
-                        ui.painter().line_segment(
-                            [
-                                egui::pos2(left, top + 20.0),
-                                egui::pos2(rect.right(), top + 20.0),
-                            ],
-                            egui::Stroke::new(1.0, ui.visuals().faint_bg_color),
-                        );
-                        for segment in timeline.segments.iter().filter(|s| s.speaker == speaker.id)
-                        {
-                            let x = |ms| {
-                                left + bar_width
-                                    * (ms as f64 / timeline.duration_ms.max(1) as f64) as f32
-                            };
-                            let bar = egui::Rect::from_min_max(
-                                egui::pos2(x(segment.start_ms), top + 3.0),
-                                egui::pos2(
-                                    x(segment.end_ms)
-                                        .max(x(segment.start_ms) + 2.0)
-                                        .min(rect.right()),
-                                    top + 19.0,
-                                ),
-                            );
-                            ui.painter().rect_filled(bar, 2, color(&speaker.id));
-                            if ui
-                                .interact(
-                                    bar,
-                                    ui.scope_id().with(("timeline-bar", segment.id)),
-                                    egui::Sense::click(),
-                                )
-                                .on_hover_text(format!(
-                                    "{} {}-{}\n{}",
-                                    segment.name,
-                                    duration(segment.start_ms),
-                                    duration(segment.end_ms),
-                                    segment.text
-                                ))
-                                .clicked()
-                            {
-                                state.scroll_to = Some(segment.id);
-                            }
-                        }
-                    }
-                });
-            ui.small(format!("0:00 - {}", duration(timeline.duration_ms)));
-        });
     edit
 }
 

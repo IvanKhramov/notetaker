@@ -511,6 +511,41 @@ impl AppState {
             self.send(Command::Save(Box::new(save)));
         }
     }
+    pub fn rediarize(&mut self, speakers: Option<u32>) {
+        let Some(path) = self.selected.clone() else {
+            return;
+        };
+        if speakers.is_some_and(|n| !(1..=8).contains(&n))
+            || self.recording.busy()
+            || self.recording.assist.bookmarks_pending > 0
+            || self.enhancing.is_some()
+            || self.settings_pending
+            || self.documents.values().any(|doc| doc.speaker_ui.busy)
+            || self.documents.get(&path).is_none_or(|doc| {
+                doc.saving
+                    || doc.attachments_pending > 0
+                    || !doc.data.meeting.system_audio_path().is_file()
+            })
+        {
+            return;
+        }
+        // Saves are serialized ahead of the command. The worker checks the
+        // expected transcript and refuses analysis after a failed/conflicting save.
+        self.flush();
+        let document = self.documents.get_mut(&path).expect("selected document");
+        document.speaker_ui.busy = true;
+        document.speaker_ui.recalculating = true;
+        let command = Command::Rediarize {
+            meeting: document.data.meeting.clone(),
+            expected: document.data.transcript.clone(),
+            speakers,
+        };
+        if self.tx.send(command).is_err() {
+            document.speaker_ui.busy = false;
+            document.speaker_ui.recalculating = false;
+            self.error = Some("Фоновый поток завершился; перезапустите приложение".into());
+        }
+    }
     pub fn edit_speakers(&mut self, edit: notetaker_core::SpeakerEdit) {
         let Some(path) = self.selected.clone() else {
             return;
@@ -597,6 +632,10 @@ impl AppState {
     }
     fn start_recording_with_app(&mut self, call_override: Option<notetaker_detect::DetectedCall>) {
         if !self.ready
+            || self
+                .documents
+                .values()
+                .any(|doc| doc.speaker_ui.recalculating)
             || self.recording.busy()
             || self.recording.assist.bookmarks_pending > 0
             || self.downloading
@@ -664,6 +703,10 @@ impl AppState {
     }
     pub fn start_event(&mut self, event: notetaker_core::calendar::CalendarEvent) {
         if !self.ready
+            || self
+                .documents
+                .values()
+                .any(|doc| doc.speaker_ui.recalculating)
             || self.recording.busy()
             || self.recording.assist.bookmarks_pending > 0
             || self.downloading
@@ -817,6 +860,10 @@ impl AppState {
     #[allow(dead_code)] // Retained backend; this feature is no longer exposed in the UI.
     pub fn import_recording(&mut self, file: PathBuf) {
         if !self.ready
+            || self
+                .documents
+                .values()
+                .any(|doc| doc.speaker_ui.recalculating)
             || self.recording.busy()
             || self.recording.assist.bookmarks_pending > 0
             || self.downloading
@@ -1411,6 +1458,31 @@ impl AppState {
                     }
                 }
                 self.start_semantic_index();
+            }
+            Event::Rediarized { path, result, data } => {
+                if let Some(document) = self.documents.get_mut(&path) {
+                    document.speaker_ui.busy = false;
+                    document.speaker_ui.recalculating = false;
+                    if !document.dirty.transcript
+                        && let Some(loaded) = data
+                    {
+                        // Also reload after an index error following a durable
+                        // transcript save. Never hide failed local text saves.
+                        if document.data.revisions.transcript != loaded.revision {
+                            document.data.transcript = loaded.value;
+                            document.data.revisions.transcript = loaded.revision;
+                            document.speaker_ui.undo = None;
+                            document.speaker_ui.selected.clear();
+                            document.speaker_ui.anchor = None;
+                            document.changed();
+                        }
+                    }
+                    if let Err(error) = result {
+                        self.error = Some(error);
+                        self.exit_requested = false;
+                    }
+                }
+                self.refresh();
             }
             Event::SpeakersEdited { path, result, data } => {
                 if let Some(document) = self.documents.get_mut(&path) {
@@ -2143,6 +2215,94 @@ mod tests {
         ));
         assert!(commands.try_recv().is_err());
     }
+    #[test]
+    fn rediarization_saves_first_blocks_duplicates_and_reloads_only_transcript() {
+        let (mut state, commands, _root, path) = fixture();
+        let document = state.documents.get_mut(&path).unwrap();
+        std::fs::write(document.data.meeting.system_audio_path(), []).unwrap();
+        document.data.transcript.rename_speaker("s1", "Анна");
+        document.dirty.transcript = true;
+        state.rediarize(Some(2));
+        let Command::Save(save) = commands.try_recv().unwrap() else {
+            panic!("save first");
+        };
+        let revision = save
+            .meeting
+            .save_transcript(save.transcript.as_ref().unwrap(), save.revisions.transcript)
+            .unwrap();
+        state
+            .documents
+            .get_mut(&path)
+            .unwrap()
+            .data
+            .revisions
+            .transcript = revision;
+        state.documents.get_mut(&path).unwrap().saving = false;
+        assert!(matches!(
+            commands.try_recv().unwrap(),
+            Command::Rediarize {
+                speakers: Some(2),
+                ..
+            }
+        ));
+        assert!(state.documents[&path].speaker_ui.recalculating);
+        state.rediarize(None);
+        assert!(commands.try_recv().is_err());
+        let document = state.documents.get_mut(&path).unwrap();
+        document.data.notes = "Правки во время пересчёта".into();
+        document.dirty.notes = true;
+        assert!(document.save().is_none());
+        let mut next = document.data.transcript.clone();
+        next.speaker_names.clear();
+        document.data.meeting.write_transcript(&next).unwrap();
+        let data = document.data.meeting.load_transcript().unwrap();
+        state.apply(Event::Rediarized {
+            path: path.clone(),
+            result: Ok(()),
+            data: Some(data),
+        });
+        let document = &state.documents[&path];
+        assert!(!document.speaker_ui.busy && !document.speaker_ui.recalculating);
+        assert_eq!(document.data.transcript, next);
+        assert_eq!(document.data.notes, "Правки во время пересчёта");
+        assert!(document.dirty.notes);
+    }
+
+    #[test]
+    fn rediarization_guards_and_errors_keep_unsaved_transcript() {
+        let (mut state, commands, _root, path) = fixture();
+        state.rediarize(None); // no system audio
+        assert!(commands.try_recv().is_err());
+        std::fs::write(state.documents[&path].data.meeting.system_audio_path(), []).unwrap();
+        for n in [0, 9] {
+            state.rediarize(Some(n));
+            assert!(commands.try_recv().is_err());
+        }
+        state.recording.phase = Phase::Recording;
+        state.rediarize(None);
+        assert!(commands.try_recv().is_err());
+        state.recording.phase = Phase::Idle;
+        state.rediarize(None);
+        assert!(matches!(
+            commands.try_recv().unwrap(),
+            Command::Rediarize { speakers: None, .. }
+        ));
+        let document = state.documents.get_mut(&path).unwrap();
+        document.dirty.transcript = true; // queued save failed
+        document.data.transcript.rename_speaker("s1", "Unsaved");
+        let original = document.data.transcript.clone();
+        let data = document.data.meeting.load_transcript().unwrap();
+        state.apply(Event::Rediarized {
+            path: path.clone(),
+            result: Err("model missing".into()),
+            data: Some(data),
+        });
+        assert_eq!(state.documents[&path].data.transcript, original);
+        assert!(state.documents[&path].dirty.transcript);
+        assert!(!state.documents[&path].speaker_ui.recalculating);
+        assert_eq!(state.error.as_deref(), Some("model missing"));
+    }
+
     #[test]
     fn speaker_actions_flush_text_before_edit_and_keep_failed_unsaved_notes() {
         let (mut state, commands, _root, path) = fixture();

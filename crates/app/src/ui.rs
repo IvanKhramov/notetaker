@@ -946,7 +946,26 @@ impl NotetakerApp {
         }
         let mut images = Vec::new();
         let mut speaker_edit = None;
+        let mut rediarize = None;
         if self.state.tab == Tab::Transcript {
+            let unavailable = if self.state.recording.busy() {
+                Some("Доступно после завершения записи")
+            } else if !document.data.meeting.system_audio_path().is_file() {
+                Some("Нет сохранённого аудио: audio/system.opus")
+            } else if document.speaker_ui.recalculating {
+                Some("Пересчитываю спикеров…")
+            } else if document.saving
+                || speaker_busy
+                || document.attachments_pending > 0
+                || self.state.enhancing.is_some()
+                || self.state.settings_pending
+                || self.state.recording.assist.bookmarks_pending > 0
+            {
+                Some("Дождитесь завершения текущей операции")
+            } else {
+                None
+            };
+            rediarize = crate::speakers::count_control(ui, document, unavailable);
             speaker_edit = transcript_view(
                 ui,
                 document,
@@ -1052,6 +1071,9 @@ impl NotetakerApp {
                         &mut self.image_viewer,
                     );
                 });
+        }
+        if let Some(count) = rediarize {
+            self.state.rediarize(count);
         }
         if let Some(edit) = speaker_edit {
             self.state.edit_speakers(edit);
@@ -2288,8 +2310,6 @@ fn transcript_view(
                 &document.data.transcript,
                 &document.data.meta,
                 &mut document.speaker_ui,
-                voices,
-                global_allowed,
             );
         });
     }
