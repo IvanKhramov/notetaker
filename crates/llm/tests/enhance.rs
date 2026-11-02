@@ -1,11 +1,11 @@
-use std::{fs, sync::Mutex};
+use std::{collections::VecDeque, fs, sync::Mutex};
 
 use anyhow::Result;
 use chrono::{TimeZone, Utc};
 use notetaker_core::{Channel, Library, MeetingMeta, Mode, Segment, Source, SpeakerId, Transcript};
 use notetaker_llm::{
-    CompletionRequest, Config, Provider, ProviderConfig, ProviderKind, Template, enhance,
-    enhance_meeting, estimate_tokens,
+    CompletionRequest, Config, OutputLimit, Provider, ProviderConfig, ProviderKind, Template,
+    enhance, enhance_meeting, estimate_tokens,
 };
 use uuid::Uuid;
 
@@ -14,6 +14,7 @@ struct Fake {
     calls: Mutex<Vec<(String, String, usize)>>,
     fail: bool,
     verbose: bool,
+    replies: Mutex<VecDeque<Result<String>>>,
 }
 
 impl Fake {
@@ -31,6 +32,7 @@ impl Fake {
             calls: Mutex::new(Vec::new()),
             fail: false,
             verbose: false,
+            replies: Mutex::new(VecDeque::new()),
         }
     }
 }
@@ -56,6 +58,17 @@ impl Provider for Fake {
                 + request.max_output_tokens
                 <= self.config.context_tokens
         );
+        if let Some(reply) = self.replies.lock().unwrap().pop_front() {
+            match &reply {
+                Ok(text) => on_text(text),
+                Err(error) => {
+                    if let Some(limit) = error.downcast_ref::<OutputLimit>() {
+                        on_text(&limit.text);
+                    }
+                }
+            }
+            return reply;
+        }
         if self.fail {
             anyhow::bail!("mock failure");
         }
@@ -526,4 +539,180 @@ fn bookmarks_add_timestamped_context_and_template_section() {
     assert!(calls[0].1.contains("[00:50]"));
     assert_eq!(calls[0].1.matches("nearby evidence").count(), 2);
     assert_eq!(calls[0].1.matches("far outside bookmark").count(), 1);
+}
+
+#[test]
+fn cutoff_retries_with_larger_budget_and_saves_only_successful_text() {
+    let directory = tempfile::tempdir().unwrap();
+    let library = Library::open(directory.path()).unwrap();
+    let meeting = library.create_meeting(meta()).unwrap();
+    let provider = Fake::new(65_536);
+    provider.replies.lock().unwrap().extend([
+        Err(OutputLimit {
+            text: "partial first attempt".into(),
+        }
+        .into()),
+        Ok("# Полный конспект".into()),
+    ]);
+    let mut deltas = String::new();
+    let result = enhance_meeting(
+        &meeting,
+        "general",
+        &Template::builtin("general").unwrap(),
+        &provider,
+        &mut |text| deltas.push_str(text),
+    )
+    .unwrap();
+    let calls = provider.calls.lock().unwrap();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].2, 8192);
+    assert_eq!(calls[1].2, 16_384);
+    assert_eq!(calls[0].1, calls[1].1);
+    assert_eq!(result.text, "# Полный конспект");
+    assert_eq!(deltas, result.text);
+    assert_eq!(meeting.read_enhanced().unwrap(), result.text);
+    assert!(result.warnings.is_empty());
+}
+
+#[test]
+fn repeated_cutoff_saves_partial_text_with_one_warning() {
+    let directory = tempfile::tempdir().unwrap();
+    let library = Library::open(directory.path()).unwrap();
+    let meeting = library.create_meeting(meta()).unwrap();
+    let provider = Fake::new(4096);
+    provider.replies.lock().unwrap().extend([
+        Err(OutputLimit {
+            text: "first".into(),
+        }
+        .into()),
+        Err(OutputLimit {
+            text: "# Частичный конспект".into(),
+        }
+        .into()),
+    ]);
+    let mut deltas = String::new();
+    let result = enhance_meeting(
+        &meeting,
+        "general",
+        &Template::builtin("general").unwrap(),
+        &provider,
+        &mut |text| deltas.push_str(text),
+    )
+    .unwrap();
+    assert_eq!(provider.calls.lock().unwrap().len(), 2);
+    assert_eq!(result.text, "# Частичный конспект");
+    assert_eq!(deltas, result.text);
+    assert_eq!(meeting.read_enhanced().unwrap(), result.text);
+    assert_eq!(result.warnings.len(), 1);
+    assert!(result.warnings[0].contains("лимит"));
+    assert!(result.warnings[0].contains("контекст"));
+}
+
+#[test]
+fn reasoning_only_cutoff_retries_before_reporting_empty_answer() {
+    for second in [
+        Ok("visible answer".into()),
+        Err(OutputLimit {
+            text: String::new(),
+        }
+        .into()),
+    ] {
+        let provider = Fake::new(4096);
+        provider.replies.lock().unwrap().extend([
+            Err(OutputLimit {
+                text: String::new(),
+            }
+            .into()),
+            second,
+        ]);
+        let result = enhance(
+            &meta(),
+            "",
+            &Transcript::default(),
+            &Template::builtin("general").unwrap(),
+            &provider,
+            &mut |_| {},
+        );
+        assert_eq!(provider.calls.lock().unwrap().len(), 2);
+        if let Ok(text) = result {
+            assert_eq!(text, "visible answer");
+        } else {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("лимита"));
+            assert!(error.contains("контекст"));
+        }
+    }
+}
+
+#[test]
+fn failed_or_empty_retry_preserves_the_first_partial_answer() {
+    for second in [
+        Err(anyhow::anyhow!("mock HTTP failure")),
+        Err(OutputLimit {
+            text: "short".into(),
+        }
+        .into()),
+        Err(OutputLimit {
+            text: String::new(),
+        }
+        .into()),
+        Ok(String::new()),
+    ] {
+        let provider = Fake::new(4096);
+        provider.replies.lock().unwrap().extend([
+            Err(OutputLimit {
+                text: "first partial answer".into(),
+            }
+            .into()),
+            second,
+        ]);
+        let mut deltas = String::new();
+        let text = enhance(
+            &meta(),
+            "",
+            &Transcript::default(),
+            &Template::builtin("general").unwrap(),
+            &provider,
+            &mut |part| deltas.push_str(part),
+        )
+        .unwrap();
+        assert!(text.starts_with("first partial answer"));
+        assert!(text.contains("лимит"));
+        assert_eq!(text, deltas);
+        assert_eq!(provider.calls.lock().unwrap().len(), 2);
+    }
+}
+
+#[test]
+fn intermediate_cutoffs_reach_the_saved_summary_warnings() {
+    let directory = tempfile::tempdir().unwrap();
+    let library = Library::open(directory.path()).unwrap();
+    let meeting = library.create_meeting(meta()).unwrap();
+    meeting
+        .write_transcript(&transcript(&"Обсудили релиз. ".repeat(1500)))
+        .unwrap();
+    let provider = Fake::new(4096);
+    provider.replies.lock().unwrap().extend([
+        Err(OutputLimit {
+            text: "Часть фактов".into(),
+        }
+        .into()),
+        Err(OutputLimit {
+            text: "Больше фактов".into(),
+        }
+        .into()),
+    ]);
+    let result = enhance_meeting(
+        &meeting,
+        "general",
+        &Template::builtin("general").unwrap(),
+        &provider,
+        &mut |_| {},
+    )
+    .unwrap();
+    assert!(provider.calls.lock().unwrap().len() > 2);
+    assert_eq!(result.text, "# Итоги\n- План сохранён");
+    assert_eq!(result.warnings.len(), 1);
+    assert!(result.warnings[0].contains("лимит"));
+    assert!(!result.text.contains("лимит"));
 }
