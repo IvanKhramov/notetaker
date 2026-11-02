@@ -239,7 +239,6 @@ pub fn model_control(ui: &mut egui::Ui, state: &mut AppState, model: &str, title
 pub struct Panel {
     pub open: bool,
     startup_checked: bool,
-    banner_dismissed: bool,
     edit_ai: bool,
     ai_connecting: bool,
     selected_ai: usize,
@@ -313,32 +312,6 @@ impl Panel {
         }
         steps
     }
-    pub fn header(&mut self, ui: &mut egui::Ui) {
-        if theme::rail_button(ui, theme::Icon::Help, "Быстрый старт", self.open).clicked()
-        {
-            self.open = true;
-        }
-    }
-    pub fn sidebar(&mut self, ui: &mut egui::Ui, state: &AppState) {
-        let missing = essential_missing(&self.steps(state));
-        if state.ready && missing > 0 && !self.banner_dismissed {
-            theme::bar(Palette::of(ui)).show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 2.0;
-                ui.small(format!(
-                    "Настройка не завершена: {missing} {}",
-                    if missing == 1 { "шаг" } else { "шага" }
-                ));
-                ui.horizontal(|ui| {
-                    if ui.small_button("Продолжить").clicked() {
-                        self.open = true;
-                    }
-                    if ui.small_button("Скрыть").clicked() {
-                        self.banner_dismissed = true;
-                    }
-                });
-            });
-        }
-    }
     /// Returns true when the user chooses the full Settings dialog.
     pub fn show(
         &mut self,
@@ -365,8 +338,8 @@ impl Panel {
             .show(ctx, |ui| {
                 theme::section_caption(ui, "Быстрый старт");
                 let completed = steps.iter().filter(|s| **s == Status::Ready).count();
-                ui.heading(format!("Настроено {completed} из 6"));
-                ui.add(egui::ProgressBar::new(completed as f32 / 6.0).fill(Palette::of(ui).accent).desired_height(4.0));
+                ui.heading(if essential_missing(&steps) == 0 { "Можно начинать запись".to_owned() } else { format!("Настроено {completed} из 6") });
+                ui.add(egui::ProgressBar::new(completed as f32 / 6.0).fill(Palette::of(ui).text).desired_height(4.0));
                 ui.small("Настройте запись и конспекты здесь. Календарь и проверку звука можно пропустить.");
                 egui::ScrollArea::vertical().id_salt("quickstart_steps").max_height((ctx.content_rect().height() - 350.0).max(100.0)).show(ui, |ui| {
                     semantic_step(ui, state);
@@ -380,7 +353,7 @@ impl Panel {
                     row(ui, &steps[1], "Разделение собеседников", "Отмечает, кто говорил. Модели занимают около 47 МБ.");
                     model_control(ui, state, "diarization", "Модели собеседников");
                     ui.add_enabled_ui(state.can_save_settings(), |ui| {
-                        save |= ui.checkbox(&mut state.settings_draft.auto_download_models, "Скачивать модели автоматически").changed();
+                        save |= crate::theme::toggle(ui, &mut state.settings_draft.auto_download_models, "Скачивать модели автоматически").changed();
                     });
                     row(ui, &steps[2], "AI для конспектов", "Провайдер по умолчанию для конспектов и чата.");
                     if steps[2] == Status::Ready && !self.edit_ai {
@@ -447,7 +420,7 @@ impl Panel {
                     }
                     row(ui, &steps[5], "Звонки", if cfg!(target_os = "macos") { "Предложения записи и запуск приложения при входе в macOS." } else { "Предложения записи и запуск приложения вместе с Windows." });
                     ui.add_enabled_ui(state.can_save_settings() && cfg!(any(windows, target_os = "macos")), |ui| {
-                        save |= ui.checkbox(&mut state.settings_draft.detect_calls, "Предлагать запись при звонке").changed();
+                        save |= crate::theme::toggle(ui, &mut state.settings_draft.detect_calls, "Предлагать запись при звонке").changed();
                     });
                     maintenance.windows_settings(ui);
                     row(ui, self.probe_status.as_ref().unwrap_or(&Status::Missing), "Проверка звука (необязательно)", "5 секунд: говорите и включите звук звонка. Аудио не сохраняется.");
@@ -469,7 +442,7 @@ impl Panel {
                 });
                 ui.separator();
                 ui.add_enabled_ui(state.can_save_settings(), |ui| {
-                    save |= ui.checkbox(&mut state.settings_draft.hide_quickstart, "Больше не показывать при запуске").changed();
+                    save |= crate::theme::toggle(ui, &mut state.settings_draft.hide_quickstart, "Больше не показывать при запуске").changed();
                 });
                 ui.horizontal(|ui| {
                     if theme::button(ui, "Готово", theme::ButtonStyle::Primary).clicked() { done = true; }
@@ -490,7 +463,8 @@ impl Panel {
 }
 
 fn row(ui: &mut egui::Ui, status: &Status, title: &str, explanation: &str) {
-    ui.add_space(16.0);
+    ui.add_space(12.0);
+    ui.separator();
     ui.horizontal_wrapped(|ui| {
         if matches!(status, Status::Error(_)) {
             ui.colored_label(Palette::of(ui).red, status.label());

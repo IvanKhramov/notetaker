@@ -78,7 +78,7 @@ impl Default for Settings {
             user_name: String::new(),
             digest_reminder: false,
             user_aliases: String::new(),
-            theme: crate::theme::Theme::System,
+            theme: crate::theme::Theme::Light,
             library: documents.join("notetaker"),
             model: MODELS[0].into(),
             asr_acceleration: notetaker_asr_proto::Provider::Auto,
@@ -209,15 +209,7 @@ impl Settings {
             );
             calendar.validate()?;
         }
-        ensure!(
-            (2..=10).contains(&self.live_summary_minutes),
-            "Живой конспект: интервал 2-10 минут"
-        );
-        ensure!(
-            (1..=30).contains(&self.recap_minutes),
-            "Что я пропустил: окно 1-30 минут"
-        );
-        validate_hotkeys([&self.hotkey, &self.recap_hotkey, &self.bookmark_hotkey])
+        validate_hotkey(&self.hotkey)
     }
 }
 
@@ -347,21 +339,6 @@ pub fn atomic_write(path: &Path, text: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn validate_hotkeys(values: [&str; 3]) -> Result<()> {
-    let mut seen = std::collections::HashSet::new();
-    for value in values {
-        validate_hotkey(value)?;
-        let mut parts: Vec<_> = value.split('+').collect();
-        let key = parts.pop().unwrap_or_default();
-        parts.sort_unstable();
-        ensure!(
-            seen.insert((parts, key)),
-            "Горячие клавиши записи, обзора и закладки должны различаться"
-        );
-    }
-    Ok(())
-}
-
 pub fn validate_hotkey(value: &str) -> Result<()> {
     let mut parts: Vec<_> = value.split('+').collect();
     let key = parts.pop().unwrap_or_default();
@@ -393,17 +370,14 @@ pub fn validate_hotkey(value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
-    fn hotkey_conflicts_ignore_modifier_order_and_defaults_roundtrip() {
-        assert!(validate_hotkeys(["Ctrl+Alt+R", "Alt+Ctrl+R", "Ctrl+Alt+B"]).is_err());
-        assert!(validate_hotkeys(["Ctrl+Alt+R", "Ctrl+Alt+M", "Ctrl+Alt+M"]).is_err());
-        assert!(validate_hotkeys(["Ctrl+Alt+R", "Ctrl+Alt+M", "Ctrl+Alt+B"]).is_ok());
-        let settings: Settings = toml::from_str("").unwrap();
-        assert!(settings.live_summary);
-        assert_eq!(settings.live_summary_minutes, 3);
-        assert_eq!(settings.recap_minutes, 5);
+    fn retired_assistance_settings_do_not_block_recording_settings() {
+        let settings: super::Settings = toml::from_str("hotkey = 'Ctrl+Alt+R'\nrecap_hotkey = 'Ctrl+Alt+R'\nbookmark_hotkey = 'invalid legacy shortcut'\nlive_summary_minutes = 99\nrecap_minutes = 99").unwrap();
         settings.validate().unwrap();
+        assert_eq!(settings.theme, crate::theme::Theme::Light);
     }
+
     #[test]
     fn quickstart_preferences_roundtrip() {
         let settings = Settings {
@@ -443,7 +417,7 @@ mod tests {
     #[test]
     fn existing_settings_get_detection_and_silence_defaults() {
         let settings: Settings = toml::from_str("hotkey = 'Ctrl+Alt+R'").unwrap();
-        assert_eq!(settings.theme, crate::theme::Theme::System);
+        assert_eq!(settings.theme, crate::theme::Theme::Light);
         assert!(settings.diarize);
         assert!(!settings.voice_library);
         assert_eq!(settings.speakers, None);

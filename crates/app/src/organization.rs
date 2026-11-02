@@ -55,8 +55,6 @@ pub struct Panel {
     owners_json: String,
     destinations: notetaker_llm::trackers::KaitenDestinations,
     destinations_rx: Option<Receiver<Result<notetaker_llm::trackers::KaitenDestinations, String>>>,
-    tags_path: Option<PathBuf>,
-    tags_text: String,
     compare: Option<(Meeting, SyncConflict)>,
     message: String,
 }
@@ -156,7 +154,6 @@ impl Panel {
         if state.ready
             && self.receiver.is_none()
             && !self.settings_open
-            && self.tags_path.is_none()
             && self.compare.is_none()
             && !state.unsaved()
             && !state.recording.busy()
@@ -184,91 +181,14 @@ impl Panel {
     }
     pub fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
         let previous_filter = state.folder_filter.clone();
-        let previous_tag = state.tag_filter.clone();
         let mut destination = None;
         let mut edit_folder = None;
         ui.horizontal(|ui| {
-            let width = (ui.available_width() - 34.0).max(1.0);
-            egui::ScrollArea::horizontal()
-                .id_salt("folder_chips")
-                .max_width(width)
-                .max_height(32.0)
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        if theme::filter_chip(
-                            ui,
-                            "Все заметки",
-                            state.folder_filter.is_none(),
-                            None,
-                        )
-                        .clicked()
-                        {
-                            state.folder_filter = None;
-                        }
-                        if let Some(s) = &self.snapshot {
-                            let mut names =
-                                s.folders.value.keys().cloned().collect::<BTreeSet<_>>();
-                            for meta in s.metas.values() {
-                                if let Some(folder) = &meta.folder {
-                                    names.insert(folder.clone());
-                                }
-                            }
-                            for name in names.clone() {
-                                let parts = name.split('/').collect::<Vec<_>>();
-                                for n in 1..parts.len() {
-                                    names.insert(parts[..n].join("/"));
-                                }
-                            }
-                            for name in std::iter::once(String::new()).chain(names) {
-                                let count = s
-                                    .metas
-                                    .values()
-                                    .filter(|m| matches_folder(m, Some(&name)))
-                                    .count();
-                                let label = if name.is_empty() {
-                                    format!("Без папки ({count})")
-                                } else {
-                                    format!(
-                                        "{} ({count})",
-                                        name.rsplit('/').next().unwrap_or(&name)
-                                    )
-                                };
-                                let response = theme::filter_chip(
-                                    ui,
-                                    &label,
-                                    state.folder_filter.as_deref() == Some(&name),
-                                    Some(theme::folder_color(Some(&name), theme::Palette::of(ui))),
-                                )
-                                .on_hover_text(&name);
-                                if response.clicked() {
-                                    state.folder_filter = Some(name.clone());
-                                }
-                                if let Some(paths) = response.dnd_release_payload::<Vec<PathBuf>>()
-                                {
-                                    destination = Some(((*paths).clone(), name.clone()));
-                                }
-                                response.context_menu(|ui| {
-                                    if !name.is_empty() && ui.button("Настройки папки").clicked()
-                                    {
-                                        edit_folder = Some(name.clone());
-                                        ui.close();
-                                    }
-                                    if !self.selected.is_empty()
-                                        && ui.button("Переместить выбранные сюда").clicked()
-                                    {
-                                        destination = Some((
-                                            self.selected.iter().cloned().collect(),
-                                            name.clone(),
-                                        ));
-                                        ui.close();
-                                    }
-                                });
-                            }
-                        }
-                    });
-                });
-            if theme::icon_button(ui, theme::Icon::Settings, "Папки и общая библиотека").clicked()
+            theme::section_caption(ui, "Папки");
+            if ui
+                .small_button("+")
+                .on_hover_text("Создать или настроить папку")
+                .clicked()
             {
                 self.settings_open = true;
                 if let Some(s) = &self.snapshot {
@@ -277,35 +197,42 @@ impl Panel {
             }
         });
         if let Some(s) = &self.snapshot {
-            let tags = s
-                .metas
-                .values()
-                .flat_map(|m| m.tags.iter().cloned())
-                .collect::<BTreeSet<_>>();
-            if !tags.is_empty() {
-                egui::ScrollArea::horizontal()
-                    .id_salt("tag_chips")
-                    .max_height(32.0)
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            for tag in tags {
-                                if theme::filter_chip(
-                                    ui,
-                                    &format!("#{tag}"),
-                                    state.tag_filter.as_ref() == Some(&tag),
-                                    None,
-                                )
-                                .clicked()
-                                {
-                                    state.tag_filter = if state.tag_filter.as_ref() == Some(&tag) {
-                                        None
-                                    } else {
-                                        Some(tag)
-                                    };
-                                }
-                            }
-                        });
-                    });
+            let mut names: BTreeSet<_> = s.folders.value.keys().cloned().collect();
+            for meta in s.metas.values() {
+                if let Some(folder) = &meta.folder {
+                    names.insert(folder.clone());
+                }
+            }
+            for name in std::iter::once(String::new()).chain(names) {
+                let label = if name.is_empty() {
+                    "Без папки"
+                } else {
+                    &name
+                };
+                let response = theme::nav_row(
+                    ui,
+                    &format!("▫  {label}"),
+                    state.folder_filter.as_deref() == Some(&name),
+                )
+                .on_hover_text(label);
+                if response.clicked() {
+                    state.folder_filter = Some(name.clone());
+                }
+                if let Some(paths) = response.dnd_release_payload::<Vec<PathBuf>>() {
+                    destination = Some(((*paths).clone(), name.clone()));
+                }
+                response.context_menu(|ui| {
+                    if !name.is_empty() && ui.button("Настройки папки").clicked() {
+                        edit_folder = Some(name.clone());
+                        ui.close();
+                    }
+                    if !self.selected.is_empty()
+                        && ui.button("Переместить выбранные сюда").clicked()
+                    {
+                        destination = Some((self.selected.iter().cloned().collect(), name.clone()));
+                        ui.close();
+                    }
+                });
             }
         }
         if !self.selected.is_empty() {
@@ -339,7 +266,7 @@ impl Panel {
                 .unwrap_or(state.settings.mode);
             state.record_mode_edited = false;
         }
-        if state.folder_filter != previous_filter || state.tag_filter != previous_tag {
+        if state.folder_filter != previous_filter {
             state.refresh_results();
         }
         if let Some(name) = edit_folder {
@@ -450,10 +377,6 @@ impl Panel {
                             }
                         }
                     });
-                if ui.button("Теги").clicked() {
-                    self.tags_path = Some(path.clone());
-                    self.tags_text = meta.tags.join(", ");
-                }
             });
             if let Some(copies) = self.snapshot.as_ref().and_then(|s| s.conflicts.get(&path)) {
                 for copy in copies {
@@ -737,38 +660,6 @@ impl Panel {
             .default_width(620.0)
             .show(ctx, |ui| self.folder_settings(ctx, ui, can_share));
         self.settings_open = settings_open;
-        if let Some(path) = self.tags_path.clone() {
-            let mut open = true;
-            crate::theme::window(ctx, "Теги встречи")
-                .open(&mut open)
-                .show(ctx, |ui| {
-                    ui.label("Через запятую");
-                    ui.text_edit_singleline(&mut self.tags_text);
-                    if ui.button("Сохранить").clicked() {
-                        let tags = self
-                            .tags_text
-                            .split(',')
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .map(str::to_owned)
-                            .collect::<BTreeSet<_>>()
-                            .into_iter()
-                            .collect::<Vec<_>>();
-                        self.launch(ctx, move |l| {
-                            if let Some(m) =
-                                l.list_meetings()?.into_iter().find(|m| m.path() == path)
-                            {
-                                m.update_meta(|meta| meta.tags = tags)?;
-                            }
-                            Ok(())
-                        });
-                        self.tags_path = None;
-                    }
-                });
-            if !open {
-                self.tags_path = None;
-            }
-        }
         if let Some((m, copy)) = self.compare.clone() {
             let mut open = true;
             crate::theme::window(ctx, "Сравнение копии синхронизации")

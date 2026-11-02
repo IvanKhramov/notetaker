@@ -263,10 +263,10 @@ impl Panel {
         }
     }
     pub fn sidebar(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
-        for (label, view, icon) in [
-            ("Люди", View::People, theme::Icon::People),
-            ("Серии", View::Series(String::new()), theme::Icon::Series),
-            ("Дайджест", View::Digest, theme::Icon::Digest),
+        for (label, view) in [
+            ("Люди", View::People),
+            ("Серии", View::Series(String::new())),
+            ("Дайджест", View::Digest),
         ] {
             let selected = matches!(
                 (&view, &self.view),
@@ -274,10 +274,11 @@ impl Panel {
                     | (View::Series(_), Some(View::Series(_)))
                     | (View::Digest, Some(View::Digest))
             );
-            if theme::rail_button(ui, icon, label, selected).clicked() {
+            if theme::nav_row(ui, label, selected).clicked() {
                 self.view = Some(view);
                 state.tasks_open = false;
                 self.refresh(ui.ctx(), &state.settings);
+                ui.close();
             }
         }
     }
@@ -441,7 +442,7 @@ impl Panel {
                                     .to_uppercase()
                                     .to_string(),
                                 theme::semibold(14.0),
-                                p.accent,
+                                p.muted,
                             );
                             ui.vertical(|ui| {
                                 if ui
@@ -657,6 +658,9 @@ impl Panel {
         theme::page_heading(ui, "Серии");
         let mut open = None;
         if let Some(snapshot) = &self.snapshot {
+            if snapshot.series.is_empty() {
+                ui.weak("Повторяющиеся встречи появятся здесь после синхронизации календаря.");
+            }
             for series in &snapshot.series {
                 if !id.is_empty() && series.id != id {
                     continue;
@@ -677,27 +681,23 @@ impl Panel {
                         self.view = Some(View::Series(series.id.clone()));
                     }
                     for meeting in &series.meetings {
-                        theme::timeline_row(
-                            ui,
-                            theme::TimelineDot::Past(theme::Palette::of(ui).accent),
-                            |ui| {
-                                if ui
-                                    .link(format!(
-                                        "{} · {} · открытых задач: {}",
-                                        meeting
-                                            .meta
-                                            .started_at
-                                            .with_timezone(&chrono::Local)
-                                            .format("%d.%m.%Y %H:%M"),
-                                        meeting.meta.title,
-                                        meeting.open_tasks
-                                    ))
-                                    .clicked()
-                                {
-                                    open = Some(meeting.path.clone());
-                                }
-                            },
-                        );
+                        ui.scope(|ui| {
+                            if ui
+                                .link(format!(
+                                    "{} · {} · открытых задач: {}",
+                                    meeting
+                                        .meta
+                                        .started_at
+                                        .with_timezone(&chrono::Local)
+                                        .format("%d.%m.%Y %H:%M"),
+                                    meeting.meta.title,
+                                    meeting.open_tasks
+                                ))
+                                .clicked()
+                            {
+                                open = Some(meeting.path.clone());
+                            }
+                        });
                     }
                 });
             }

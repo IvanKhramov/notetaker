@@ -45,22 +45,10 @@ impl SpeakerUi {
     }
 }
 
-pub fn color(id: &str) -> Color32 {
-    const COLORS: [Color32; 8] = [
-        Color32::from_rgb(91, 161, 224),
-        Color32::from_rgb(211, 144, 76),
-        Color32::from_rgb(106, 184, 135),
-        Color32::from_rgb(185, 129, 210),
-        Color32::from_rgb(215, 113, 136),
-        Color32::from_rgb(90, 184, 185),
-        Color32::from_rgb(184, 170, 86),
-        Color32::from_rgb(151, 155, 218),
-    ];
-    let hash = id.bytes().fold(0usize, |hash, b| {
-        hash.wrapping_mul(31).wrapping_add(b as usize)
-    });
-    COLORS[hash % COLORS.len()]
+pub fn color(_id: &str) -> Color32 {
+    Color32::from_rgb(138, 135, 127)
 }
+
 fn duration(ms: u64) -> String {
     format!("{}:{:02}", ms / 60_000, ms / 1000 % 60)
 }
@@ -336,55 +324,6 @@ pub fn controls(
                         }
                     }
                 });
-            let (flags, _) = ui
-                .allocate_exact_size(egui::vec2(ui.available_width(), 24.0), egui::Sense::hover());
-            let total = timeline
-                .duration_ms
-                .max(
-                    transcript
-                        .bookmarks
-                        .iter()
-                        .map(|b| b.at_ms)
-                        .max()
-                        .unwrap_or(0),
-                )
-                .max(1);
-            for bookmark in &transcript.bookmarks {
-                let x =
-                    flags.left() + flags.width() * (bookmark.at_ms as f64 / total as f64) as f32;
-                let rect = egui::Rect::from_center_size(
-                    egui::pos2(
-                        x.clamp(
-                            flags.left() + 8.0,
-                            flags.right().max(flags.left() + 16.0) - 8.0,
-                        ),
-                        flags.center().y,
-                    ),
-                    egui::vec2(16.0, 24.0),
-                );
-                ui.painter().text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    "⚑",
-                    egui::FontId::proportional(18.0),
-                    ui.visuals().text_color(),
-                );
-                if ui
-                    .interact(
-                        rect,
-                        ui.scope_id().with(("bookmark", bookmark.id)),
-                        egui::Sense::click(),
-                    )
-                    .on_hover_text(format!(
-                        "{} {}",
-                        duration(bookmark.at_ms),
-                        bookmark.label.as_deref().unwrap_or("Важный момент")
-                    ))
-                    .clicked()
-                {
-                    state.scroll_to = transcript.segment_at(bookmark.at_ms).map(|s| s.id);
-                }
-            }
             ui.small(format!("0:00 - {}", duration(timeline.duration_ms)));
         });
     edit

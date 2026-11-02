@@ -139,7 +139,7 @@ impl Maintenance {
         ui.add_space(16.0);
         crate::theme::section_caption(ui, "Обновления и диагностика");
         ui.add_enabled_ui(cfg!(any(windows, target_os = "macos")), |ui| {
-            ui.checkbox(&mut settings.check_updates, "Проверять обновления");
+            crate::theme::toggle(ui, &mut settings.check_updates, "Проверять обновления");
         });
         self.windows_settings(ui);
         if ui.button("Открыть папку логов").clicked() {

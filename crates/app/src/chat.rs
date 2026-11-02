@@ -16,7 +16,6 @@ pub struct Panel {
     pub error: Option<String>,
 }
 pub enum Action {
-    Ask,
     Open(Meeting, Option<notetaker_core::Anchor>),
 }
 impl Panel {
@@ -34,95 +33,75 @@ impl Panel {
         self.scope_title = title;
         self.open = true;
     }
-    pub fn show(
-        &mut self,
-        ctx: &egui::Context,
-        can_ask: bool,
-        folder: Option<&str>,
-    ) -> Option<Action> {
+    pub fn content(&mut self, ui: &mut egui::Ui, folder: Option<&str>) -> Option<Action> {
         let mut action = None;
-        crate::theme::window(ctx, "Спросить")
-            .open(&mut self.open)
-            .default_size([620.0, 600.0])
-            .show(ctx, |ui| {
-                ui.label(if self.scope.is_some() {
-                    format!("Про встречу: {}", self.scope_title)
-                } else if let Some(folder) = folder {
-                    if folder.is_empty() {
-                        "По встречам без папки".into()
-                    } else {
-                        format!("По папке: {folder}")
-                    }
-                } else {
-                    "По всем встречам".into()
-                });
-                ui.small("История только в памяти. Local-данные направляются локальной модели.");
-                egui::ScrollArea::vertical()
-                    .max_height(420.0)
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        for message in &self.messages {
-                            ui.strong(&message.turn.question);
-                            ui.label(&message.turn.answer);
-                            ui.horizontal_wrapped(|ui| {
-                                for citation in &message.citations {
-                                    if ui
-                                        .link(format!(
-                                            "[{}] {}, {}",
-                                            citation.number, citation.title, citation.date
-                                        ))
-                                        .clicked()
-                                    {
-                                        action = Some(Action::Open(
-                                            citation.meeting.clone(),
-                                            citation.anchor.clone(),
-                                        ));
-                                    }
-                                }
-                            });
-                            ui.separator();
-                        }
-                        if self.busy {
-                            ui.strong(&self.pending);
-                            ui.label(&self.streaming);
-                            ui.spinner();
+        crate::theme::page_heading(ui, "Чат");
+        ui.label(if self.scope.is_some() {
+            format!("Про встречу: {}", self.scope_title)
+        } else if let Some(folder) = folder {
+            if folder.is_empty() {
+                "По встречам без папки".into()
+            } else {
+                format!("По папке: {folder}")
+            }
+        } else {
+            "По всем встречам".into()
+        });
+        if self.messages.is_empty() && !self.busy {
+            ui.add_space(24.0);
+            ui.weak("Решения, задачи и идеи из ваших встреч. Задайте вопрос ниже.");
+        }
+        egui::ScrollArea::vertical()
+            .max_height((ui.available_height() - 60.0).max(80.0))
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                for message in &self.messages {
+                    ui.strong(&message.turn.question);
+                    ui.label(&message.turn.answer);
+                    ui.horizontal_wrapped(|ui| {
+                        for citation in &message.citations {
+                            if ui
+                                .link(format!(
+                                    "[{}] {}, {}",
+                                    citation.number, citation.title, citation.date
+                                ))
+                                .clicked()
+                            {
+                                action = Some(Action::Open(
+                                    citation.meeting.clone(),
+                                    citation.anchor.clone(),
+                                ));
+                            }
                         }
                     });
-                if let Some(error) = &self.error {
-                    ui.colored_label(ui.visuals().error_fg_color, error);
+                    ui.separator();
                 }
-                ui.add_enabled(
-                    !self.busy,
-                    egui::TextEdit::multiline(&mut self.question)
-                        .desired_rows(3)
-                        .hint_text("Что решили про ...?"),
-                );
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(
-                            can_ask && !self.busy && !self.question.trim().is_empty(),
-                            crate::theme::styled_button(
-                                crate::theme::Palette::of(ui),
-                                "Спросить",
-                                crate::theme::ButtonStyle::Primary,
-                            ),
-                        )
-                        .clicked()
-                    {
-                        action = Some(Action::Ask);
-                    }
-                    if ui
-                        .add_enabled(!self.busy, egui::Button::new("Очистить диалог"))
-                        .clicked()
-                    {
-                        self.messages.clear();
-                        self.error = None;
-                    }
-                    if self.busy && ui.button("Отменить").clicked() {
-                        self.cancel.cancel();
-                    }
-                });
+                if self.busy {
+                    ui.strong(&self.pending);
+                    ui.label(&self.streaming);
+                    ui.spinner();
+                }
             });
+        if let Some(error) = &self.error {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
+        ui.horizontal(|ui| {
+            if let Some(meeting) = &self.scope
+                && ui.button("К встрече").clicked()
+            {
+                action = Some(Action::Open(meeting.clone(), None));
+            }
+            if ui
+                .add_enabled(!self.busy, egui::Button::new("Очистить диалог"))
+                .clicked()
+            {
+                self.messages.clear();
+                self.error = None;
+            }
+            if self.busy && ui.button("Отменить").clicked() {
+                self.cancel.cancel();
+            }
+        });
         action
     }
 }

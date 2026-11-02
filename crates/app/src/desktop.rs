@@ -19,8 +19,6 @@ use tray_icon::{
 pub enum Action {
     Show,
     Toggle,
-    Recap,
-    Bookmark,
     Quit,
 }
 pub struct Desktop {
@@ -105,8 +103,9 @@ impl Desktop {
             events,
         })
     }
-    pub fn set_hotkeys(&mut self, values: [&str; 3]) -> Result<()> {
-        crate::config::validate_hotkeys(values)?;
+    pub fn set_hotkey(&mut self, value: &str) -> Result<()> {
+        crate::config::validate_hotkey(value)?;
+        let values = [value];
         let next = values
             .iter()
             .map(|value| value.parse::<HotKey>())
@@ -130,10 +129,7 @@ impl Desktop {
         }
         let mut routes = self.routes.lock().unwrap_or_else(|e| e.into_inner());
         routes.clear();
-        for (key, action) in next
-            .iter()
-            .zip([Action::Toggle, Action::Recap, Action::Bookmark])
-        {
+        for (key, action) in next.iter().zip([Action::Toggle]) {
             routes.insert(key.id(), action);
         }
         self.hotkeys = next;

@@ -187,7 +187,7 @@ impl Connections {
             if selected.is_some_and(|selected| selected != index) {
                 continue;
             }
-            ui.push_id(index, |ui| { ui.group(|ui| {
+            ui.push_id(index, |ui| { ui.scope(|ui| { ui.separator();
                 ui.heading(card.title);
                 if card.status.starts_with("Ошибка:") {
                     ui.colored_label(crate::theme::Palette::of(ui).red, &card.status);

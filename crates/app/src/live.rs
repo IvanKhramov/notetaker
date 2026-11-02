@@ -74,10 +74,9 @@ impl AppState {
         if self.recording.phase != Phase::Recording || self.recording.stop_requested {
             self.save_bookmark_label();
             self.recording.assist.schedule.stop();
-        } else if self.settings.live_summary {
-            self.request_live(false, false);
         }
     }
+    #[allow(dead_code)] // Retained backend for stored legacy assistance data.
     pub fn request_live(&mut self, recap: bool, manual: bool) {
         if self.recording.phase != Phase::Recording || self.recording.stop_requested {
             return;
@@ -151,6 +150,7 @@ impl AppState {
             });
         });
     }
+    #[allow(dead_code)] // Legacy backend; no recording UI or shortcut invokes it.
     pub fn add_bookmark(&mut self) {
         self.save_bookmark_label();
         if self.recording.phase != Phase::Recording || self.recording.stop_requested {

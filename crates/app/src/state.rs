@@ -720,6 +720,7 @@ impl AppState {
             self.task_target = Some((task.path.clone(), task.line));
         }
     }
+    #[allow(dead_code)] // Retained backend; this feature is no longer exposed in the UI.
     pub fn prepare_brief(&mut self, event: notetaker_core::calendar::CalendarEvent) {
         if self.draft_busy || self.settings_pending || !self.ready {
             return;
@@ -735,6 +736,7 @@ impl AppState {
             cancel: self.draft_cancel.clone(),
         });
     }
+    #[allow(dead_code)] // Retained backend; this feature is no longer exposed in the UI.
     pub fn prepare_followup(&mut self) {
         if self.draft_busy
             || self.unsaved()
@@ -766,6 +768,7 @@ impl AppState {
             cancel: self.draft_cancel.clone(),
         });
     }
+    #[allow(dead_code)] // Retained backend; this feature is no longer exposed in the UI.
     pub fn save_followup(&mut self) {
         let Some(path) = &self.followup_path else {
             return;
@@ -811,6 +814,7 @@ impl AppState {
             cancel: self.chat.cancel.clone(),
         });
     }
+    #[allow(dead_code)] // Retained backend; this feature is no longer exposed in the UI.
     pub fn import_recording(&mut self, file: PathBuf) {
         if !self.ready
             || self.recording.busy()
