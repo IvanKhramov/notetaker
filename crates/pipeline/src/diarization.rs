@@ -77,13 +77,17 @@ fn apply_rediarization(meeting: &Meeting, result: &Diarization) -> Result<PathBu
         "transcript.before-diarization-{}.json",
         chrono::Utc::now().format("%Y%m%dT%H%M%S%.9fZ")
     ));
-    let mut source = std::fs::File::open(meeting.path().join("transcript.json"))?;
-    let mut destination = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&backup)?;
-    std::io::copy(&mut source, &mut destination)?;
-    destination.sync_all()?;
+    {
+        // Close both handles before save_transcript replaces transcript.json:
+        // Windows refuses to rename over a file that is still open.
+        let mut source = std::fs::File::open(meeting.path().join("transcript.json"))?;
+        let mut destination = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&backup)?;
+        std::io::copy(&mut source, &mut destination)?;
+        destination.sync_all()?;
+    }
     let mut transcript = loaded.value;
     let mic_ids = microphone_ids(&transcript);
     let mut result = result.clone();
