@@ -10,6 +10,13 @@ use sherpa_onnx::{
 
 use crate::models;
 
+#[path = "diarization/cleanup.rs"]
+mod cleanup;
+
+/// Sherpa 2.0.0 uses complete-linkage cosine distance (1 - cosine).
+/// Keep the upstream ERes2Net default; raising it globally can merge real voices.
+const CLUSTER_DISTANCE: f32 = 0.5;
+
 fn waveform(path: &Path) -> Result<Vec<f32>> {
     let mut wav = hound::WavReader::open(path)?;
     let spec = wav.spec();
@@ -97,6 +104,72 @@ fn mean_embedding(
     normalize(sum).context("invalid mean embedding")
 }
 
+/// Keep the clean parts of a turn, rather than rejecting a whole long turn
+/// because of one brief overlap. Prefer long evidence for stable centroids.
+fn clean_ranges(turns: &[SpeakerTurn], id: &str) -> Vec<TimeRange> {
+    let mut ranges = Vec::new();
+    for turn in turns.iter().filter(|t| t.speaker == id) {
+        let mut parts = vec![(turn.start_ms, turn.end_ms)];
+        for other in turns.iter().filter(|t| t.speaker != id) {
+            parts = parts
+                .into_iter()
+                .flat_map(|(start, end)| {
+                    if other.start_ms >= end || other.end_ms <= start {
+                        vec![(start, end)]
+                    } else {
+                        [
+                            (start, other.start_ms.min(end)),
+                            (other.end_ms.max(start), end),
+                        ]
+                        .into_iter()
+                        .filter(|(a, b)| b > a)
+                        .collect()
+                    }
+                })
+                .collect();
+        }
+        ranges.extend(
+            parts
+                .into_iter()
+                .map(|(start_ms, end_ms)| TimeRange { start_ms, end_ms }),
+        );
+    }
+    ranges.sort_by_key(|r| std::cmp::Reverse(r.end_ms - r.start_ms));
+    ranges
+}
+
+fn cluster_embedding(
+    extractor: &SpeakerEmbeddingExtractor,
+    samples: &[f32],
+    ranges: &[TimeRange],
+) -> Option<Vec<f32>> {
+    if let Ok(embedding) = mean_embedding(extractor, samples, ranges) {
+        return Some(embedding);
+    }
+    // Brief clusters may have no one-second turn. Concatenate only their clean
+    // speech for comparison, never for voice enrollment. Weak matches stay put.
+    let mut speech = Vec::new();
+    for range in ranges.iter().filter(|r| r.end_ms - r.start_ms >= 250) {
+        let start = (range.start_ms.saturating_mul(16)).min(samples.len() as u64) as usize;
+        let end = (range.end_ms.saturating_mul(16)).min(samples.len() as u64) as usize;
+        speech.extend_from_slice(&samples[start..end.min(start + 15 * 16000)]);
+        if speech.len() >= 15 * 16000 {
+            break;
+        }
+    }
+    if speech.len() < 8000 {
+        return None;
+    }
+    let stream = extractor.create_stream()?;
+    stream.accept_waveform(16000, &speech);
+    stream.input_finished();
+    extractor
+        .is_ready(&stream)
+        .then(|| extractor.compute(&stream))
+        .flatten()
+        .and_then(normalize)
+}
+
 pub fn embed(path: &Path, ranges: &[TimeRange], threads: i32) -> Result<Vec<f32>> {
     let samples = waveform(path)?;
     let extractor = SpeakerEmbeddingExtractor::create(&extractor_config(threads)?)
@@ -121,7 +194,7 @@ pub fn diarize(
     config.segmentation.num_threads = threads;
     config.embedding = extractor_config(threads)?;
     config.clustering.num_clusters = speakers.map_or(-1, |n| n as i32);
-    config.clustering.threshold = 0.5;
+    config.clustering.threshold = CLUSTER_DISTANCE;
     let samples = waveform(path)?;
     if samples.len() < 16000 {
         return Ok(Diarization::default());
@@ -143,11 +216,16 @@ pub fn diarize(
         {
             continue;
         }
+        let start_ms = (turn.start * 1000.0) as u64;
+        let end_ms = ((turn.end * 1000.0) as u64).min(samples.len() as u64 / 16);
+        if end_ms <= start_ms {
+            continue;
+        }
         let next = format!("s{}", ids.len() + 1);
         let speaker = ids.entry(turn.speaker).or_insert(next).clone();
         turns.push(SpeakerTurn {
-            start_ms: (turn.start * 1000.0) as u64,
-            end_ms: ((turn.end * 1000.0) as u64).min(samples.len() as u64 / 16),
+            start_ms,
+            end_ms,
             speaker,
         });
     }
@@ -157,30 +235,104 @@ pub fn diarize(
         turns,
         ..Default::default()
     };
-    if embeddings {
-        let extractor =
-            SpeakerEmbeddingExtractor::create(&config.embedding).context("load voice extractor")?;
-        for id in ids.values() {
-            let ranges: Vec<_> = result
-                .turns
+    refine(&mut result, &samples, speakers, embeddings, threads)?;
+    Ok(result)
+}
+
+/// Shared with the ignored evaluation so segmentation results can be cached.
+pub(crate) fn refine(
+    result: &mut Diarization,
+    samples: &[f32],
+    speakers: Option<u32>,
+    embeddings: bool,
+    threads: i32,
+) -> Result<()> {
+    let ids: std::collections::BTreeSet<_> =
+        result.turns.iter().map(|t| t.speaker.clone()).collect();
+    if embeddings || (speakers.is_none() && ids.len() > 1) {
+        let extractor = SpeakerEmbeddingExtractor::create(&extractor_config(threads)?)
+            .context("load voice extractor")?;
+        if speakers.is_none() && ids.len() > 1 {
+            let centroids = ids
                 .iter()
-                .filter(|t| &t.speaker == id)
-                .filter(|t| {
-                    !result.turns.iter().any(|other| {
-                        other.speaker != t.speaker
-                            && other.start_ms < t.end_ms
-                            && t.start_ms < other.end_ms
-                    })
-                })
-                .map(|t| TimeRange {
-                    start_ms: t.start_ms,
-                    end_ms: t.end_ms,
+                .filter_map(|id| {
+                    let ranges = clean_ranges(&result.turns, id);
+                    cluster_embedding(&extractor, samples, &ranges).map(|e| (id.clone(), e))
                 })
                 .collect();
-            if let Ok(embedding) = mean_embedding(&extractor, &samples, &ranges) {
-                result.embeddings.insert(id.clone(), embedding);
+            cleanup::reassign(&mut result.turns, &centroids);
+        }
+        // Number the surviving voices by first appearance. Comparison vectors
+        // remain worker-local when the voice library is disabled.
+        let mut names = BTreeMap::new();
+        for turn in &mut result.turns {
+            let next = format!("s{}", names.len() + 1);
+            turn.speaker = names.entry(turn.speaker.clone()).or_insert(next).clone();
+        }
+        if embeddings {
+            for id in names.values() {
+                let ranges = clean_ranges(&result.turns, id);
+                if let Ok(embedding) = mean_embedding(&extractor, samples, &ranges) {
+                    result.embeddings.insert(id.clone(), embedding);
+                }
             }
         }
     }
-    Ok(result)
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_speaker_count_bypasses_automatic_cleanup_and_voice_models() {
+        let mut result = Diarization {
+            turns: vec![
+                SpeakerTurn {
+                    speaker: "s1".into(),
+                    start_ms: 0,
+                    end_ms: 10000,
+                },
+                SpeakerTurn {
+                    speaker: "s2".into(),
+                    start_ms: 10000,
+                    end_ms: 10500,
+                },
+            ],
+            ..Default::default()
+        };
+        let original = result.clone();
+        refine(&mut result, &[], Some(2), false, 1).unwrap();
+        assert_eq!(result, original);
+    }
+
+    #[test]
+    fn clean_parts_survive_brief_nested_and_adjacent_overlaps() {
+        let turn = |id: &str, start_ms, end_ms| SpeakerTurn {
+            speaker: id.into(),
+            start_ms,
+            end_ms,
+        };
+        let turns = [
+            turn("a", 0, 10000),
+            turn("b", 2000, 3000),
+            turn("c", 2500, 4000),
+            turn("b", 10000, 11000),
+        ];
+        let ranges = clean_ranges(&turns, "a");
+        assert_eq!(
+            ranges,
+            [
+                TimeRange {
+                    start_ms: 4000,
+                    end_ms: 10000
+                },
+                TimeRange {
+                    start_ms: 0,
+                    end_ms: 2000
+                }
+            ]
+        );
+    }
 }
