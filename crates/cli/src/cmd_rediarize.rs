@@ -9,7 +9,8 @@ use notetaker_core::Library;
 pub struct Args {
     /// Meeting directory. Speaker names and merges on the system track are reset.
     pub meeting: PathBuf,
-    /// Exact number of system-track voices (1..32); microphone is separate.
+    /// Requested number of system-track voices (1..32); microphone is separate.
+    /// Sherpa may return fewer active voices after segmentation.
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..=32))]
     pub speakers: Option<u32>,
 }

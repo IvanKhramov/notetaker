@@ -36,7 +36,10 @@ def write(path, samples):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dir", type=Path, default=Path("target/diarization-eval"))
+    parser.add_argument("--long-seconds", type=int, default=0, help="add 2/3/4-speaker long calls (e.g. 1200)")
     args = parser.parse_args()
+    if args.long_seconds and args.long_seconds <= 300:
+        parser.error("--long-seconds must exceed 300")
     root = args.dir
     root.mkdir(parents=True, exist_ok=True)
     archive = root / "test-clean.tar.gz"
@@ -62,8 +65,9 @@ def main():
             counts[speaker] += 1
     assert all(n == 8 for n in counts.values()), counts
     manifest = []
+    durations = (45, 300, args.long_seconds) if args.long_seconds else (45, 300)
     for count, seconds, degraded in [(2, 45, False)] + [
-        (n, duration, True) for duration in (45, 300) for n in (2, 3, 4)
+        (n, duration, True) for duration in durations for n in (2, 3, 4)
     ]:
         name = f"{count}-{'call' if degraded else 'clean'}-{seconds}s"
         rng = random.Random(2026 + count)
