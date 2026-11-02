@@ -45,7 +45,11 @@ pub fn run(args: Args) -> Result<()> {
             } else {
                 "/MERGETASKS=!autostart"
             })
-            .arg(format!("/DIR={}", args.install.display()));
+            // Inno rejects `?`, so never pass a verbatim `\\?\` path to /DIR.
+            .arg(format!(
+                "/DIR={}",
+                notetaker_runtime::paths::simplified(args.install.clone()).display()
+            ));
         if let Some(logs) = &logs {
             installer.arg(format!(
                 "/LOG={}",
