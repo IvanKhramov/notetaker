@@ -239,13 +239,14 @@ impl NotetakerApp {
                                 ),
                             );
                             let reserve = 172.0;
-                            ui.add_sized(
-                                [(ui.available_width() - reserve).max(40.0), 40.0],
-                                egui::Label::new(&event.link.title)
-                                    .truncate()
-                                    .halign(egui::Align::Min),
-                            )
-                            .on_hover_text(&event.link.title);
+                            ui.allocate_ui_with_layout(
+                                egui::vec2((ui.available_width() - reserve).max(40.0), 40.0),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.add(egui::Label::new(&event.link.title).truncate())
+                                        .on_hover_text(&event.link.title);
+                                },
+                            );
                             if let Some(url) = &event.link.call_url {
                                 ui.add_sized(
                                     [76.0, 24.0],
@@ -401,11 +402,12 @@ impl NotetakerApp {
                     if r.busy() { 236.0 } else { 250.0 }
                 } else {
                     146.0
-                }) + if self.ask_text.trim().is_empty() {
-                    0.0
-                } else {
-                    96.0
-                };
+                }) + if r.busy() { 96.0 } else { 0.0 }
+                    + if self.ask_text.trim().is_empty() {
+                        0.0
+                    } else {
+                        96.0
+                    };
                 let response = ui.add_sized(
                     [(ui.available_width() - space).max(60.0), 32.0],
                     egui::TextEdit::singleline(&mut self.ask_text)
