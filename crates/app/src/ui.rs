@@ -9,7 +9,7 @@ use notetaker_core::Mode;
 
 use crate::{
     attachments::ImageInput,
-    config::{MODELS, ProviderSettings},
+    config::MODELS,
     detection::CallPrompt,
     state::{AppState, Document, Phase, Tab, edit_segment, speaker, timestamp},
     theme::{self, ButtonStyle, Palette, ToastLevel},
@@ -38,6 +38,7 @@ pub struct NotetakerApp {
     enhanced_preview: bool,
     show_record: bool,
     show_settings: bool,
+    settings_panel: crate::settings::Panel,
     quickstart: crate::quickstart::Panel,
     tasks_all: bool,
     tasks_mine: bool,
@@ -69,6 +70,7 @@ impl NotetakerApp {
             enhanced_preview: true,
             show_record: false,
             show_settings: false,
+            settings_panel: Default::default(),
             quickstart: Default::default(),
             tasks_all: false,
             tasks_mine: false,
@@ -1198,186 +1200,22 @@ impl NotetakerApp {
         });
         self.show_record &= open;
     }
+    fn exit(&mut self) {
+        self.settings_panel.blur(&mut self.state);
+        self.quickstart.blur(&mut self.state);
+        self.state.exit();
+    }
     fn settings_dialog(&mut self, ctx: &egui::Context) {
-        let mut open = self.show_settings;
-        let mut quickstart = false;
-        theme::window(ctx, "Настройки").open(&mut open).default_width(640.0).default_height(580.0).resizable(true).show(ctx, |ui| {
-            ui.scope(|ui| {
-                theme::setting_row(ui, "Быстрый старт", |ui| { if theme::button(ui, "Открыть ›", ButtonStyle::Ghost).clicked() { self.quickstart.open = true; quickstart = true; } });
-                let settings = &mut self.state.settings_draft;
-                theme::setting_row(ui, "Тема", |ui| {
-                    egui::ComboBox::from_id_salt("theme").selected_text(settings.theme.label()).show_ui(ui, |ui| {
-                        for theme in [crate::theme::Theme::Light, crate::theme::Theme::Dark, crate::theme::Theme::System] { ui.selectable_value(&mut settings.theme, theme, theme.label()); }
-                    });
-                });
-                theme::setting_row(ui, "Ваше имя", |ui| { ui.text_edit_singleline(&mut settings.user_name); });
-                theme::setting_row(ui, "Модель распознавания", |ui| { model_selector(ui, "default_model", &mut settings.model); });
-                theme::setting_row(ui, "Горячая клавиша записи", |ui| { ui.text_edit_singleline(&mut settings.hotkey); });
-                theme::toggle(ui, &mut settings.detect_calls, "Предлагать запись звонков");
-                theme::toggle(ui, &mut settings.auto_summary, "Создавать конспект после встречи");
-                theme::setting_row(ui, "Библиотека", |ui| {
-                    let mut library = notetaker_core::display_path(&settings.library);
-                    if ui.text_edit_singleline(&mut library).changed() { settings.library = library.into(); }
-                });
-                ui.collapsing("Запись и хранение", |ui| {
-                    theme::setting_row(ui, "Режим новых встреч", |ui| { mode_selector(ui, &mut settings.mode); });
-                    ui.small("Local: текст только у локального AI. Hybrid: текст может быть отправлен выбранному провайдеру. Аудио остаётся на компьютере.");
-                    theme::setting_row(ui, "Хранить аудио", |ui| {
-                        let mut forever = settings.retention_days.is_none();
-                        if ui.checkbox(&mut forever, "Всегда").changed() { settings.retention_days = if forever { None } else { Some(7) }; }
-                        if let Some(days) = &mut settings.retention_days { ui.add(egui::DragValue::new(days).range(0..=36_500).suffix(" дней")); }
-                    });
-                    ui.small("0 дней: удалить после чистового прохода. Применяется к новым записям.");
-                    theme::setting_row(ui, "Автостоп по тишине", |ui| { ui.add(egui::DragValue::new(&mut settings.auto_stop_minutes).range(0..=u32::MAX).suffix(" мин")); });
-                    ui.small("0 минут: выключен. Завершение звонка не останавливает запись.");
-                    theme::toggle(ui, &mut settings.detect_browsers, "Учитывать браузеры");
-                    theme::toggle(ui, &mut settings.detect_any_microphone, "Любое приложение с микрофоном");
-                    ui.label("Свои приложения для звонков (одно имя процесса на строку)");
-                    ui.add(egui::TextEdit::multiline(&mut settings.call_apps).desired_rows(2));
-                    #[cfg(target_os = "macos")]
-                    ui.small("macOS: системный звук целиком, кроме notetaker. Разрешения: Microphone и System Audio Recording.");
-                });
-                ui.collapsing("Распознавание и участники", |ui| {
-                    theme::toggle(ui, &mut settings.diarize, "Разделять собеседников");
-                    theme::setting_row(ui, "Число собеседников", |ui| {
-                        egui::ComboBox::from_id_salt("speakers").selected_text(settings.speakers.map_or("Авто".into(), |n| n.to_string())).show_ui(ui, |ui| {
-                            ui.selectable_value(&mut settings.speakers, None, "Авто");
-                            for n in 1..=32 { ui.selectable_value(&mut settings.speakers, Some(n), n.to_string()); }
-                        });
-                    });
-                    theme::setting_row(ui, "Потоков ASR (0: авто)", |ui| { ui.add(egui::DragValue::new(&mut settings.asr_threads).range(0..=8)); });
-                    theme::setting_row(ui, "Ускорение ASR", |ui| {
-                        egui::ComboBox::from_id_salt("asr_acceleration").selected_text(if settings.asr_acceleration == notetaker_asr_proto::Provider::Auto { "Авто" } else { "CPU" }).show_ui(ui, |ui| {
-                            ui.selectable_value(&mut settings.asr_acceleration, notetaker_asr_proto::Provider::Auto, "Авто");
-                            ui.selectable_value(&mut settings.asr_acceleration, notetaker_asr_proto::Provider::Cpu, "CPU");
-                        });
-                    });
-                    theme::toggle(ui, &mut settings.voice_library, "Запоминать голоса");
-                    ui.small("Голосовые отпечатки хранятся только локально.");
-                    theme::setting_row(ui, "Другие варианты вашего имени", |ui| { ui.text_edit_singleline(&mut settings.user_aliases); });
-                    theme::toggle(ui, &mut settings.digest_reminder, "Напоминать о дайджесте по пятницам");
-                    ui.label("Словарь (один термин на строку)");
-                    ui.add(egui::TextEdit::multiline(&mut settings.vocabulary).desired_rows(3));
-                    ui.small("Алиасы: werf = верф, вёрф.");
-                });
-                self.maintenance.settings(ui, settings);
-                ui.add_space(16.0); theme::section_caption(ui, "Модели ASR");
-                crate::quickstart::model_control(ui, &mut self.state, "gigaam-v3", "GigaAM v3 · русский");
-                crate::quickstart::model_control(ui, &mut self.state, "parakeet-v3", "Parakeet v3 · многоязычный");
-                crate::quickstart::model_control(ui, &mut self.state, "auto", "Авто (рус/англ) · обе ASR-модели + Whisper tiny");
-                crate::quickstart::model_control(ui, &mut self.state, "diarization", "Модели разделения собеседников (47 МБ)");
-                theme::toggle(ui, &mut self.state.settings_draft.auto_download_models, "Скачивать модели автоматически");
-                theme::toggle(ui, &mut self.state.settings_draft.hide_quickstart, "Больше не показывать быстрый старт при запуске");
-                ui.collapsing("Голоса", |ui| {
-                    if self.state.voices.voices.is_empty() { ui.small("Голосов пока нет. Назовите участника в транскрипте или нажмите «Это я»."); }
-                    let mut delete = None;
-                    for voice in &self.state.voices.voices {
-                        ui.horizontal(|ui| {
-                            ui.label(format!("{}{}", voice.name, if voice.is_me { " (это я)" } else { "" }));
-                            if ui.button("Удалить").clicked() { delete = Some(voice.name.clone()); }
-                        });
-                    }
-                    if let Some(name) = delete { self.state.send(Command::Voices { root:self.state.settings.library.clone(), delete:Some(name) }); }
-                });
-                theme::toggle(ui, &mut self.state.settings_draft.auto_summary, "Делать конспект автоматически");
-                ui.add_space(16.0); theme::section_caption(ui, "Календари");
-                ui.small("Приватные ICS-подписки. URL хранится в Credential Manager. Обновление при запуске и каждые 10 минут.");
-                ui.horizontal(|ui| { ui.label("Часовой пояс без TZID:"); ui.text_edit_singleline(&mut self.state.settings_draft.calendar_timezone); });
-                #[cfg(not(any(windows, target_os = "macos")))]
-                ui.small("Сохранение URL доступно на Windows, как и ключей шлюзов.");
-                let mut remove_calendar = None;
-                for calendar in &mut self.state.settings_draft.calendars {
-                    ui.push_id(&calendar.id, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.text_edit_singleline(&mut calendar.name);
-                            if ui.button("Удалить").clicked() { remove_calendar = Some(calendar.id.clone()); }
-                        });
-                        let secret = self.state.calendar_secrets.entry(calendar.id.clone()).or_default();
-                        ui.add(egui::TextEdit::singleline(secret).password(true).hint_text("Приватный HTTPS URL ICS (пусто - сохранённый)"));
-                    });
-                }
-                if let Some(id) = remove_calendar {
-                    self.state.settings_draft.calendars.retain(|s| s.id != id);
-                    self.state.calendar_secrets.remove(&id);
-                }
-                let connect = if self.state.settings_draft.calendars.is_empty() {
-                    ui.add_enabled(cfg!(any(windows, target_os = "macos")), egui::Link::new("Подключить календарь")).clicked()
-                } else { ui.add_enabled(cfg!(any(windows, target_os = "macos")), egui::Button::new("Добавить календарь")).clicked() };
-                if connect {
-                    self.state.settings_draft.calendars.push(notetaker_llm::calendar::Subscription { id: format!("calendar-{}", uuid::Uuid::now_v7()), name: "Календарь".into() });
-                }
-                if ui.add_enabled(!self.state.calendar_busy, egui::Button::new("Обновить календари")).clicked() { self.state.refresh_calendar(); }
-                ui.small(&self.state.calendar_status);
-                theme::toggle(ui, &mut self.state.settings_draft.mcp_exclude_local, "MCP: не отдавать Local-встречи");
-                ui.separator();
-                crate::quickstart::semantic_step(ui,&mut self.state);
-                self.organization.shared_step(ui, !self.state.semantic_running && self.state.can_save_settings());
-                ui.collapsing("Удалённый поиск по смыслу (только Hybrid)",|ui| {
-                    ui.small("Используется только без локальной модели. Local-встречи остаются в поиске по словам.");
-                    let llm=&mut self.state.llm_draft;
-                    egui::ComboBox::from_id_salt("embedding_provider").selected_text(if llm.embeddings.provider.is_empty() {"Выключено"} else {&llm.embeddings.provider}).show_ui(ui,|ui| {
-                        ui.selectable_value(&mut llm.embeddings.provider,String::new(),"Выключено");
-                        for provider in &llm.providers {if provider.kind=="openai" {ui.selectable_value(&mut llm.embeddings.provider,provider.id.clone(),&provider.id);}}
-                    });
-                    ui.add(egui::TextEdit::singleline(&mut llm.embeddings.model).hint_text("Модель embeddings"));
-                });
-                ui.add_space(16.0); theme::section_caption(ui, "Подключение AI");
-                let can_default = self.state.ready && !self.state.recording.busy() && self.state.enhancing.is_none() && !self.state.chat.busy && !self.state.unsaved() && !self.state.settings_pending;
-                let actions = self.state.connections.ui(ui, &self.state.llm_draft.defaults.hybrid, can_default);
-                for action in actions { self.state.send(Command::Ai(action)); }
-                ui.collapsing("Модели по сценариям", |ui| {
-                    let llm = &mut self.state.llm_draft;
-                    for (label, choice) in [("Конспект", &mut llm.scenarios.summary), ("Чат", &mut llm.scenarios.chat)] {
-                        ui.push_id(label, |ui| {
-                            ui.label(label);
-                            egui::ComboBox::from_id_salt("provider").selected_text(if choice.provider.is_empty() { "По умолчанию" } else { &choice.provider }).show_ui(ui, |ui| {
-                                ui.selectable_value(&mut choice.provider, String::new(), "По умолчанию");
-                                for provider in &llm.providers { ui.selectable_value(&mut choice.provider, provider.id.clone(), &provider.id); }
-                            });
-                            ui.add(egui::TextEdit::singleline(&mut choice.model).hint_text("Модель (пусто - модель провайдера)"));
-                        });
-                    }
-                    ui.small("Для Local облачный сценарий заменяется локальным провайдером по умолчанию и его моделью.");
-                });
-                ui.collapsing("Расширенные", |ui| {
-                ui.label("Указывайте имена переменных окружения; значения ключей здесь не хранятся. Для Local разрешены только loopback-провайдеры.");
-                let llm = &mut self.state.llm_draft;
-                ui.horizontal(|ui| { ui.label("По умолчанию Local:"); ui.text_edit_singleline(&mut llm.defaults.local); });
-                ui.horizontal(|ui| { ui.label("По умолчанию Hybrid:"); ui.text_edit_singleline(&mut llm.defaults.hybrid); });
-                let mut remove = None;
-                for (index, provider) in llm.providers.iter_mut().enumerate() {
-                    ui.push_id(index, |ui| { ui.scope(|ui| {
-                        ui.horizontal(|ui| { ui.label("id"); ui.text_edit_singleline(&mut provider.id); if ui.button("Удалить провайдер").clicked() { remove = Some(index); } });
-                        egui::ComboBox::from_id_salt("kind").selected_text(&provider.kind).show_ui(ui, |ui| {
-                            ui.selectable_value(&mut provider.kind, "openai".into(), "OpenAI-compatible (Ollama, OpenRouter, vLLM…)");
-                            ui.selectable_value(&mut provider.kind, "anthropic".into(), "Anthropic");
-                            ui.selectable_value(&mut provider.kind, "claude-cli".into(), "Claude CLI");
-                            ui.selectable_value(&mut provider.kind, "codex-cli".into(), "Codex CLI");
-                        });
-                        ui.horizontal(|ui| { ui.label("base_url"); ui.text_edit_singleline(&mut provider.base_url); });
-                        ui.horizontal(|ui| { ui.label("model"); ui.text_edit_singleline(&mut provider.model); });
-                        egui::ComboBox::from_id_salt("key_source").selected_text(&provider.key_source).show_ui(ui, |ui| {
-                            ui.selectable_value(&mut provider.key_source, "env".into(), "env");
-                            ui.selectable_value(&mut provider.key_source, "credential".into(), "credential");
-                        });
-                        let mut env = provider.api_key_env.clone().unwrap_or_default();
-                        ui.horizontal(|ui| { ui.label("api_key_env"); if ui.text_edit_singleline(&mut env).changed() { provider.api_key_env = (!env.is_empty()).then_some(env.clone()); } });
-                        ui.horizontal(|ui| { ui.label("context_tokens"); ui.add(egui::DragValue::new(&mut provider.context_tokens).range(1..=2_000_000)); });
-                    }); });
-                }
-                if let Some(index) = remove { llm.providers.remove(index); }
-                if ui.button("Добавить провайдер").clicked() { llm.providers.push(ProviderSettings { id: format!("provider-{}", llm.providers.len() + 1), ..ProviderSettings::default() }); }
-                });
-                ui.separator();
-                let can_save = self.state.ready && !self.state.recording.busy() && self.state.enhancing.is_none() && !self.state.chat.busy && !self.state.unsaved() && !self.state.settings_pending;
-                if ui.add_enabled(can_save, theme::styled_button(Palette::of(ui), "Сохранить настройки", ButtonStyle::Primary)).clicked() { self.state.save_settings(); }
-                if self.state.recording.busy() || self.state.enhancing.is_some() { ui.small("Сохранение настроек доступно после завершения записи и конспекта."); }
-                ui.small(if cfg!(target_os = "macos") { "Ключи и URL календарей хранятся в macOS Keychain. Настройки приложения и LLM сохраняются отдельно." } else { "Настройки приложения и LLM сохраняются отдельно. Ключи шлюзов хранятся в Credential Manager на Windows; также поддерживается окружение." });
-                #[cfg(not(any(windows, target_os = "macos")))]
-                ui.small("Трей и глобальная клавиша включены только на Windows; GTK/AppIndicator не нужны для сборки Linux.");
-            });
-        });
-        self.show_settings = open && !quickstart;
+        if self.settings_panel.show(
+            ctx,
+            &mut self.show_settings,
+            &mut self.state,
+            &mut self.maintenance,
+            &mut self.organization,
+        ) {
+            self.quickstart.open = true;
+            self.show_settings = false;
+        }
     }
     fn call_notification(&mut self, ctx: &egui::Context) {
         let Some(prompt) = self.state.call_prompt.clone() else {
@@ -1531,7 +1369,7 @@ impl NotetakerApp {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                     }
                     Action::Toggle => self.state.toggle_recording(),
-                    Action::Quit => self.state.exit(),
+                    Action::Quit => self.exit(),
                 }
             }
         }
@@ -1554,7 +1392,7 @@ impl eframe::App for NotetakerApp {
         }
         #[cfg(target_os = "macos")]
         if crate::macos::quit_requested() {
-            self.state.exit();
+            self.exit();
         }
         self.organization.poll(ctx, &mut self.state);
         self.quickstart.tick(&mut self.state);
@@ -1570,7 +1408,7 @@ impl eframe::App for NotetakerApp {
                 || self.state.chat.busy
                 || self.state.unsaved(),
         ) {
-            self.state.exit();
+            self.exit();
         }
         self.state.settings.theme.apply(ctx);
         ctx.input(|input| {
@@ -1586,12 +1424,14 @@ impl eframe::App for NotetakerApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             #[cfg(any(windows, target_os = "macos"))]
             if self.desktop.is_some() && !self.state.exit_requested {
+                self.settings_panel.blur(&mut self.state);
+                self.quickstart.blur(&mut self.state);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             } else {
-                self.state.exit();
+                self.exit();
             }
             #[cfg(not(any(windows, target_os = "macos")))]
-            self.state.exit();
+            self.exit();
         }
         if self.state.can_exit() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -1602,7 +1442,11 @@ impl eframe::App for NotetakerApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaintWhileHidden);
         }
         ctx.request_repaint_after(Duration::from_millis(
-            if self.state.recording.busy() || self.state.enhancing.is_some() {
+            if self.state.recording.busy()
+                || self.state.enhancing.is_some()
+                || self.state.settings_autosave.pending
+                || self.state.connections.has_edits()
+            {
                 100
             } else {
                 500
@@ -1938,7 +1782,7 @@ fn mode_selector(ui: &mut egui::Ui, mode: &mut Mode) -> bool {
     ui.small(mode_label(*mode));
     selected
 }
-fn model_selector(ui: &mut egui::Ui, id: &str, model: &mut String) {
+pub(crate) fn model_selector(ui: &mut egui::Ui, id: &str, model: &mut String) {
     egui::ComboBox::from_id_salt(id)
         .selected_text(crate::config::model_label(model))
         .show_ui(ui, |ui| {

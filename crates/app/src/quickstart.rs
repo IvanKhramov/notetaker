@@ -197,7 +197,7 @@ pub fn model_control(ui: &mut egui::Ui, state: &mut AppState, model: &str, title
             if state.settings.model == model {
                 ui.small("По умолчанию");
             } else if ui
-                .add_enabled(state.can_save_settings(), egui::Button::new("Выбрать"))
+                .add_enabled(state.ready, egui::Button::new("Выбрать"))
                 .clicked()
             {
                 state.settings_draft.model = model.into();
@@ -249,6 +249,44 @@ pub struct Panel {
     probe_status: Option<Status>,
 }
 impl Panel {
+    fn accept_calendar(&mut self, state: &mut AppState) -> bool {
+        if self.calendar_url.trim().is_empty() {
+            return false;
+        }
+        let id = state
+            .settings_draft
+            .calendars
+            .first()
+            .map(|calendar| calendar.id.clone())
+            .unwrap_or_else(|| format!("calendar-{}", uuid::Uuid::now_v7()));
+        if let Err(error) = crate::settings::validate_calendar_secret(&id, &self.calendar_url) {
+            state.quickstart.calendar_error = Some(error.to_string());
+            return false;
+        }
+        if state.settings_draft.calendars.is_empty() {
+            state
+                .settings_draft
+                .calendars
+                .push(notetaker_llm::calendar::Subscription {
+                    id: id.clone(),
+                    name: "Календарь".into(),
+                });
+        }
+        state
+            .calendar_secrets
+            .insert(id, self.calendar_url.trim().to_owned());
+        self.calendar_url.clear();
+        self.calendar_connecting = true;
+        state.quickstart.calendar_error = None;
+        true
+    }
+
+    pub fn blur(&mut self, state: &mut AppState) {
+        state.connections.blur();
+        if cfg!(any(windows, target_os = "macos")) && self.accept_calendar(state) {
+            state.save_preferences();
+        }
+    }
     pub fn tick(&mut self, state: &mut AppState) {
         if state.ready && !self.startup_checked {
             self.startup_checked = true;
@@ -258,7 +296,7 @@ impl Panel {
             self.ai_connecting = false;
             self.edit_ai = false;
         }
-        if self.calendar_connecting && !state.settings_pending {
+        if self.calendar_connecting && !state.settings_pending && !state.settings_autosave.pending {
             self.calendar_connecting = false;
             if state.quickstart.calendar_error.is_none() {
                 self.calendar_url.clear();
@@ -336,6 +374,8 @@ impl Panel {
             .default_height(620.0)
             .resizable(true)
             .show(ctx, |ui| {
+                ui.small(state.settings_status());
+                if let Some(error) = &state.settings_autosave.error { ui.colored_label(Palette::of(ui).red, error); }
                 let completed = steps.iter().filter(|s| **s == Status::Ready).count();
                 ui.label(egui::RichText::new(if essential_missing(&steps) == 0 { "Можно начинать запись".to_owned() } else { format!("Настроено {completed} из 6") }).font(theme::semibold(16.0)));
                 ui.add(egui::ProgressBar::new(completed as f32 / 6.0).fill(Palette::of(ui).text).desired_height(4.0));
@@ -351,7 +391,7 @@ impl Panel {
                     model_control(ui, state, "auto", "Авто (рус/англ)");
                     row(ui, &steps[1], "Разделение собеседников", "Отмечает, кто говорил. Модели занимают около 47 МБ.");
                     model_control(ui, state, "diarization", "Модели собеседников");
-                    ui.add_enabled_ui(state.can_save_settings(), |ui| {
+                    ui.add_enabled_ui(state.ready, |ui| {
                         save |= crate::theme::toggle(ui, &mut state.settings_draft.auto_download_models, "Скачивать модели автоматически").changed();
                     });
                     row(ui, &steps[2], "AI для конспектов", "Провайдер по умолчанию для конспектов и чата.");
@@ -366,7 +406,7 @@ impl Panel {
                             }
                         });
                     } else {
-                        let can_default = state.can_save_settings();
+                        let can_default = state.ready;
                         for action in state.connections.quickstart_ui(ui, &state.llm_draft.defaults.hybrid, can_default, &mut self.selected_ai) {
                             self.ai_connecting |= action.operation == crate::ai::Operation::Default;
                             state.send(Command::Ai(action));
@@ -379,38 +419,28 @@ impl Panel {
                         ui.small("Подключение облачного AI включит Hybrid для новых встреч.");
                     }
                     row(ui, &steps[3], "Как вас зовут", "Для фильтра «Мои» и имени вашего спикера.");
-                    ui.add_enabled_ui(state.can_save_settings(), |ui| {
+                    ui.add_enabled_ui(state.ready, |ui| {
                         let blur = identity_control(ui, &mut state.settings_draft);
                         save |= blur && (state.settings_draft.user_name != state.settings.user_name || state.settings_draft.user_aliases != state.settings.user_aliases);
                     });
-                    row(ui, &steps[4], "Календарь (необязательно)", "Приватная HTTPS ICS-подписка, URL хранится в Credential Manager.");
+                    row(ui, &steps[4], "Календарь (необязательно)", if cfg!(target_os = "macos") { "Приватная HTTPS ICS-подписка, URL хранится в macOS Keychain." } else { "Приватная HTTPS ICS-подписка, URL хранится в Windows Credential Manager." });
                     if state.settings.calendars.is_empty() {
-                        ui.add_enabled_ui(state.can_save_settings() && cfg!(any(windows, target_os = "macos")), |ui| {
-                            ui.add(egui::TextEdit::singleline(&mut self.calendar_url).password(true).hint_text("HTTPS URL ICS"));
-                            if ui.add_enabled(!self.calendar_url.trim().is_empty(), egui::Button::new("Подключить")).clicked() {
-                                let id = if let Some(calendar) = state.settings_draft.calendars.first() { calendar.id.clone() } else {
-                                    let id = format!("calendar-{}", uuid::Uuid::now_v7());
-                                    state.settings_draft.calendars.push(notetaker_llm::calendar::Subscription { id: id.clone(), name: "Календарь".into() });
-                                    id
-                                };
-                                state.calendar_secrets.insert(id, self.calendar_url.trim().to_owned());
-                                self.calendar_connecting = true;
-                                save = true;
+                        ui.add_enabled_ui(state.ready && cfg!(any(windows, target_os = "macos")), |ui| {
+                            let response = ui.add(egui::TextEdit::singleline(&mut self.calendar_url).password(true).hint_text("HTTPS URL ICS"));
+                            if response.lost_focus() && !self.calendar_url.trim().is_empty() {
+                                save |= self.accept_calendar(state);
                             }
                         });
                         #[cfg(not(any(windows, target_os = "macos")))]
-                        ui.small("Сохранение URL доступно на Windows.");
+                        ui.small("Сохранение URL доступно на Windows и macOS.");
                     } else {
                         let today = chrono::Local::now().date_naive();
                         let count = state.calendar_events.iter().filter(|event| event.start.with_timezone(&chrono::Local).date_naive() == today).count();
                         ui.label(format!("{count} событий сегодня"));
-                        ui.add_enabled_ui(state.can_save_settings() && cfg!(any(windows, target_os = "macos")), |ui| {
-                            ui.add(egui::TextEdit::singleline(&mut self.calendar_url).password(true).hint_text("Новый HTTPS URL ICS (при необходимости)"));
-                            if ui.add_enabled(!self.calendar_url.trim().is_empty(), egui::Button::new("Подключить")).clicked() {
-                                let id = state.settings.calendars[0].id.clone();
-                                state.calendar_secrets.insert(id, self.calendar_url.trim().to_owned());
-                                self.calendar_connecting = true;
-                                save = true;
+                        ui.add_enabled_ui(state.ready && cfg!(any(windows, target_os = "macos")), |ui| {
+                            let response = ui.add(egui::TextEdit::singleline(&mut self.calendar_url).password(true).hint_text("Новый HTTPS URL ICS (при необходимости)"));
+                            if response.lost_focus() && !self.calendar_url.trim().is_empty() {
+                                save |= self.accept_calendar(state);
                             }
                         });
                         if ui.add_enabled(!state.calendar_busy, egui::Button::new("Обновить")).clicked() { state.refresh_calendar(); }
@@ -418,7 +448,7 @@ impl Panel {
                         ui.small(&state.calendar_status);
                     }
                     row(ui, &steps[5], "Звонки", if cfg!(target_os = "macos") { "Предложения записи и запуск приложения при входе в macOS." } else { "Предложения записи и запуск приложения вместе с Windows." });
-                    ui.add_enabled_ui(state.can_save_settings() && cfg!(any(windows, target_os = "macos")), |ui| {
+                    ui.add_enabled_ui(state.ready && cfg!(any(windows, target_os = "macos")), |ui| {
                         save |= crate::theme::toggle(ui, &mut state.settings_draft.detect_calls, "Предлагать запись при звонке").changed();
                     });
                     maintenance.windows_settings(ui);
@@ -440,7 +470,7 @@ impl Panel {
                     if state.quickstart.probe_busy { ui.spinner(); ctx.request_repaint_after(Duration::from_millis(50)); }
                 });
                 ui.separator();
-                ui.add_enabled_ui(state.can_save_settings(), |ui| {
+                ui.add_enabled_ui(state.ready, |ui| {
                     save |= crate::theme::toggle(ui, &mut state.settings_draft.hide_quickstart, "Больше не показывать при запуске").changed();
                 });
                 ui.horizontal(|ui| {
@@ -450,6 +480,7 @@ impl Panel {
                 });
             });
         if done || !open || settings {
+            self.blur(state);
             save |= state.settings_draft.user_name != state.settings.user_name
                 || state.settings_draft.user_aliases != state.settings.user_aliases;
         }

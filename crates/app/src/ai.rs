@@ -15,6 +15,7 @@ pub enum Operation {
     Check,
     Models,
     Default,
+    Save,
     Login,
 }
 pub struct Action {
@@ -39,6 +40,9 @@ struct Card {
     status: String,
     busy: bool,
     installed: bool,
+    edited: Option<Instant>,
+    key_editing: bool,
+    save_error: bool,
 }
 pub struct Connections {
     cards: Vec<Card>,
@@ -83,6 +87,9 @@ impl Default for Connections {
         .map(|(title, id, kind, base_url, model, cli)| Card {
             title,
             cli,
+            edited: None,
+            key_editing: false,
+            save_error: false,
             installed: cli.is_none_or(|kind| notetaker_llm::find_cli(kind).is_some()),
             key: String::new(),
             models: Vec::new(),
@@ -102,8 +109,57 @@ impl Default for Connections {
     }
 }
 impl Connections {
+    pub fn has_save_errors(&self) -> bool {
+        self.cards.iter().any(|card| card.save_error)
+    }
+    pub fn has_edits(&self) -> bool {
+        self.cards
+            .iter()
+            .any(|card| card.edited.is_some() || (card.key_editing && !card.key.is_empty()))
+    }
+    /// Called even when Settings is closed, so a debounce cannot get stranded.
+    pub fn autosaves(&mut self) -> Vec<Action> {
+        let mut actions = Vec::new();
+        for (index, card) in self.cards.iter_mut().enumerate() {
+            if card.busy
+                || card.key_editing
+                || !card.edited.is_some_and(|due| Instant::now() >= due)
+            {
+                continue;
+            }
+            match card.provider.config() {
+                Ok(_) => {
+                    card.edited = None;
+                    card.busy = true;
+                    actions.push(Action {
+                        index,
+                        operation: Operation::Save,
+                        provider: card.provider.clone(),
+                        key: card.key.clone(),
+                    });
+                }
+                Err(error) => {
+                    card.status = format!("Ошибка: {error:#}");
+                    card.save_error = true;
+                    card.edited = None;
+                }
+            }
+        }
+        actions
+    }
+    pub fn blur(&mut self) {
+        for card in &mut self.cards {
+            if card.key_editing && !card.key.is_empty() {
+                card.edited = Some(Instant::now());
+            }
+            card.key_editing = false;
+        }
+    }
     pub fn load(&mut self, settings: &LlmSettings) {
         for card in &mut self.cards {
+            if card.busy || card.edited.is_some() || card.key_editing {
+                continue;
+            }
             if let Some(provider) = settings.providers.iter().find(|p| p.id == card.provider.id) {
                 card.provider = provider.clone();
                 if card.status == "Не подключено" {
@@ -118,6 +174,9 @@ impl Connections {
         card.installed = card
             .cli
             .is_none_or(|kind| notetaker_llm::find_cli(kind).is_some());
+        if matches!(response.operation, Operation::Save | Operation::Default) {
+            card.save_error = response.result.is_err();
+        }
         match &response.result {
             Err(error) => card.status = format!("Ошибка: {error}"),
             Ok(models) => {
@@ -125,15 +184,23 @@ impl Connections {
                     card.status = "Не подключено. После входа нажмите Проверить".into();
                     return;
                 }
-                card.status = format!("Подключено · {} мс", response.latency.as_millis());
-                card.provider = response.provider.clone();
+                card.status = if response.operation == Operation::Save {
+                    "Сохранено · соединение не проверено".into()
+                } else {
+                    format!("Подключено · {} мс", response.latency.as_millis())
+                };
+                if card.edited.is_none() {
+                    card.provider = response.provider.clone();
+                }
                 if !models.is_empty() {
                     card.models = models.clone();
                     if !models.contains(&card.provider.model) {
                         card.provider.model = models[0].clone();
                     }
                 }
-                if response.operation == Operation::Default {
+                if matches!(response.operation, Operation::Default | Operation::Save)
+                    && card.edited.is_none()
+                {
                     card.key.clear();
                 }
             }
@@ -187,12 +254,16 @@ impl Connections {
             if selected.is_some_and(|selected| selected != index) {
                 continue;
             }
-            ui.push_id(index, |ui| { ui.scope(|ui| { ui.separator();
-                ui.heading(card.title);
+            ui.push_id(index, |ui| { egui::CollapsingHeader::new(card.title)
+                .default_open(default == card.provider.id || selected.is_some()).show(ui, |ui| {
                 if card.status.starts_with("Ошибка:") {
                     ui.colored_label(crate::theme::Palette::of(ui).red, &card.status);
                 } else { ui.label(&card.status); }
+                let before = serde_json::to_value(&card.provider).expect("provider serialize");
                 let mut operation = None;
+                let mut typing = false;
+                let mut blur = false;
+                let mut key_blur = false;
                 ui.add_enabled_ui(!card.busy, |ui| {
                     if let Some(kind) = card.cli {
                         if !card.installed {
@@ -219,17 +290,27 @@ impl Connections {
                         if index == 2 {
                             ui.small("Ключ: 4o.flant.ru → Settings → Account → API Keys. Шлюз доступен из VPN Фланта.");
                         } else {
-                            ui.label("Адрес API"); ui.text_edit_singleline(&mut card.provider.base_url);
+                            crate::theme::setting_row(ui, "Адрес API", |ui| {
+                                let response = ui.text_edit_singleline(&mut card.provider.base_url);
+                                typing |= response.changed(); blur |= response.lost_focus();
+                            });
                             egui::ComboBox::from_id_salt("kind").selected_text(if card.provider.kind == "anthropic" { "Anthropic" } else { "OpenAI-совместимый" }).show_ui(ui, |ui| {
                                 ui.selectable_value(&mut card.provider.kind, "openai".into(), "OpenAI-совместимый");
                                 ui.selectable_value(&mut card.provider.kind, "anthropic".into(), "Anthropic");
                             });
                         }
                         ui.label("API-ключ (пусто - использовать сохранённый)");
-                        ui.add(egui::TextEdit::singleline(&mut card.key).password(true));
+                        ui.add_enabled_ui(cfg!(any(windows, target_os = "macos")), |ui| {
+                            let response = ui.add(egui::TextEdit::singleline(&mut card.key).password(true));
+                            card.key_editing = response.has_focus();
+                            key_blur = response.lost_focus() && !card.key.is_empty();
+                        });
                         #[cfg(not(any(windows, target_os = "macos")))]
                         ui.small("На этой ОС задайте api_key_env в Расширенных и переменную окружения перед запуском.");
-                        if index == 3 { ui.label("Модель"); ui.text_edit_singleline(&mut card.provider.model); }
+                        if index == 3 { crate::theme::setting_row(ui, "Модель", |ui| {
+                            let response = ui.text_edit_singleline(&mut card.provider.model);
+                            typing |= response.changed(); blur |= response.lost_focus();
+                        }); }
                         if !card.models.is_empty() {
                             egui::ComboBox::from_id_salt("model").selected_text(&card.provider.model).show_ui(ui, |ui| {
                                 for model in &card.models { ui.selectable_value(&mut card.provider.model, model.clone(), model); }
@@ -243,10 +324,16 @@ impl Connections {
                         if default == card.provider.id { ui.small("По умолчанию"); }
                     });
                 });
+                if before != serde_json::to_value(&card.provider).expect("provider serialize") {
+                    card.save_error = false;
+                    card.edited = Some(Instant::now() + if typing { Duration::from_millis(700) } else { Duration::ZERO });
+                }
+                if key_blur || (blur && card.edited.is_some()) { card.edited = Some(Instant::now()); }
                 if card.busy { ui.spinner(); }
                 if let Some(operation) = operation {
                     card.busy = true;
-                    actions.push(Action { index, operation, provider: card.provider.clone(), key: card.key.clone() });
+                    if matches!(operation, Operation::Save | Operation::Default) { card.edited = None; }
+                    actions.push(Action { index, operation, provider: card.provider.clone(), key: if card.key_editing { String::new() } else { card.key.clone() } });
                 }
             }); });
         }
@@ -262,6 +349,14 @@ pub fn execute(mut action: Action) -> Response {
             draft.model = "models".into();
         }
         let config = draft.config()?;
+        if action.operation == Operation::Save {
+            if !action.key.is_empty() {
+                OsCredentialStore.write(&action.provider.id, &action.key)?;
+                action.provider.key_source = "credential".into();
+                action.provider.api_key_env = None;
+            }
+            return Ok(Vec::new());
+        }
         if action.operation == Operation::Login {
             notetaker_llm::open_login(config.kind)?;
             return Ok(Vec::new());
@@ -323,5 +418,37 @@ pub fn execute(mut action: Action) -> Response {
         provider: action.provider,
         result,
         latency: started.elapsed(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secret_draft_waits_for_blur_even_after_debounce() {
+        let mut connections = Connections::default();
+        let card = &mut connections.cards[3];
+        card.provider.base_url = "http://localhost:11434/v1".into();
+        card.provider.model = "qwen3:8b".into();
+        card.key = "<TOKEN>".into();
+        card.key_editing = true;
+        card.edited = Some(Instant::now() - Duration::from_secs(1));
+        assert!(connections.autosaves().is_empty());
+        connections.blur();
+        let actions = connections.autosaves();
+        assert_eq!(actions.len(), 1);
+        assert!(actions[0].operation == Operation::Save);
+        assert_eq!(actions[0].key, "<TOKEN>");
+        assert!(connections.autosaves().is_empty());
+    }
+
+    #[test]
+    fn incomplete_connection_does_not_reach_the_worker() {
+        let mut connections = Connections::default();
+        connections.cards[3].edited = Some(Instant::now());
+        assert!(connections.autosaves().is_empty());
+        assert!(connections.has_save_errors());
+        assert!(!connections.cards[3].busy);
     }
 }

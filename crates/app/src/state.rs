@@ -258,6 +258,9 @@ pub struct AppState {
     pending_summary: Option<PathBuf>,
     pub ready: bool,
     pub settings_pending: bool,
+    pub settings_autosave: crate::autosave::Autosave,
+    settings_secrets_sent: HashMap<String, String>,
+    pending_ai: VecDeque<crate::ai::Action>,
     pub rows: Vec<MeetingRow>,
     pub query: String,
     pub semantic_enabled: bool,
@@ -347,6 +350,9 @@ impl AppState {
             pending_summary: None,
             ready: false,
             settings_pending: false,
+            settings_autosave: Default::default(),
+            settings_secrets_sent: Default::default(),
+            pending_ai: Default::default(),
             rows: Vec::new(),
             query: String::new(),
             semantic_enabled: true,
@@ -391,7 +397,23 @@ impl AppState {
         }
     }
     pub fn send(&mut self, command: Command) {
-        let selecting_ai = matches!(&command, Command::Ai(action) if action.operation == crate::ai::Operation::Default);
+        if let Command::Ai(action) = command {
+            if matches!(
+                action.operation,
+                crate::ai::Operation::Default | crate::ai::Operation::Save
+            ) {
+                self.pending_ai
+                    .retain(|pending| pending.index != action.index);
+                self.pending_ai.push_back(action);
+                self.poll_settings(Instant::now());
+                return;
+            }
+            return self.send_now(Command::Ai(action));
+        }
+        self.send_now(command);
+    }
+    fn send_now(&mut self, command: Command) {
+        let selecting_ai = matches!(&command, Command::Ai(action) if matches!(action.operation, crate::ai::Operation::Default | crate::ai::Operation::Save));
         if selecting_ai {
             self.settings_pending = true;
         }
@@ -966,7 +988,6 @@ impl AppState {
     }
     pub fn can_save_settings(&self) -> bool {
         self.ready
-            && !self.exit_requested
             && !self.recording.busy()
             && self.recording.assist.bookmarks_pending == 0
             && self.enhancing.is_none()
@@ -976,50 +997,120 @@ impl AppState {
             && !self.settings_pending
     }
     pub fn save_settings(&mut self) {
-        self.persist_settings(true);
+        self.settings_edited(false, true);
     }
     pub fn save_preferences(&mut self) {
-        self.persist_settings(false);
+        self.settings_edited(false, false);
     }
-    fn persist_settings(&mut self, persist_llm: bool) {
-        if !self.can_save_settings() {
+    pub fn settings_edited(&mut self, delayed: bool, llm: bool) {
+        self.settings_autosave.edit(Instant::now(), delayed, llm);
+        self.poll_settings(Instant::now());
+    }
+    pub fn settings_status(&self) -> &str {
+        if self.settings_autosave.error.is_some() {
+            "Не сохранено: проверьте поля"
+        } else if self.connections.has_save_errors() {
+            "Не сохранено: проверьте подключение AI"
+        } else if self.settings_autosave.pending
+            || !self.pending_ai.is_empty()
+            || self.connections.has_edits()
+        {
+            if self.recording.busy() {
+                "Сохраню после записи"
+            } else if self.enhancing.is_some() || self.chat.busy || self.draft_busy {
+                "Сохраню после работы AI"
+            } else if self.unsaved() {
+                "Сохраню после заметки"
+            } else {
+                "Сохранение…"
+            }
+        } else if self.settings_pending {
+            "Сохранение…"
+        } else {
+            "Сохранено"
+        }
+    }
+    fn poll_settings(&mut self, now: Instant) {
+        if self.can_save_settings()
+            && let Some(action) = self.pending_ai.pop_front()
+        {
+            self.send_now(Command::Ai(action));
             return;
         }
+        if !self.settings_autosave.ready(now, self.can_save_settings()) {
+            return;
+        }
+        let persist_llm = self.settings_autosave.llm;
         let llm = if persist_llm {
             &self.llm_draft
         } else {
             &self.llm
         };
-        if let Err(error) = self
+        let validation = self
             .settings_draft
             .validate()
             .and_then(|_| llm.validate().map(|_| ()))
-        {
-            self.error = Some(format!("{error:#}"));
+            .and_then(|_| {
+                for (id, secret) in &self.calendar_secrets {
+                    if !secret.trim().is_empty() {
+                        crate::settings::validate_calendar_secret(id, secret)?;
+                    }
+                }
+                for calendar in &self.settings_draft.calendars {
+                    anyhow::ensure!(
+                        self.settings
+                            .calendars
+                            .iter()
+                            .any(|saved| saved.id == calendar.id)
+                            || self
+                                .calendar_secrets
+                                .get(&calendar.id)
+                                .is_some_and(|url| !url.trim().is_empty()),
+                        "Укажите приватный HTTPS URL календаря"
+                    );
+                }
+                Ok(())
+            });
+        if let Err(error) = validation {
+            self.settings_autosave.error = Some(format!("{error:#}"));
             return;
         }
-        self.settings_pending = true;
-        self.send(Command::Settings {
+        self.settings_secrets_sent = self
+            .calendar_secrets
+            .iter()
+            .filter(|(_, secret)| !secret.trim().is_empty())
+            .map(|(id, secret)| (id.clone(), secret.clone()))
+            .collect();
+        let command = Command::Settings {
             settings: self.settings_draft.clone(),
             llm: llm.clone(),
             persist_llm,
-            calendar_secrets: self
-                .calendar_secrets
-                .iter()
-                .filter(|(_, secret)| !secret.trim().is_empty())
-                .map(|(id, secret)| (id.clone(), secret.clone()))
-                .collect(),
-        });
+            calendar_secrets: self.settings_secrets_sent.clone().into_iter().collect(),
+        };
+        self.settings_pending = true;
+        self.settings_autosave.sent();
+        self.send(command);
     }
     pub fn exit(&mut self) {
+        self.connections.blur();
+        if self.settings_autosave.pending {
+            self.settings_autosave
+                .edit(Instant::now(), false, self.settings_autosave.llm);
+        }
         self.exit_requested = true;
         self.chat.cancel.cancel();
         self.draft_cancel.cancel();
         self.recording.request_stop();
         self.flush();
+        for action in self.connections.autosaves() {
+            self.send(Command::Ai(action));
+        }
+        self.poll_settings(Instant::now());
     }
     pub fn can_exit(&self) -> bool {
-        self.exit_requested
+        self.pending_ai.is_empty()
+            && (!self.settings_autosave.pending || self.settings_autosave.error.is_some())
+            && self.exit_requested
             && !self.recording.busy()
             && self.recording.assist.bookmarks_pending == 0
             && self.enhancing.is_none()
@@ -1111,6 +1202,10 @@ impl AppState {
                 self.start_summary(path, true);
             }
         }
+        for action in self.connections.autosaves() {
+            self.send(Command::Ai(action));
+        }
+        self.poll_settings(Instant::now());
         // Keep only active/unsaved documents; revisiting a meeting reloads files
         // and opening a large library does not accumulate transcripts in RAM.
         let selected = &self.selected;
@@ -1311,17 +1406,27 @@ impl AppState {
                 }
             }
             Event::Ai(response) => {
-                if response.operation == crate::ai::Operation::Default {
+                if matches!(
+                    response.operation,
+                    crate::ai::Operation::Default | crate::ai::Operation::Save
+                ) {
                     self.settings_pending = false;
                 }
                 self.connections.apply(&response);
-                if response.operation == crate::ai::Operation::Default && response.result.is_ok() {
+                if matches!(
+                    response.operation,
+                    crate::ai::Operation::Default | crate::ai::Operation::Save
+                ) && response.result.is_ok()
+                {
                     let provider = response.provider;
                     let cloud = provider
                         .config()
                         .is_ok_and(|config| config.validate(notetaker_core::Mode::Local).is_err());
-                    self.llm_draft.defaults.hybrid = provider.id.clone();
-                    if !cloud {
+                    let make_default = response.operation == crate::ai::Operation::Default;
+                    if make_default {
+                        self.llm_draft.defaults.hybrid = provider.id.clone();
+                    }
+                    if make_default && !cloud {
                         self.llm_draft.defaults.local = provider.id.clone();
                     }
                     if let Some(existing) = self
@@ -1334,7 +1439,10 @@ impl AppState {
                     } else {
                         self.llm_draft.providers.push(provider);
                     }
-                    if cloud && self.settings_draft.mode == notetaker_core::Mode::Local {
+                    if make_default
+                        && cloud
+                        && self.settings_draft.mode == notetaker_core::Mode::Local
+                    {
                         self.settings_draft.mode = notetaker_core::Mode::Hybrid;
                         self.notices.push((
                             crate::theme::ToastLevel::Info,
@@ -1771,7 +1879,9 @@ impl AppState {
                         let calendar_changed = self.settings.calendars != settings.calendars
                             || self.settings.calendar_timezone != settings.calendar_timezone
                             || !self.calendar_secrets.is_empty();
-                        self.calendar_secrets.clear();
+                        self.calendar_secrets
+                            .retain(|id, value| self.settings_secrets_sent.get(id) != Some(value));
+                        self.settings_secrets_sent.clear();
                         if calendar_changed {
                             self.quickstart.calendar_error = None;
                             self.calendar_events.clear();
@@ -1790,11 +1900,9 @@ impl AppState {
                         }
                         self.record_model = settings.model.clone();
                         self.record_mode = settings.mode;
-                        self.settings = settings.clone();
-                        self.settings_draft = settings;
+                        self.settings = settings;
                         self.connections.load(&llm);
-                        self.llm = llm.clone();
-                        self.llm_draft = llm;
+                        self.llm = llm;
                         if changed_library {
                             self.chat = Default::default();
                             self.folder_filter = None;
@@ -1819,7 +1927,9 @@ impl AppState {
                         if !self.calendar_secrets.is_empty() {
                             self.quickstart.calendar_error = Some(error.clone());
                         }
-                        self.error = Some(error);
+                        self.settings_autosave.pending = true;
+                        self.settings_autosave.llm |= persist_llm;
+                        self.settings_autosave.error = Some(error);
                     }
                 }
             }
@@ -1932,6 +2042,165 @@ mod tests {
         assert!(!state.recording.assist.schedule.busy());
     }
 
+    #[test]
+    fn autosave_waits_for_recording_summary_note_and_pending_save() {
+        for block in 0..4 {
+            let (mut state, commands, root, path) = fixture();
+            state.ready = true;
+            state.settings_draft.library = root.path().into();
+            match block {
+                0 => state.recording.phase = Phase::Recording,
+                1 => state.enhancing = Some(path.clone()),
+                2 => state.documents.get_mut(&path).unwrap().dirty.notes = true,
+                _ => state.settings_pending = true,
+            }
+            state.settings_draft.user_name = "Иван".into();
+            state.save_preferences();
+            assert!(commands.try_recv().is_err());
+            assert!(state.settings_autosave.pending);
+            state.recording.phase = Phase::Idle;
+            state.enhancing = None;
+            state.documents.get_mut(&path).unwrap().dirty = Fields::default();
+            state.settings_pending = false;
+            state.poll_settings(Instant::now());
+            let Command::Settings {
+                settings,
+                persist_llm,
+                ..
+            } = commands.try_recv().unwrap()
+            else {
+                panic!("settings expected")
+            };
+            assert_eq!(settings.user_name, "Иван");
+            assert!(!persist_llm);
+            assert!(!state.settings_autosave.pending);
+        }
+    }
+    #[test]
+    fn autosave_debounces_and_does_not_overwrite_newer_drafts_or_secrets() {
+        let (mut state, commands, root, _) = fixture();
+        state.ready = true;
+        state.settings_draft.library = root.path().into();
+        state.settings_draft.user_name = "First".into();
+        let start = Instant::now();
+        state.settings_edited(true, false);
+        assert!(commands.try_recv().is_err());
+        state.poll_settings(start + Duration::from_millis(800));
+        let Command::Settings {
+            settings,
+            llm,
+            persist_llm,
+            ..
+        } = commands.try_recv().unwrap()
+        else {
+            panic!("settings expected")
+        };
+        state.settings_draft.user_name = "Second".into();
+        state.llm_draft.providers[0].model = "new-model".into();
+        state.settings_edited(false, true);
+        state
+            .calendar_secrets
+            .insert("calendar-new".into(), "https://example.org/new.ics".into());
+        state.apply(Event::SettingsSaved(Ok((settings, llm)), persist_llm));
+        assert_eq!(state.settings.user_name, "First");
+        assert_eq!(state.settings_draft.user_name, "Second");
+        assert!(state.calendar_secrets.contains_key("calendar-new"));
+        state.calendar_secrets.clear();
+        state.poll_settings(Instant::now());
+        let Command::Settings { settings, .. } = commands
+            .try_iter()
+            .find(|cmd| matches!(cmd, Command::Settings { .. }))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(settings.user_name, "Second");
+        assert_eq!(state.llm_draft.providers[0].model, "new-model");
+    }
+    #[test]
+    fn autosave_rejects_invalid_preferences_and_partial_provider_edits() {
+        let (mut state, commands, root, _) = fixture();
+        state.ready = true;
+        state.settings_draft.library = "relative".into();
+        state.save_preferences();
+        assert!(commands.try_recv().is_err());
+        assert!(state.settings_autosave.error.is_some());
+        state.settings_draft.library = root.path().into();
+        state.llm_draft.providers[0].id = "unfinished".into();
+        state.save_settings();
+        assert!(commands.try_recv().is_err());
+        assert!(state.settings_autosave.error.is_some());
+        state.llm_draft.defaults.local = "unfinished".into();
+        state.llm_draft.defaults.hybrid = "unfinished".into();
+        state.save_settings();
+        assert!(matches!(
+            commands.try_recv().unwrap(),
+            Command::Settings {
+                persist_llm: true,
+                ..
+            }
+        ));
+    }
+    #[test]
+    fn connection_changes_use_the_blocked_autosave_queue() {
+        let (mut state, commands, root, _) = fixture();
+        state.ready = true;
+        state.settings_draft.library = root.path().into();
+        state.recording.phase = Phase::Recording;
+        let provider = crate::config::ProviderSettings {
+            id: "custom-gateway".into(),
+            ..Default::default()
+        };
+        state.send(Command::Ai(crate::ai::Action {
+            index: 3,
+            operation: crate::ai::Operation::Save,
+            provider: provider.clone(),
+            key: String::new(),
+        }));
+        assert!(commands.try_recv().is_err());
+        state.recording.phase = Phase::Idle;
+        state.poll_settings(Instant::now());
+        assert!(matches!(commands.try_recv().unwrap(), Command::Ai(_)));
+        state.apply(Event::Ai(crate::ai::Response {
+            index: 3,
+            operation: crate::ai::Operation::Save,
+            provider,
+            result: Ok(Vec::new()),
+            latency: Duration::ZERO,
+        }));
+        let Command::Settings {
+            llm, persist_llm, ..
+        } = commands.try_recv().unwrap()
+        else {
+            panic!("settings expected")
+        };
+        assert!(persist_llm);
+        assert_eq!(llm.defaults.hybrid, "ollama");
+        assert!(
+            llm.providers
+                .iter()
+                .any(|provider| provider.id == "custom-gateway")
+        );
+    }
+    #[test]
+    fn autosave_rejects_invalid_calendar_secret_without_echoing_it() {
+        let (mut state, commands, root, _) = fixture();
+        state.ready = true;
+        state.settings_draft.library = root.path().into();
+        state
+            .calendar_secrets
+            .insert("calendar-new".into(), "http://example.org/PRIVATE".into());
+        state.save_preferences();
+        assert!(commands.try_recv().is_err());
+        assert!(
+            !state
+                .settings_autosave
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("PRIVATE")
+        );
+    }
     #[test]
     fn quickstart_preferences_do_not_create_a_configured_ai_provider() {
         let (mut state, commands, _root, _) = fixture();

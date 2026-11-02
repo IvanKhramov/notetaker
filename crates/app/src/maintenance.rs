@@ -143,11 +143,7 @@ impl Maintenance {
     }
     pub fn settings(&mut self, ui: &mut egui::Ui, settings: &mut crate::config::Settings) {
         ui.add_space(16.0);
-        crate::theme::section_caption(ui, "Обновления и диагностика");
-        ui.add_enabled_ui(cfg!(any(windows, target_os = "macos")), |ui| {
-            crate::theme::toggle(ui, &mut settings.check_updates, "Проверять обновления");
-        });
-        self.windows_settings(ui);
+        crate::theme::section_caption(ui, "Диагностика");
         crate::theme::setting_row(ui, "Папка логов", |ui| {
             if crate::theme::button(ui, "Открыть ›", crate::theme::ButtonStyle::Ghost).clicked()
             {

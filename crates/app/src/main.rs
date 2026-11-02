@@ -2,6 +2,7 @@
 
 mod ai;
 mod attachments;
+mod autosave;
 mod chat;
 mod config;
 #[cfg(any(windows, target_os = "macos"))]
@@ -15,6 +16,7 @@ mod maintenance;
 mod organization;
 mod people;
 mod quickstart;
+mod settings;
 mod speakers;
 mod state;
 mod theme;
