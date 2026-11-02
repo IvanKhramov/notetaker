@@ -33,9 +33,9 @@ fn nearest(embedding: &[f32], centroids: &[Vec<f32>]) -> usize {
         .unwrap_or(0)
 }
 
-/// No speaker-count cap. The distance cut estimates the count; a duration floor
-/// prevents outliers from becoming people. Keep at least the largest group.
-fn centroids(evidence: &[&Evidence], total_ms: u64) -> Vec<Vec<f32>> {
+/// Auto uses a distance cut and duration floor; fixed count cuts the same tree
+/// at N groups, retaining short voices rather than applying the auto floor.
+fn centroids(evidence: &[&Evidence], total_ms: u64, speakers: Option<u32>) -> Vec<Vec<f32>> {
     let n = evidence.len();
     let mut groups: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
     let vectors: Vec<_> = evidence
@@ -50,7 +50,11 @@ fn centroids(evidence: &[&Evidence], total_ms: u64) -> Vec<Vec<f32>> {
             distances[j * n + i] = distance;
         }
     }
+    let mut remaining = n;
     loop {
+        if remaining <= speakers.map_or(1, |n| n as usize) {
+            break;
+        }
         let mut best = (0, 0, f32::INFINITY);
         for i in 0..n {
             if groups[i].is_empty() {
@@ -63,7 +67,7 @@ fn centroids(evidence: &[&Evidence], total_ms: u64) -> Vec<Vec<f32>> {
             }
         }
         let (i, j, distance) = best;
-        if distance > DISTANCE {
+        if !distance.is_finite() || (speakers.is_none() && distance > DISTANCE) {
             break;
         }
         let (a, b) = (groups[i].len() as f32, groups[j].len() as f32);
@@ -77,6 +81,7 @@ fn centroids(evidence: &[&Evidence], total_ms: u64) -> Vec<Vec<f32>> {
         }
         let removed = std::mem::take(&mut groups[j]);
         groups[i].extend(removed);
+        remaining -= 1;
     }
     let duration = |group: &Vec<usize>| group.iter().map(|&i| evidence[i].clean_ms).sum::<u64>();
     // As in pyannote's small-sample rule, the minimum must not exceed 10%
@@ -92,7 +97,9 @@ fn centroids(evidence: &[&Evidence], total_ms: u64) -> Vec<Vec<f32>> {
     groups
         .iter()
         .enumerate()
-        .filter(|(i, g)| !g.is_empty() && (duration(g) >= floor || Some(*i) == largest))
+        .filter(|(i, g)| {
+            !g.is_empty() && (speakers.is_some() || duration(g) >= floor || Some(*i) == largest)
+        })
         .filter_map(|(_, group)| {
             let mut sum = vec![0.0; vectors[0].len()];
             for &i in group {
@@ -109,6 +116,7 @@ pub(crate) fn reassign(
     turns: &mut [SpeakerTurn],
     evidence: &[Evidence],
     fallback: &BTreeMap<String, Vec<f32>>,
+    speakers: Option<u32>,
 ) {
     let training: Vec<_> = evidence
         .iter()
@@ -132,7 +140,7 @@ pub(crate) fn reassign(
     }
     let selected: Vec<_> = indices.into_iter().map(|i| training[i]).collect();
     let total_ms = selected.iter().map(|e| e.clean_ms).sum();
-    let centers = centroids(&selected, total_ms);
+    let centers = centroids(&selected, total_ms, speakers);
     if centers.is_empty() {
         return;
     }
@@ -162,6 +170,22 @@ mod tests {
     }
 
     #[test]
+    fn fixed_count_cuts_tree_without_distance_or_duration_floor() {
+        let data = [
+            evidence(1.0, 0.0, 8000),
+            evidence(0.95, 0.05, 8000),
+            evidence(0.0, 1.0, 8000),
+            evidence(-1.0, 0.0, 1500),
+        ];
+        let refs: Vec<_> = data.iter().collect();
+        for n in 1..=4 {
+            assert_eq!(centroids(&refs, 25500, Some(n)).len(), n as usize);
+        }
+        // More voices than clean training turns cannot invent acoustic evidence.
+        assert_eq!(centroids(&refs, 25500, Some(8)).len(), 4);
+    }
+
+    #[test]
     fn duration_floor_removes_outlier_but_keeps_two_sustained_voices() {
         let data = [
             evidence(1.0, 0.0, 4000),
@@ -170,7 +194,7 @@ mod tests {
             evidence(-1.0, 0.0, 1500),
         ];
         let refs: Vec<_> = data.iter().collect();
-        let centers = centroids(&refs, 17500);
+        let centers = centroids(&refs, 17500, None);
         assert_eq!(centers.len(), 2);
         assert_ne!(
             nearest(&[1.0, 0.0], &centers),
@@ -181,20 +205,31 @@ mod tests {
     #[test]
     fn one_short_voice_keeps_a_centroid_and_no_clean_evidence_keeps_labels() {
         let data = [evidence(1.0, 0.0, 1600), evidence(0.9, 0.1, 1600)];
-        assert_eq!(centroids(&data.iter().collect::<Vec<_>>(), 3200).len(), 1);
+        assert_eq!(
+            centroids(&data.iter().collect::<Vec<_>>(), 3200, None).len(),
+            1
+        );
         let mut turns = vec![SpeakerTurn {
             start_ms: 0,
             end_ms: 500,
             speaker: "s1".into(),
         }];
-        reassign(&mut turns, &[evidence(1.0, 0.0, 500)], &BTreeMap::new());
+        reassign(
+            &mut turns,
+            &[evidence(1.0, 0.0, 500)],
+            &BTreeMap::new(),
+            None,
+        );
         assert_eq!(turns[0].speaker, "s1");
     }
 
     #[test]
     fn brief_clip_does_not_erase_a_real_shorter_voice() {
         let data = [evidence(1.0, 0.0, 8000), evidence(0.0, 1.0, 3500)];
-        assert_eq!(centroids(&data.iter().collect::<Vec<_>>(), 11500).len(), 2);
+        assert_eq!(
+            centroids(&data.iter().collect::<Vec<_>>(), 11500, None).len(),
+            2
+        );
     }
 
     #[test]
@@ -215,7 +250,7 @@ mod tests {
                 speaker: format!("old{i}"),
             })
             .collect();
-        reassign(&mut turns, &data, &BTreeMap::new());
+        reassign(&mut turns, &data, &BTreeMap::new(), None);
         assert_ne!(turns[0].speaker, turns[1].speaker);
         assert!(
             turns
@@ -253,6 +288,7 @@ mod tests {
             &mut turns,
             &data,
             &BTreeMap::from([("old".into(), vec![1.0, 0.0])]),
+            None,
         );
         assert_eq!(turns[0].speaker, turns[1].speaker);
         assert_ne!(turns[0].speaker, turns[2].speaker);

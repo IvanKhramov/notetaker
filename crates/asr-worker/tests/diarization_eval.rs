@@ -108,7 +108,9 @@ fn call_audio_speaker_counts() {
     let mut report = Vec::new();
     for case in cases.as_array().unwrap() {
         let name = case["name"].as_str().unwrap();
-        if std::env::var("NOTETAKER_EVAL_FILTER").is_ok_and(|filter| !name.contains(&filter)) {
+        if std::env::var("NOTETAKER_EVAL_FILTER")
+            .is_ok_and(|filter| !filter.split(',').any(|part| name.contains(part)))
+        {
             continue;
         }
         let path = fixtures.join(case["file"].as_str().unwrap());
@@ -118,12 +120,12 @@ fn call_audio_speaker_counts() {
             .map(|s| f32::from(s.unwrap()) / 32768.0)
             .collect();
         let target = fixed.then(|| case["speakers"].as_u64().unwrap() as u32);
-        config.clustering.num_clusters = target.map_or(-1, |n| n as i32);
+        config.clustering.num_clusters = -1;
         let mode = target.map_or_else(
             || format!("threshold-{threshold}"),
             |n| format!("fixed-{n}"),
         );
-        let cache = fixtures.join(format!("{name}-{mode}.json"));
+        let cache = fixtures.join(format!("{name}-threshold-{threshold}.json"));
         let baseline: Diarization = if cache.is_file() {
             serde_json::from_slice(&std::fs::read(&cache).unwrap()).unwrap()
         } else {
@@ -183,7 +185,7 @@ fn call_audio_speaker_counts() {
                     .unwrap(),
             )
             .unwrap();
-            diarization::clustering::reassign(&mut result.turns, &evidence, &fallback);
+            diarization::clustering::reassign(&mut result.turns, &evidence, &fallback, None);
         } else if std::env::var_os("NOTETAKER_EVAL_BASELINE_ONLY").is_none() {
             diarization::refine(&mut result, &samples, target, embeddings, 2).unwrap();
         }
@@ -210,9 +212,8 @@ fn call_audio_speaker_counts() {
         report.push(serde_json::json!({"name": name, "expected": case["speakers"], "baseline": before, "current": after, "baseline_purity": purity(&baseline, truth), "current_purity": purity(&result, truth), "baseline_accuracy": before_accuracy, "current_accuracy": after_accuracy}));
         assert!(!after.is_empty());
         if fixed {
-            // Sherpa may return fewer active labels after segmentation, even
-            // when num_clusters is exact. Measure that limitation, do not invent turns.
-            assert!(after.len() <= speakers, "fixed count for {name}");
+            // These fixtures have enough clean training turns for the true count.
+            assert_eq!(after.len(), speakers, "fixed count for {name}");
         } else if !legacy && std::env::var_os("NOTETAKER_EVAL_BASELINE_ONLY").is_none() {
             assert!(
                 after.len().abs_diff(speakers) <= 1,

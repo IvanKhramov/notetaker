@@ -261,7 +261,9 @@ pub fn diarize(
     config.segmentation.pyannote.model = Some(segmentation.to_string_lossy().into());
     config.segmentation.num_threads = threads;
     config.embedding = extractor_config(threads)?;
-    config.clustering.num_clusters = speakers.map_or(-1, |n| n as i32);
+    // Preserve the same initial turns in auto and fixed mode. Fixed N is
+    // applied to clean turn embeddings below, not sherpa complete linkage.
+    config.clustering.num_clusters = -1;
     config.clustering.threshold = CLUSTER_DISTANCE;
     let samples = waveform(path)?;
     if samples.len() < 16000 {
@@ -317,12 +319,12 @@ pub(crate) fn refine(
 ) -> Result<()> {
     let ids: std::collections::BTreeSet<_> =
         result.turns.iter().map(|t| t.speaker.clone()).collect();
-    if embeddings || (speakers.is_none() && ids.len() > 1) {
+    if embeddings || ids.len() > 1 || (speakers.is_some() && !ids.is_empty()) {
         let extractor = SpeakerEmbeddingExtractor::create(&extractor_config(threads)?)
             .context("load voice extractor")?;
-        if speakers.is_none() && ids.len() > 1 {
+        if ids.len() > 1 || speakers.is_some() {
             let (evidence, fallback) = comparison_evidence(&result.turns, samples, &extractor);
-            clustering::reassign(&mut result.turns, &evidence, &fallback);
+            clustering::reassign(&mut result.turns, &evidence, &fallback, speakers);
         }
         // Number the surviving voices by first appearance. Comparison vectors
         // remain worker-local when the voice library is disabled.
@@ -346,28 +348,6 @@ pub(crate) fn refine(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn explicit_speaker_count_bypasses_automatic_cleanup_and_voice_models() {
-        let mut result = Diarization {
-            turns: vec![
-                SpeakerTurn {
-                    speaker: "s1".into(),
-                    start_ms: 0,
-                    end_ms: 10000,
-                },
-                SpeakerTurn {
-                    speaker: "s2".into(),
-                    start_ms: 10000,
-                    end_ms: 10500,
-                },
-            ],
-            ..Default::default()
-        };
-        let original = result.clone();
-        refine(&mut result, &[], Some(2), false, 1).unwrap();
-        assert_eq!(result, original);
-    }
 
     #[test]
     fn clean_parts_survive_brief_nested_and_adjacent_overlaps() {
