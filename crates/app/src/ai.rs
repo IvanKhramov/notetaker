@@ -206,38 +206,77 @@ impl Connections {
             }
         }
     }
-    pub fn provider_title<'a>(&'a self, id: &'a str) -> &'a str {
-        self.cards
-            .iter()
-            .find(|card| card.provider.id == id)
-            .map_or(id, |card| card.title)
-    }
-    pub fn provider_index(&self, id: &str) -> Option<usize> {
-        self.cards.iter().position(|card| card.provider.id == id)
-    }
-    pub fn provider_error(&self, id: &str) -> Option<&str> {
-        self.cards
-            .iter()
-            .find(|card| card.provider.id == id)
-            .and_then(|card| {
-                card.status
-                    .starts_with("Ошибка:")
-                    .then_some(card.status.as_str())
-            })
-    }
-    pub fn quickstart_ui(
+    /// Reuse connection actions without exposing scenario/model administration.
+    pub fn onboarding_ui(
         &mut self,
         ui: &mut egui::Ui,
-        default: &str,
         can_default: bool,
         selected: &mut usize,
     ) -> Vec<Action> {
-        ui.horizontal_wrapped(|ui| {
-            for (index, card) in self.cards.iter().enumerate() {
-                ui.selectable_value(selected, index, card.title);
+        let mut actions = Vec::new();
+        egui::ComboBox::from_id_salt("onboarding_ai")
+            .selected_text(self.cards.get(*selected).map_or("Выберите AI", |c| c.title))
+            .show_ui(ui, |ui| {
+                for (index, card) in self.cards.iter().enumerate() {
+                    ui.selectable_value(selected, index, card.title);
+                }
+            });
+        if let Some(card) = self.cards.get_mut(*selected) {
+            ui.label(&card.status);
+            let mut operation = None;
+            ui.add_enabled_ui(!card.busy, |ui| {
+                if let Some(kind) = card.cli {
+                    if !card.installed {
+                        ui.label("Для подписки нужен CLI.");
+                        ui.hyperlink_to(
+                            "Установить CLI",
+                            if kind == ProviderKind::ClaudeCli {
+                                "https://code.claude.com/docs"
+                            } else {
+                                "https://developers.openai.com/codex/cli"
+                            },
+                        );
+                    }
+                    if ui.link("Войти в подписку").clicked() {
+                        operation = Some(Operation::Login);
+                    }
+                } else {
+                    if *selected != 2 {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut card.provider.base_url)
+                                .hint_text("Адрес API"),
+                        );
+                    }
+                    ui.add_enabled_ui(cfg!(any(windows, target_os = "macos")), |ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut card.key)
+                                .password(true)
+                                .hint_text("API-ключ"),
+                        );
+                    });
+                    ui.add(
+                        egui::TextEdit::singleline(&mut card.provider.model).hint_text("Модель"),
+                    );
+                }
+                if ui
+                    .add_enabled(can_default, egui::Button::new("Подключить"))
+                    .clicked()
+                {
+                    operation = Some(Operation::Default);
+                }
+            });
+            if let Some(operation) = operation {
+                card.busy = true;
+                card.edited = None;
+                actions.push(Action {
+                    index: *selected,
+                    operation,
+                    provider: card.provider.clone(),
+                    key: card.key.clone(),
+                });
             }
-        });
-        self.cards_ui(ui, default, can_default, Some(*selected))
+        }
+        actions
     }
     pub fn ui(&mut self, ui: &mut egui::Ui, default: &str, can_default: bool) -> Vec<Action> {
         self.cards_ui(ui, default, can_default, None)

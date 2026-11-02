@@ -660,7 +660,7 @@ impl AppState {
                 .any(|doc| doc.speaker_ui.recalculating)
             || self.recording.busy()
             || self.recording.assist.bookmarks_pending > 0
-            || self.downloading
+            || !self.quickstart.models.speech_ready(&self.record_model)
             || self.quickstart.probe_busy
             || self.settings_pending
             || self.draft_busy
@@ -995,6 +995,8 @@ impl AppState {
             && !self.draft_busy
             && !self.unsaved()
             && !self.settings_pending
+            && (self.settings.models_path() == self.settings_draft.models_path()
+                || (!self.downloading && !self.semantic_running))
     }
     pub fn save_settings(&mut self) {
         self.settings_edited(false, true);
@@ -1847,6 +1849,9 @@ impl AppState {
                 Ok(voices) => self.voices = voices,
                 Err(error) => self.error = Some(error),
             },
+            Event::Models(models) => {
+                self.quickstart.models = models;
+            }
             Event::DownloadProgress(message) => {
                 if self.download_messages.len() == 8 {
                     self.download_messages.pop_front();
@@ -1855,19 +1860,18 @@ impl AppState {
             }
             Event::Downloaded(result, models) => {
                 self.quickstart.download_error = result.as_ref().err().cloned();
+                self.quickstart.retry_at = result
+                    .as_ref()
+                    .err()
+                    .map(|_| Instant::now() + Duration::from_secs(60));
                 self.downloading = false;
                 self.quickstart.models = models;
                 match result {
                     Ok(()) => {
                         self.start_semantic_index();
                         self.download_messages.push_back("Модель готова".into());
-                        self.notices
-                            .push((crate::theme::ToastLevel::Success, "Модель готова".into()));
                     }
-                    Err(error) => {
-                        self.error = Some(error);
-                        self.exit_requested = false;
-                    }
+                    Err(_) => { /* The quiet status line owns errors and retry. */ }
                 }
             }
             Event::SettingsSaved(result, persist_llm) => {
@@ -1876,6 +1880,11 @@ impl AppState {
                     Ok((settings, llm)) => {
                         self.llm_configured |= persist_llm;
                         let changed_library = self.settings.library != settings.library;
+                        if self.settings.models_path() != settings.models_path() {
+                            self.quickstart.download_error = None;
+                            self.quickstart.retry_at = None;
+                            self.semantic_ready = false;
+                        }
                         let calendar_changed = self.settings.calendars != settings.calendars
                             || self.settings.calendar_timezone != settings.calendar_timezone
                             || !self.calendar_secrets.is_empty();
@@ -2206,7 +2215,7 @@ mod tests {
         let (mut state, commands, _root, _) = fixture();
         state.ready = true;
         state.settings_draft.user_name = "Иван".into();
-        state.settings_draft.hide_quickstart = true;
+        state.settings_draft.onboarding_complete = Some(true);
         state.save_preferences();
         let Command::Settings {
             settings,
@@ -2221,59 +2230,78 @@ mod tests {
         state.apply(Event::SettingsSaved(Ok((settings, llm)), persist_llm));
         assert!(!state.llm_configured);
         assert_eq!(state.settings.user_name, "Иван");
-        assert!(state.settings.hide_quickstart);
+        assert_eq!(state.settings.onboarding_complete, Some(true));
     }
     #[test]
-    fn automatic_diarization_download_waits_for_saved_attempt_and_does_not_retry() {
+    fn automatic_models_use_priority_retry_and_never_overlap_recording() {
         let (mut state, commands, _root, _) = fixture();
         state.ready = true;
-        state.quickstart.models.gigaam = crate::quickstart::Status::Ready;
+        state.quickstart.models = Default::default();
+        let model = state.settings.model.clone();
         crate::quickstart::auto_download(&mut state);
-        let Command::Settings {
-            settings,
-            llm,
-            persist_llm,
-            ..
-        } = commands.try_recv().unwrap()
-        else {
-            panic!("settings expected")
-        };
-        assert!(settings.auto_diarization_attempted);
-        assert!(!persist_llm);
+        assert!(matches!(commands.try_recv().unwrap(), Command::Download(id) if id == model));
         crate::quickstart::auto_download(&mut state);
         assert!(commands.try_recv().is_err());
-        state.apply(Event::SettingsSaved(Ok((settings, llm)), persist_llm));
-        let _ = commands.try_recv(); // Library refresh from the save.
-        state.downloading = true; // A manual download started while saving.
-        crate::quickstart::auto_download(&mut state);
-        assert!(commands.try_recv().is_err());
-        state.downloading = false;
-        crate::quickstart::auto_download(&mut state);
-        assert!(
-            matches!(commands.try_recv().unwrap(), Command::Download(model) if model == "diarization")
-        );
         state.apply(Event::Downloaded(
             Err("network".into()),
             state.quickstart.models.clone(),
         ));
         crate::quickstart::auto_download(&mut state);
         assert!(commands.try_recv().is_err());
-        assert_eq!(state.quickstart.download_error.as_deref(), Some("network"));
+        state.quickstart.retry_at = Some(Instant::now());
+        crate::quickstart::auto_download(&mut state);
+        assert!(matches!(commands.try_recv().unwrap(), Command::Download(id) if id == model));
+        state.downloading = false;
+        state.quickstart.models.gigaam = crate::quickstart::Status::Ready;
+        state.quickstart.models.parakeet = crate::quickstart::Status::Ready;
+        state.recording.phase = Phase::Recording;
+        crate::quickstart::auto_download(&mut state);
+        assert!(commands.try_recv().is_err());
+        state.recording.phase = Phase::Idle;
+        crate::quickstart::auto_download(&mut state);
+        assert!(
+            matches!(commands.try_recv().unwrap(), Command::Download(id) if id == "diarization")
+        );
+        state.downloading = false;
+        state.quickstart.models.diarization = crate::quickstart::Status::Ready;
+        crate::quickstart::auto_download(&mut state);
+        assert!(matches!(commands.try_recv().unwrap(), Command::Download(id) if id == "semantic"));
     }
     #[test]
-    fn quickstart_starts_once_per_session_and_can_reopen_after_opt_out() {
+    fn model_folder_change_waits_for_downloads_and_indexing() {
+        let (mut state, commands, root, _) = fixture();
+        state.ready = true;
+        let folder = root.path().join("models");
+        state.settings_draft.models_folder = Some(folder.clone());
+        state.downloading = true;
+        state.save_preferences();
+        assert!(commands.try_recv().is_err());
+        state.downloading = false;
+        state.semantic_running = true;
+        state.poll_settings(Instant::now());
+        assert!(commands.try_recv().is_err());
+        state.semantic_running = false;
+        state.poll_settings(Instant::now());
+        let Command::Settings { settings, .. } = commands.try_recv().unwrap() else {
+            panic!("settings expected")
+        };
+        assert_eq!(settings.models_path(), folder);
+    }
+    #[test]
+    fn first_run_is_once_and_legacy_users_can_reopen() {
         let (mut state, _commands, _root, _) = fixture();
         let mut panel = crate::quickstart::Panel::default();
         panel.tick(&mut state);
         assert!(!panel.open);
         state.ready = true;
+        state.settings.onboarding_complete = Some(false);
         panel.tick(&mut state);
         assert!(panel.open);
         panel.open = false;
         panel.tick(&mut state);
         assert!(!panel.open);
         let mut next_session = crate::quickstart::Panel::default();
-        state.settings.hide_quickstart = true;
+        state.settings.onboarding_complete = None;
         next_session.tick(&mut state);
         assert!(!next_session.open);
         next_session.open = true;
@@ -2284,10 +2312,15 @@ mod tests {
     fn capture_probe_blocks_recording_until_finished() {
         let (mut state, commands, _root, _) = fixture();
         state.ready = true;
+        state.quickstart.models = Default::default();
         state.quickstart.probe_busy = true;
         state.start_recording();
         assert!(commands.try_recv().is_err());
         state.quickstart.probe_busy = false;
+        state.start_recording();
+        assert!(commands.try_recv().is_err());
+        state.quickstart.models.gigaam = crate::quickstart::Status::Ready;
+        state.quickstart.models.parakeet = crate::quickstart::Status::Ready;
         state.start_recording();
         assert!(matches!(commands.try_recv().unwrap(), Command::Record(_)));
     }
@@ -2439,6 +2472,10 @@ mod tests {
         let (tx, commands) = std::sync::mpsc::channel();
         let (_events, rx) = std::sync::mpsc::channel();
         let mut state = AppState::with_channels(tx, rx);
+        state.quickstart.models.gigaam = crate::quickstart::Status::Ready;
+        state.quickstart.models.parakeet = crate::quickstart::Status::Ready;
+        state.quickstart.models.diarization = crate::quickstart::Status::Ready;
+        state.quickstart.models.semantic = crate::quickstart::Status::Ready;
         let root = tempfile::tempdir().unwrap();
         let library = notetaker_core::Library::open(root.path()).unwrap();
         let meeting = library
@@ -3157,6 +3194,10 @@ mod calendar_tests {
         let (tx, commands) = std::sync::mpsc::channel();
         let (_events, rx) = std::sync::mpsc::channel();
         let mut state = AppState::with_channels(tx, rx);
+        state.quickstart.models.gigaam = crate::quickstart::Status::Ready;
+        state.quickstart.models.parakeet = crate::quickstart::Status::Ready;
+        state.quickstart.models.diarization = crate::quickstart::Status::Ready;
+        state.quickstart.models.semantic = crate::quickstart::Status::Ready;
         state.ready = true;
         let now = chrono::Utc::now();
         state.calendar_events.push(CalendarEvent {

@@ -256,6 +256,7 @@ pub enum Command {
         cancel: Cancellation,
         automatic: bool,
     },
+    CheckModels,
     Download(String),
     Voices {
         root: PathBuf,
@@ -373,6 +374,7 @@ pub enum Event {
         result: Result<notetaker_llm::EnhanceResult, String>,
     },
     Voices(Result<notetaker_core::VoiceLibrary, String>),
+    Models(crate::quickstart::Models),
     DownloadProgress(String),
     Downloaded(Result<(), String>, crate::quickstart::Models),
     SettingsSaved(Result<(Settings, LlmSettings), String>, bool),
@@ -383,8 +385,7 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
     let (events, messages) = mpsc::channel();
     thread::spawn(move || {
         let mut warnings = Vec::new();
-        let new_install = Settings::path().is_ok_and(|path| !path.exists());
-        let mut settings = Settings::load().unwrap_or_else(|error| {
+        let settings = Settings::load().unwrap_or_else(|error| {
             warnings.push(format!("{error:#}"));
             Settings::default()
         });
@@ -397,13 +398,8 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
         {
             warnings.push(format!("Не удалось очистить старые файлы: {error:#}"));
         }
+        notetaker_core::embedding::set_models_dir(settings.models_path());
         let models = crate::quickstart::check_models();
-        if new_install
-            && models.gigaam == crate::quickstart::Status::Ready
-            && models.parakeet == crate::quickstart::Status::Ready
-        {
-            settings.model = "auto".into();
-        }
         let mut voice_library_enabled = settings.voice_library;
         let _ = events.send(Event::Voices(
             Library::open(&settings.library)
@@ -829,6 +825,9 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                         });
                     });
                 }
+                Command::CheckModels => {
+                    let _ = events.send(Event::Models(crate::quickstart::check_models()));
+                }
                 Command::Download(model) => {
                     let events = events.clone();
                     thread::spawn(move || {
@@ -861,6 +860,7 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                                 .context("Укажите приватный URL календаря")?;
                         }
                         Library::open(&settings.library)?;
+                        fs::create_dir_all(settings.models_path())?;
                         if persist_llm {
                             atomic_write(&notetaker_llm::Config::path()?, &llm_text)?;
                         }
@@ -869,6 +869,10 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                             if !settings.calendars.iter().any(|s| s.id == subscription.id) {
                                 let _ = OsCredentialStore.delete(&subscription.id);
                             }
+                        }
+                        if previous.models_path() != settings.models_path() {
+                            notetaker_core::embedding::set_models_dir(settings.models_path());
+                            let _ = events.send(Event::Models(crate::quickstart::check_models()));
                         }
                         voice_library_enabled = settings.voice_library;
                         let _ = events.send(Event::Voices(
@@ -1087,6 +1091,9 @@ impl Asr for AppAsr {
 pub(crate) fn background_process(binary: &Path) -> Process {
     let mut command = Process::new(binary);
     command.stdin(Stdio::null());
+    if let Ok(path) = notetaker_core::embedding::models_dir() {
+        command.env("NOTETAKER_MODELS_DIR", path);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

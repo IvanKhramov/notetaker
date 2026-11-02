@@ -45,6 +45,11 @@ pub struct Panel {
     pub section: Section,
     calendar_inputs: HashMap<String, String>,
     calendar_errors: HashMap<String, String>,
+    folder_picker: Option<std::sync::mpsc::Receiver<(bool, Option<std::path::PathBuf>)>>,
+    disk_usage: Option<std::sync::mpsc::Receiver<(u64, u64)>>,
+    usage: Option<(u64, u64)>,
+    usage_checked: Option<std::time::Instant>,
+    usage_paths: Option<(std::path::PathBuf, std::path::PathBuf)>,
 }
 #[derive(Default)]
 struct Edits {
@@ -110,6 +115,19 @@ impl Panel {
         maintenance: &mut crate::maintenance::Maintenance,
         organization: &mut crate::organization::Panel,
     ) -> bool {
+        if let Some(rx) = &self.folder_picker
+            && let Ok((models, path)) = rx.try_recv()
+        {
+            if let Some(path) = path {
+                if models {
+                    state.settings_draft.models_folder = Some(path);
+                } else {
+                    state.settings_draft.library = path;
+                }
+                state.save_preferences();
+            }
+            self.folder_picker = None;
+        }
         let mut quickstart = false;
         let previous_section = self.section;
         let mut close = false;
@@ -118,11 +136,14 @@ impl Panel {
             .title_bar(false)
             .open(open)
             .default_size([900.0, 650.0])
-            .min_width(700.0)
+            .max_size(
+                (ctx.content_rect().size() - egui::vec2(32.0, 32.0)).max(egui::vec2(280.0, 200.0)),
+            )
+            .constrain_to(ctx.content_rect().shrink(8.0))
             .resizable(true)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Настройки").font(theme::semibold(16.0)));
+                    ui.label(RichText::new("Настройки").font(theme::semibold(theme::SUBHEADING)));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         close = theme::button(ui, "×", ButtonStyle::Ghost)
                             .on_hover_text("Закрыть")
@@ -154,7 +175,14 @@ impl Panel {
                 ui.separator();
                 ui.horizontal_top(|ui| {
                     ui.allocate_ui_with_layout(
-                        egui::vec2(180.0, 540.0),
+                        egui::vec2(
+                            if ctx.content_rect().width() < 800.0 {
+                                125.0
+                            } else {
+                                170.0
+                            },
+                            260.0,
+                        ),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
                             for section in Section::ALL {
@@ -176,12 +204,17 @@ impl Panel {
                     );
                     ui.separator();
                     ui.vertical(|ui| {
-                        ui.set_min_width(470.0);
+                        ui.set_min_width((ui.available_width() - 8.0).min(470.0));
+                        ui.style_mut().spacing.scroll.floating = false;
                         ui.heading(self.section.label());
                         ui.add_space(12.0);
                         egui::ScrollArea::vertical()
                             .id_salt(("settings_section", self.section as u8))
-                            .max_height(ui.available_height().max(400.0))
+                            .max_height(
+                                ui.available_height()
+                                    .min(ctx.content_rect().height() - 150.0)
+                                    .max(80.0),
+                            )
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
                                 quickstart = self.body(ui, state, maintenance, organization);
@@ -250,6 +283,23 @@ impl Panel {
                             }
                         });
                 });
+                theme::setting_row(ui, "Масштаб интерфейса", |ui| {
+                    egui::ComboBox::from_id_salt("ui_zoom")
+                        .selected_text(format!("{:.0}%", settings.ui_zoom * 100.0))
+                        .show_ui(ui, |ui| {
+                            for value in [0.9, 1.0, 1.1, 1.25, 1.5] {
+                                ui.selectable_value(
+                                    &mut settings.ui_zoom,
+                                    value,
+                                    format!("{:.0}%", value * 100.0),
+                                );
+                            }
+                        });
+                });
+                hint(
+                    ui,
+                    "Ctrl+= / Ctrl+- / Ctrl+0: изменить или сбросить масштаб.",
+                );
                 edits.text(ui, "Ваше имя", &mut settings.user_name);
                 edits.text(ui, "Другие варианты имени", &mut settings.user_aliases);
                 ui.add_enabled_ui(cfg!(any(windows, target_os = "macos")), |ui| {
@@ -259,11 +309,6 @@ impl Panel {
                 theme::setting_row(ui, "Быстрый старт", |ui| {
                     quickstart = theme::button(ui, "Открыть ›", ButtonStyle::Ghost).clicked();
                 });
-                theme::toggle(
-                    ui,
-                    &mut settings.hide_quickstart,
-                    "Не показывать быстрый старт при запуске",
-                );
                 maintenance.windows_settings(ui);
                 theme::toggle(
                     ui,
@@ -276,8 +321,11 @@ impl Panel {
             }
             Section::Recording => {
                 let settings = &mut state.settings_draft;
-                theme::setting_row(ui, "Модель распознавания", |ui| {
-                    crate::ui::model_selector(ui, "settings_model", &mut settings.model);
+                ui.collapsing("Для опытных", |ui| {
+                    theme::setting_row(ui, "Модель распознавания", |ui| {
+                        crate::ui::model_selector(ui, "settings_model", &mut settings.model);
+                    });
+                    hint(ui, "Выбранная модель загрузится автоматически.");
                 });
                 theme::setting_row(ui, "Режим новых встреч", |ui| {
                     egui::ComboBox::from_id_salt("settings_mode")
@@ -401,21 +449,6 @@ impl Panel {
                         });
                     },
                 );
-                ui.collapsing("Модели на компьютере", |ui| {
-                    for (id, label) in [
-                        ("gigaam-v3", "GigaAM v3 · русский"),
-                        ("parakeet-v3", "Parakeet v3 · многоязычный"),
-                        ("auto", "Авто (рус/англ)"),
-                        ("diarization", "Разделение собеседников (47 МБ)"),
-                    ] {
-                        crate::quickstart::model_control(ui, state, id, label);
-                    }
-                    theme::toggle(
-                        ui,
-                        &mut state.settings_draft.auto_download_models,
-                        "Скачивать модели автоматически",
-                    );
-                });
                 ui.collapsing("Сохранённые голоса", |ui| {
                     if state.voices.voices.is_empty() {
                         hint(ui, "Голосов пока нет. Назовите участника в транскрипте.");
@@ -575,7 +608,12 @@ impl Panel {
                 });
             }
             Section::Search => {
-                crate::quickstart::semantic_step(ui, state);
+                ui.label("Поиск по словам и по смыслу");
+                hint(
+                    ui,
+                    "Локальная модель загружается автоматически. До её загрузки работает поиск по словам. Тексты остаются на компьютере.",
+                );
+                crate::quickstart::model_status(ui, state);
                 organization.shared_step(ui, !state.semantic_running && state.can_save_settings());
                 theme::toggle(
                     ui,
@@ -596,32 +634,98 @@ impl Panel {
                 });
             }
             Section::Storage => {
-                let settings = &mut state.settings_draft;
-                let mut library = notetaker_core::display_path(&settings.library);
-                edits.text(ui, "Библиотека", &mut library);
-                settings.library = library.into();
-                if !settings.library.is_absolute() {
-                    ui.colored_label(
-                        Palette::of(ui).red,
-                        "Путь библиотеки должен быть абсолютным",
+                let paths = (state.settings.library.clone(), state.settings.models_path());
+                if self.usage_paths.as_ref() != Some(&paths)
+                    || self
+                        .usage_checked
+                        .is_none_or(|at| at.elapsed().as_secs() >= 10)
+                {
+                    self.usage_checked = Some(std::time::Instant::now());
+                    self.usage_paths = Some(paths.clone());
+                    self.usage = None;
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    self.disk_usage = Some(rx);
+                    std::thread::spawn(move || {
+                        let _ = tx.send((directory_bytes(&paths.0), directory_bytes(&paths.1)));
+                    });
+                }
+                if let Some(rx) = &self.disk_usage
+                    && let Ok(usage) = rx.try_recv()
+                {
+                    self.usage = Some(usage);
+                    self.disk_usage = None;
+                }
+                for (models, title, path) in [
+                    (
+                        false,
+                        "Папка для встреч",
+                        state.settings_draft.library.clone(),
+                    ),
+                    (
+                        true,
+                        "Папка для моделей",
+                        state.settings_draft.models_path(),
+                    ),
+                ] {
+                    theme::setting_row(ui, title, |ui| {
+                        if ui
+                            .add_enabled(
+                                self.folder_picker.is_none(),
+                                egui::Button::new("Выбрать…"),
+                            )
+                            .clicked()
+                        {
+                            let (tx, rx) = std::sync::mpsc::channel();
+                            self.folder_picker = Some(rx);
+                            let directory = path.clone();
+                            std::thread::spawn(move || {
+                                let result = rfd::FileDialog::new()
+                                    .set_directory(directory)
+                                    .pick_folder();
+                                let _ = tx.send((models, result));
+                            });
+                        }
+                    });
+                    hint(ui, &notetaker_core::display_path(&path));
+                }
+                if let Some((library, models)) = self.usage {
+                    hint(
+                        ui,
+                        &format!(
+                            "На диске: встречи {:.0} МБ · модели {:.0} МБ",
+                            library as f64 / 1_048_576.0,
+                            models as f64 / 1_048_576.0
+                        ),
                     );
                 }
-                theme::setting_row(ui, "Хранить аудио", |ui| {
+                hint(
+                    ui,
+                    "В новой папке недостающие модели загрузятся автоматически. Прежние файлы сохранятся.",
+                );
+                crate::quickstart::model_status(ui, state);
+                ui.add_space(12.0);
+                let settings = &mut state.settings_draft;
+                ui.collapsing("Для опытных", |ui| {
                     let mut forever = settings.retention_days.is_none();
-                    if ui.checkbox(&mut forever, "Всегда").changed() {
+                    if theme::toggle(ui, &mut forever, "Хранить аудио всегда").changed()
+                    {
                         settings.retention_days = if forever { None } else { Some(7) };
                     }
                     if let Some(days) = &mut settings.retention_days {
-                        edits.number(
-                            ui.add(egui::DragValue::new(days).range(0..=36_500).suffix(" дней")),
-                        );
+                        theme::setting_row(ui, "Хранить аудио", |ui| {
+                            edits.number(
+                                ui.add(
+                                    egui::DragValue::new(days).range(0..=36_500).suffix(" дней"),
+                                ),
+                            );
+                        });
                     }
+                    hint(
+                        ui,
+                        "0 дней: удалить после чистового прохода. Применяется к новым записям.",
+                    );
+                    maintenance.settings(ui, settings);
                 });
-                hint(
-                    ui,
-                    "0 дней: удалить после чистового прохода. Применяется к новым записям.",
-                );
-                maintenance.settings(ui, settings);
             }
         }
         let settings_changed =
@@ -749,4 +853,18 @@ fn providers(ui: &mut egui::Ui, llm: &mut LlmSettings, edits: &mut Edits) {
         });
     }
     error(ui, llm.validate().map(|_| ()));
+}
+
+// Ignore symlinks to avoid cycles and counting files outside the selected folder.
+fn directory_bytes(path: &std::path::Path) -> u64 {
+    std::fs::read_dir(path)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| match entry.file_type() {
+            Ok(kind) if kind.is_dir() => directory_bytes(&entry.path()),
+            Ok(kind) if kind.is_file() => entry.metadata().map_or(0, |m| m.len()),
+            _ => 0,
+        })
+        .sum()
 }

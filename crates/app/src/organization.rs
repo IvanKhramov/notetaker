@@ -358,7 +358,7 @@ impl Panel {
                 egui::ComboBox::from_id_salt("meeting_folder")
                     .selected_text(
                         egui::RichText::new(meta.folder.as_deref().unwrap_or("Без папки"))
-                            .size(11.5)
+                            .size(theme::SMALL)
                             .color(crate::theme::Palette::of(ui).muted),
                     )
                     .width(0.0)

@@ -1,18 +1,14 @@
-//! Startup checklist and shared setup controls. No model weights are loaded here.
-use std::{
-    process::Stdio,
-    sync::mpsc::{self, Receiver, Sender},
-    time::{Duration, Instant},
-};
-
-use eframe::egui;
-
+//! Small first-run flow. Model setup runs independently in the background.
 use crate::{
-    config::{LlmSettings, Settings},
-    maintenance::Maintenance,
     state::AppState,
     theme::{self, Palette},
     worker::{self, Command},
+};
+use eframe::egui;
+use std::{
+    process::Stdio,
+    sync::mpsc::{self, Receiver},
+    time::{Duration, Instant},
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -22,102 +18,33 @@ pub enum Status {
     Missing,
     Error(String),
 }
-impl Status {
-    fn label(&self) -> &str {
-        match self {
-            Self::Ready => "Готово",
-            Self::Missing => "Не настроено",
-            Self::Error(_) => "Ошибка",
-        }
-    }
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct Models {
     pub gigaam: Status,
     pub parakeet: Status,
     pub auto: Status,
     pub diarization: Status,
+    pub semantic: Status,
 }
 impl Models {
-    fn asr(&self) -> Status {
-        if self.gigaam == Status::Ready || self.parakeet == Status::Ready {
-            Status::Ready
-        } else if let Status::Error(error) = &self.gigaam {
-            Status::Error(error.clone())
-        } else {
-            self.parakeet.clone()
-        }
-    }
-    fn get(&self, model: &str) -> &Status {
+    pub fn get(&self, model: &str) -> &Status {
         match model {
             "gigaam-v3" => &self.gigaam,
             "parakeet-v3" => &self.parakeet,
             "auto" => &self.auto,
+            "semantic" => &self.semantic,
             _ => &self.diarization,
         }
     }
+    pub fn speech_ready(&self, model: &str) -> bool {
+        self.get(model) == &Status::Ready
+    }
+    pub fn missing<'a>(&self, model: &'a str) -> Option<&'a str> {
+        [model, "diarization", "semantic"]
+            .into_iter()
+            .find(|id| self.get(id) != &Status::Ready)
+    }
 }
-
-/// Pure checklist computation, including configured providers outside the cards.
-pub fn step_states(
-    models: &Models,
-    settings: &Settings,
-    llm: &LlmSettings,
-    llm_configured: bool,
-    provider_error: Option<&str>,
-    calendar_error: Option<&str>,
-) -> [Status; 6] {
-    let configured = llm_configured
-        && llm
-            .providers
-            .iter()
-            .any(|p| p.id == llm.defaults.hybrid && p.config().is_ok());
-    [
-        if settings.model == "auto" {
-            models.auto.clone()
-        } else {
-            models.asr()
-        },
-        models.diarization.clone(),
-        if let Some(error) = provider_error {
-            Status::Error(error.into())
-        } else if configured {
-            Status::Ready
-        } else {
-            Status::Missing
-        },
-        if settings.user_name.trim().is_empty() {
-            Status::Missing
-        } else {
-            Status::Ready
-        },
-        if let Some(error) = calendar_error {
-            Status::Error(error.into())
-        } else if settings.calendars.is_empty() {
-            Status::Missing
-        } else {
-            Status::Ready
-        },
-        // Both enabled and disabled are valid choices for call preferences.
-        Status::Ready,
-    ]
-}
-
-pub fn essential_missing(steps: &[Status; 6]) -> usize {
-    [0, 2]
-        .into_iter()
-        .filter(|&index| steps[index] != Status::Ready)
-        .count()
-}
-
-pub fn should_auto_download(settings: &Settings, models: &Models) -> bool {
-    settings.auto_download_models
-        && !settings.auto_diarization_attempted
-        && models.asr() == Status::Ready
-        && models.diarization == Status::Missing
-}
-
 #[derive(Default)]
 pub struct Runtime {
     pub models: Models,
@@ -125,42 +52,46 @@ pub struct Runtime {
     pub download_error: Option<String>,
     pub calendar_error: Option<String>,
     pub probe_busy: bool,
-    auto_attempted: bool,
-    auto_pending: bool,
+    pub retry_at: Option<Instant>,
+    checked_at: Option<Instant>,
 }
 
-/// Persist the one-time attempt before starting network activity, also after the
-/// first ASR download. A failed save/download does not retry in a loop.
+/// Download in priority order, retry with a delay, and periodically detect removed
+/// files. Never overlap downloads with recording or a folder preference change.
 pub fn auto_download(state: &mut AppState) {
-    if state.quickstart.auto_pending
-        && !state.settings_pending
-        && !state.downloading
-        && !state.recording.busy()
-        && !state.quickstart.probe_busy
-        && !state.exit_requested
+    if !state.ready
+        || state.downloading
+        || state.recording.busy()
+        || state.settings_pending
+        || state.settings_autosave.pending
+        || state.exit_requested
     {
-        state.quickstart.auto_pending = false;
-        if state.settings.auto_diarization_attempted
-            && state.settings.auto_download_models
-            && state.quickstart.models.diarization == Status::Missing
-        {
-            state.notices.push((
-                crate::theme::ToastLevel::Info,
-                "Скачиваю модели разделения собеседников...".into(),
-            ));
-            state.download("diarization".into());
-        }
+        return;
     }
-    if !state.quickstart.auto_attempted
-        && !state.downloading
-        && !state.quickstart.probe_busy
-        && state.can_save_settings()
-        && should_auto_download(&state.settings, &state.quickstart.models)
+    if state
+        .quickstart
+        .retry_at
+        .is_some_and(|at| Instant::now() < at)
     {
-        state.quickstart.auto_attempted = true;
-        state.settings_draft.auto_diarization_attempted = true;
-        state.save_preferences();
-        state.quickstart.auto_pending = state.settings_pending;
+        return;
+    }
+    if let Some(model) = state
+        .quickstart
+        .models
+        .missing(&state.settings.model)
+        .map(str::to_owned)
+    {
+        state.quickstart.retry_at = None;
+        state.download(model);
+    } else if state
+        .quickstart
+        .checked_at
+        .is_some_and(|at| at.elapsed() > Duration::from_secs(60))
+    {
+        state.quickstart.checked_at = Some(Instant::now());
+        state.send(Command::CheckModels);
+    } else {
+        state.quickstart.checked_at.get_or_insert_with(Instant::now);
     }
 }
 
@@ -184,54 +115,50 @@ pub fn check_models() -> Models {
         parakeet: check("parakeet-v3"),
         auto: check("auto"),
         diarization: check("diarization"),
+        semantic: if notetaker_core::embedding::installed()
+            && worker::background_process(&notetaker_core::embedding::worker_path())
+                .arg("check-model")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        {
+            Status::Ready
+        } else {
+            Status::Missing
+        },
     }
 }
 
-/// Used by Settings and Quick start with the same worker and phase progress.
-pub fn model_control(ui: &mut egui::Ui, state: &mut AppState, model: &str, title: &str) {
-    let status = state.quickstart.models.get(model).clone();
-    ui.horizontal_wrapped(|ui| {
-        ui.label(title);
-        ui.small(status.label());
-        if status == Status::Ready && crate::config::MODELS.contains(&model) {
-            if state.settings.model == model {
-                ui.small("По умолчанию");
-            } else if ui
-                .add_enabled(state.ready, egui::Button::new("Выбрать"))
-                .clicked()
-            {
-                state.settings_draft.model = model.into();
-                state.save_preferences();
-            }
-        }
-        if status != Status::Ready
-            && ui
-                .add_enabled(
-                    !state.downloading && !state.recording.busy(),
-                    egui::Button::new("Скачать"),
-                )
-                .clicked()
-        {
-            state.download(model.into());
-        }
-    });
-    if state.quickstart.download_model.as_deref() == Some(model) {
-        if state.downloading {
-            // The downloader reports phases, not byte counts. Do not invent a percentage.
-            ui.add(
-                egui::ProgressBar::new(0.0)
-                    .animate(true)
-                    .text("Загрузка и установка..."),
-            );
-            if let Some(message) = state.download_messages.back() {
-                ui.small(message);
-            }
-        } else if let Some(error) = &state.quickstart.download_error {
+/// One quiet status line shared by welcome and storage. Progress is in phases,
+/// so byte totals or percentages would be misleading.
+pub fn model_status(ui: &mut egui::Ui, state: &mut AppState) {
+    if state.downloading {
+        let ready = [&*state.settings.model, "diarization", "semantic"]
+            .into_iter()
+            .filter(|id| state.quickstart.models.get(id) == &Status::Ready)
+            .count();
+        ui.horizontal_wrapped(|ui| {
+            ui.spinner();
+            ui.weak(format!("Подготовка к записи: скачиваю {} из 3…", ready + 1));
+        });
+    } else if let Some(error) = state.quickstart.download_error.clone() {
+        ui.horizontal_wrapped(|ui| {
             ui.colored_label(Palette::of(ui).red, error);
-        }
-    }
-    if let Status::Error(error) = state.quickstart.models.get(model) {
-        ui.colored_label(Palette::of(ui).red, error);
+            if ui.link("Повторить").clicked() {
+                state.quickstart.retry_at = None;
+            }
+        });
+        ui.small("Повторю автоматически через минуту.");
+    } else if state
+        .quickstart
+        .models
+        .missing(&state.settings.model)
+        .is_none()
+    {
+        ui.weak("Все модели на месте");
+    } else {
+        ui.weak("Подготовка к записи…");
     }
 }
 
@@ -239,29 +166,30 @@ pub fn model_control(ui: &mut egui::Ui, state: &mut AppState, model: &str, title
 pub struct Panel {
     pub open: bool,
     startup_checked: bool,
-    edit_ai: bool,
-    ai_connecting: bool,
+    step: usize,
     selected_ai: usize,
     calendar_url: String,
-    calendar_connecting: bool,
     probe: Option<Receiver<ProbeEvent>>,
-    levels: [f32; 2],
-    probe_status: Option<Status>,
+    probe_status: Option<[Status; 2]>,
 }
 impl Panel {
-    fn accept_calendar(&mut self, state: &mut AppState) -> bool {
+    pub fn reopen(&mut self) {
+        self.open = true;
+        self.step = 0;
+    }
+    fn accept_calendar(&mut self, state: &mut AppState) {
         if self.calendar_url.trim().is_empty() {
-            return false;
+            return;
         }
         let id = state
             .settings_draft
             .calendars
             .first()
-            .map(|calendar| calendar.id.clone())
+            .map(|c| c.id.clone())
             .unwrap_or_else(|| format!("calendar-{}", uuid::Uuid::now_v7()));
         if let Err(error) = crate::settings::validate_calendar_secret(&id, &self.calendar_url) {
             state.quickstart.calendar_error = Some(error.to_string());
-            return false;
+            return;
         }
         if state.settings_draft.calendars.is_empty() {
             state
@@ -276,50 +204,39 @@ impl Panel {
             .calendar_secrets
             .insert(id, self.calendar_url.trim().to_owned());
         self.calendar_url.clear();
-        self.calendar_connecting = true;
         state.quickstart.calendar_error = None;
-        true
+        state.save_preferences();
     }
-
     pub fn blur(&mut self, state: &mut AppState) {
         state.connections.blur();
-        if cfg!(any(windows, target_os = "macos")) && self.accept_calendar(state) {
-            state.save_preferences();
+        if cfg!(any(windows, target_os = "macos")) {
+            self.accept_calendar(state);
         }
     }
     pub fn tick(&mut self, state: &mut AppState) {
         if state.ready && !self.startup_checked {
             self.startup_checked = true;
-            self.open = !state.settings.hide_quickstart;
-        }
-        if self.ai_connecting && !state.settings_pending {
-            self.ai_connecting = false;
-            self.edit_ai = false;
-        }
-        if self.calendar_connecting && !state.settings_pending && !state.settings_autosave.pending {
-            self.calendar_connecting = false;
-            if state.quickstart.calendar_error.is_none() {
-                self.calendar_url.clear();
+            self.open = state.settings.needs_onboarding();
+            if self.open {
+                // Mark the first presentation, so even dismissing the window is
+                // a one-time experience. Explicit reruns never reset this flag.
+                state.settings_draft.onboarding_complete = Some(true);
+                state.save_preferences();
             }
         }
         if let Some(receiver) = &self.probe {
-            loop {
-                match receiver.try_recv() {
-                    Ok(ProbeEvent::Levels(levels)) => self.levels = levels,
-                    Ok(ProbeEvent::Done(result)) => {
-                        self.probe_status = Some(match result {
-                            Ok(()) => Status::Ready,
-                            Err(error) => Status::Error(error),
-                        });
-                        state.quickstart.probe_busy = false;
-                        break;
-                    }
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        self.probe_status = Some(Status::Error("Проверка звука прервалась".into()));
-                        state.quickstart.probe_busy = false;
-                        break;
-                    }
+            match receiver.try_recv() {
+                Ok(ProbeEvent::Done(result)) => {
+                    self.probe_status = Some(result.unwrap_or_else(|error| {
+                        [Status::Error(error.clone()), Status::Error(error)]
+                    }));
+                    state.quickstart.probe_busy = false;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.probe_status =
+                        Some([Status::Error("Проверка прервалась".into()), Status::Missing]);
+                    state.quickstart.probe_busy = false;
                 }
             }
             if !state.quickstart.probe_busy {
@@ -327,206 +244,138 @@ impl Panel {
             }
         }
     }
-    fn steps(&self, state: &AppState) -> [Status; 6] {
-        let mut steps = step_states(
-            &state.quickstart.models,
-            &state.settings,
-            &state.llm,
-            state.llm_configured,
-            state.connections.provider_error(&state.llm.defaults.hybrid),
-            state.quickstart.calendar_error.as_deref(),
-        );
-        if let Some(error) = &state.quickstart.download_error
-            && state.quickstart.download_model.as_deref() != Some("semantic")
+    fn start_probe(&mut self, state: &mut AppState) {
+        if !cfg!(any(windows, target_os = "macos"))
+            || state.quickstart.probe_busy
+            || state.recording.busy()
+            || state.exit_requested
         {
-            let index = if state.quickstart.download_model.as_deref() == Some("diarization") {
-                1
-            } else {
-                0
-            };
-            if steps[index] != Status::Ready {
-                steps[index] = Status::Error(error.clone());
-            }
+            return;
         }
-        steps
+        let (sender, receiver) = mpsc::channel();
+        self.probe = Some(receiver);
+        self.probe_status = None;
+        state.quickstart.probe_busy = true;
+        std::thread::spawn(move || {
+            let result = probe().map_err(|error| format!("{error:#}"));
+            let _ = sender.send(ProbeEvent::Done(result));
+        });
     }
-    /// Returns true when the user chooses the full Settings dialog.
-    pub fn show(
-        &mut self,
-        ctx: &egui::Context,
-        state: &mut AppState,
-        maintenance: &mut Maintenance,
-        organization: &mut crate::organization::Panel,
-    ) -> bool {
+    pub fn show(&mut self, ctx: &egui::Context, state: &mut AppState) {
         if !self.open || !state.ready {
-            return false;
+            return;
         }
-        let steps = self.steps(state);
-        let mut open = self.open;
-        let mut settings = false;
-        let mut done = false;
-        let mut save = false;
-        theme::window(ctx, "Быстрый старт")
-            .id(egui::Id::unique("quickstart"))
-            .open(&mut open)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .default_width(620.0)
-            .default_height(620.0)
-            .resizable(true)
+        let mut open = true;
+        let mut next = false;
+        egui::Modal::new(egui::Id::unique("quickstart"))
+            .frame(egui::Frame::window(&ctx.global_style()))
             .show(ctx, |ui| {
-                ui.small(state.settings_status());
-                if let Some(error) = &state.settings_autosave.error { ui.colored_label(Palette::of(ui).red, error); }
-                let completed = steps.iter().filter(|s| **s == Status::Ready).count();
-                ui.label(egui::RichText::new(if essential_missing(&steps) == 0 { "Можно начинать запись".to_owned() } else { format!("Настроено {completed} из 6") }).font(theme::semibold(16.0)));
-                ui.add(egui::ProgressBar::new(completed as f32 / 6.0).fill(Palette::of(ui).text).desired_height(4.0));
-                ui.small("Настройте запись и конспекты здесь. Календарь и проверку звука можно пропустить.");
-                ui.vertical(|ui| {
-                    semantic_step(ui, state);
-                    ui.separator();
-                    organization.shared_step(ui, !state.semantic_running && state.can_save_settings());
-                    ui.separator();
-                    row(ui, &steps[0], "Распознавание речи", "Модели работают локально. Для Авто нужны обе модели и Whisper tiny (~103 МБ).");
-                    model_control(ui, state, "gigaam-v3", "GigaAM v3 · русский");
-                    model_control(ui, state, "parakeet-v3", "Parakeet v3 · многоязычный");
-                    model_control(ui, state, "auto", "Авто (рус/англ)");
-                    row(ui, &steps[1], "Разделение собеседников", "Отмечает, кто говорил. Модели занимают около 47 МБ.");
-                    model_control(ui, state, "diarization", "Модели собеседников");
-                    ui.add_enabled_ui(state.ready, |ui| {
-                        save |= crate::theme::toggle(ui, &mut state.settings_draft.auto_download_models, "Скачивать модели автоматически").changed();
-                    });
-                    row(ui, &steps[2], "AI для конспектов", "Провайдер по умолчанию для конспектов и чата.");
-                    if steps[2] == Status::Ready && !self.edit_ai {
-                        let id = &state.llm.defaults.hybrid;
-                        let model = state.llm.providers.iter().find(|p| &p.id == id).map_or("", |p| p.model.as_str());
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(format!("Подключено: {}, {model}", state.connections.provider_title(id)));
-                            if ui.link("Изменить").clicked() {
-                                self.selected_ai = state.connections.provider_index(id).unwrap_or(self.selected_ai);
-                                self.edit_ai = true;
-                            }
-                        });
-                    } else {
-                        let can_default = state.ready;
-                        for action in state.connections.quickstart_ui(ui, &state.llm_draft.defaults.hybrid, can_default, &mut self.selected_ai) {
-                            self.ai_connecting |= action.operation == crate::ai::Operation::Default;
-                            state.send(Command::Ai(action));
-                        }
-                        if steps[2] == Status::Ready && ui.link("Свернуть").clicked() { self.edit_ai = false; }
-                    }
-                    if state.settings.mode == notetaker_core::Mode::Hybrid {
-                        ui.small("Hybrid: тексты встреч отправляются выбранному AI. Аудио остаётся на компьютере.");
-                    } else {
-                        ui.small("Подключение облачного AI включит Hybrid для новых встреч.");
-                    }
-                    row(ui, &steps[3], "Как вас зовут", "Для фильтра «Мои» и имени вашего спикера.");
-                    ui.add_enabled_ui(state.ready, |ui| {
-                        let blur = identity_control(ui, &mut state.settings_draft);
-                        save |= blur && (state.settings_draft.user_name != state.settings.user_name || state.settings_draft.user_aliases != state.settings.user_aliases);
-                    });
-                    row(ui, &steps[4], "Календарь (необязательно)", if cfg!(target_os = "macos") { "Приватная HTTPS ICS-подписка, URL хранится в macOS Keychain." } else { "Приватная HTTPS ICS-подписка, URL хранится в Windows Credential Manager." });
-                    if state.settings.calendars.is_empty() {
-                        ui.add_enabled_ui(state.ready && cfg!(any(windows, target_os = "macos")), |ui| {
-                            let response = ui.add(egui::TextEdit::singleline(&mut self.calendar_url).password(true).hint_text("HTTPS URL ICS"));
-                            if response.lost_focus() && !self.calendar_url.trim().is_empty() {
-                                save |= self.accept_calendar(state);
-                            }
-                        });
-                        #[cfg(not(any(windows, target_os = "macos")))]
-                        ui.small("Сохранение URL доступно на Windows и macOS.");
-                    } else {
-                        let today = chrono::Local::now().date_naive();
-                        let count = state.calendar_events.iter().filter(|event| event.start.with_timezone(&chrono::Local).date_naive() == today).count();
-                        ui.label(format!("{count} событий сегодня"));
-                        ui.add_enabled_ui(state.ready && cfg!(any(windows, target_os = "macos")), |ui| {
-                            let response = ui.add(egui::TextEdit::singleline(&mut self.calendar_url).password(true).hint_text("Новый HTTPS URL ICS (при необходимости)"));
-                            if response.lost_focus() && !self.calendar_url.trim().is_empty() {
-                                save |= self.accept_calendar(state);
-                            }
-                        });
-                        if ui.add_enabled(!state.calendar_busy, egui::Button::new("Обновить")).clicked() { state.refresh_calendar(); }
-                        if state.calendar_busy { ui.spinner(); }
-                        ui.small(&state.calendar_status);
-                    }
-                    row(ui, &steps[5], "Звонки", if cfg!(target_os = "macos") { "Предложения записи и запуск приложения при входе в macOS." } else { "Предложения записи и запуск приложения вместе с Windows." });
-                    ui.add_enabled_ui(state.ready && cfg!(any(windows, target_os = "macos")), |ui| {
-                        save |= crate::theme::toggle(ui, &mut state.settings_draft.detect_calls, "Предлагать запись при звонке").changed();
-                    });
-                    maintenance.windows_settings(ui);
-                    row(ui, self.probe_status.as_ref().unwrap_or(&Status::Missing), "Проверка звука (необязательно)", "5 секунд: говорите и включите звук звонка. Аудио не сохраняется.");
-                    if ui.add_enabled(cfg!(any(windows, target_os = "macos")) && !state.quickstart.probe_busy && !state.recording.busy() && !state.settings_pending && !state.exit_requested, egui::Button::new("Проверить")).clicked() {
-                        let (sender, receiver) = mpsc::channel();
-                        self.probe = Some(receiver);
-                        self.levels = [0.0; 2];
-                        self.probe_status = None;
-                        state.quickstart.probe_busy = true;
-                        std::thread::spawn(move || {
-                            let result = probe(&sender).map_err(|error| format!("{error:#}"));
-                            let _ = sender.send(ProbeEvent::Done(result));
-                        });
-                    }
-                    for (label, level) in ["Микрофон", "Системный звук"].into_iter().zip(self.levels) {
-                        ui.add(egui::ProgressBar::new(level).text(label));
-                    }
-                    if state.quickstart.probe_busy { ui.spinner(); ctx.request_repaint_after(Duration::from_millis(50)); }
-                });
-                ui.separator();
-                ui.add_enabled_ui(state.ready, |ui| {
-                    save |= crate::theme::toggle(ui, &mut state.settings_draft.hide_quickstart, "Больше не показывать при запуске").changed();
-                });
+                ui.set_width((ctx.content_rect().width() - 64.0).min(520.0));
                 ui.horizontal(|ui| {
-                    if theme::button(ui, "Готово", theme::ButtonStyle::Primary).clicked() { done = true; }
-                    if ui.button("Открыть все настройки").clicked() { settings = true; }
-                    if state.settings_pending { ui.spinner(); }
+                    ui.weak(format!("{} / 3", self.step + 1));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if theme::button(ui, "×", theme::ButtonStyle::Ghost).on_hover_text("Закрыть").clicked() { open = false; }
+                    });
+                });
+                ui.add_space(8.0);
+                egui::ScrollArea::vertical().max_height((ctx.content_rect().height() - if self.step == 0 { 260.0 } else { 180.0 }).max(80.0))
+                    .show(ui, |ui| {
+                    match self.step {
+                        0 => {
+                            ui.heading("Встреча идёт. Заметки остаются.");
+                            ui.label("Пишите главное. notetaker запишет разговор и поможет с конспектом.");
+                            ui.add_space(16.0);
+                            ui.label("Проверим звук?");
+                            ui.label("Говорите и включите звук на компьютере. Проверка займёт 5 секунд, аудио не сохраняется.");
+                            for (index, title) in ["Микрофон", "Системный звук"].into_iter().enumerate() {
+                                let status = self.probe_status.as_ref().map(|s| &s[index]);
+                                match status {
+                                    Some(Status::Ready) => { ui.label(format!("✓ {title}: работает")); }
+                                    Some(Status::Error(error)) => { ui.colored_label(Palette::of(ui).red, format!("{title}: {error}")); }
+                                    _ => { ui.weak(format!("{title}: {}", if state.quickstart.probe_busy { "проверяю…" } else { "не проверен" })); }
+                                }
+                            }
+                            #[cfg(target_os = "macos")]
+                            ui.small("macOS: Настройки системы → Конфиденциальность и безопасность → Microphone и System Audio Recording. Разрешите доступ для notetaker.");
+                            #[cfg(windows)]
+                            ui.small("Если нет доступа: Параметры → Конфиденциальность → Микрофон. Разрешите доступ приложениям.");
+                            #[cfg(not(any(windows, target_os = "macos")))]
+                            ui.small("Проверка и запись звука доступны на macOS и Windows.");
+                            if self.probe_status.is_some() && ui.link("Проверить ещё раз").clicked() { self.start_probe(state); }
+
+                        }
+                        1 => {
+                            ui.heading("Как вас зовут?");
+                            ui.label("Этим именем отметим ваш голос в транскрипте.");
+                            let response = ui.add(egui::TextEdit::singleline(&mut state.settings_draft.user_name)
+                                .hint_text("Ваше имя").desired_width(f32::INFINITY));
+                            if response.changed() { state.settings_edited(true, false); }
+                            if response.lost_focus() { state.save_preferences(); }
+                        }
+                        _ => {
+                            ui.heading("Подключить помощников?");
+                            ui.label("Необязательно. Всё можно настроить позже.");
+                            egui::CollapsingHeader::new("Календарь").show(ui, |ui| {
+                                ui.label("Встречи из календаря появятся на главном экране.");
+                                if state.settings.calendars.is_empty() {
+                                    ui.add_enabled_ui(cfg!(any(windows, target_os = "macos")), |ui| {
+                                        let response = ui.add(egui::TextEdit::singleline(&mut self.calendar_url)
+                                            .password(true).hint_text("HTTPS URL ICS").desired_width(f32::INFINITY));
+                                        if response.lost_focus() { self.accept_calendar(state); }
+                                    });
+                                    if let Some(error) = &state.quickstart.calendar_error { ui.colored_label(Palette::of(ui).red, error); }
+                                } else { ui.label("Календарь подключён"); }
+                                if ui.link("Пропустить календарь").clicked() { self.calendar_url.clear(); }
+                            });
+                            egui::CollapsingHeader::new("AI для конспектов").show(ui, |ui| {
+                                ui.label("Текст встречи будет отправлен выбранному AI. Аудио останется на компьютере.");
+                                for action in state.connections.onboarding_ui(ui, state.ready, &mut self.selected_ai) {
+                                    state.send(Command::Ai(action));
+                                }
+                                ui.weak("Пропустить: оставьте AI без подключения.");
+                            });
+                        }
+                    }
+                });
+                if self.step == 0 {
+                    ui.add_space(12.0);
+                    model_status(ui, state);
+                    ui.small(if state.quickstart.models.speech_ready(&state.settings.model) {
+                        "Распознавание готово. Можно начинать запись."
+                    } else { "Запись станет доступна после подготовки распознавания." });
+                }
+                ui.add_space(16.0);
+                if let Some(error) = &state.settings_autosave.error { ui.colored_label(Palette::of(ui).red, error); }
+                ui.horizontal_wrapped(|ui| {
+                    let check_audio = self.step == 0 && self.probe_status.is_none();
+                    let label = if self.step == 2 { "Начать работу" } else if check_audio { "Проверить звук" } else { "Продолжить" };
+                    if ui.add_enabled(!state.quickstart.probe_busy, theme::styled_button(Palette::of(ui), label, theme::ButtonStyle::Primary)).clicked() {
+                        if check_audio && cfg!(any(windows, target_os = "macos")) { self.start_probe(state); }
+                        else { next = true; }
+                    }
+                    if ui.link("Пропустить").clicked() { next = true; }
                 });
             });
-        if done || !open || settings {
+        if next {
             self.blur(state);
-            save |= state.settings_draft.user_name != state.settings.user_name
-                || state.settings_draft.user_aliases != state.settings.user_aliases;
-        }
-        if save {
             state.save_preferences();
-        }
-        self.open = open && !done && !settings;
-        settings
-    }
-}
-
-fn row(ui: &mut egui::Ui, status: &Status, title: &str, explanation: &str) {
-    ui.add_space(12.0);
-    theme::setting_row(ui, title, |ui| {
-        ui.colored_label(
-            if matches!(status, Status::Error(_)) {
-                Palette::of(ui).red
+            if self.step == 2 {
+                open = false;
             } else {
-                Palette::of(ui).muted
-            },
-            status.label(),
-        );
-    });
-    ui.small(explanation);
-    if let Status::Error(error) = status {
-        ui.colored_label(Palette::of(ui).red, error);
+                self.step += 1;
+            }
+        }
+        if !open {
+            self.blur(state);
+        }
+        self.open = open;
     }
-}
-
-/// Shared fields. The caller decides whether to autosave or use Settings' Save.
-pub fn identity_control(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
-    let name = ui.add(egui::TextEdit::singleline(&mut settings.user_name).hint_text("Ваше имя"));
-    let mut save = name.lost_focus();
-    ui.collapsing("Алиасы (необязательно)", |ui| {
-        save |= ui
-            .add(egui::TextEdit::singleline(&mut settings.user_aliases).hint_text("Через запятую"))
-            .lost_focus();
-    });
-    save
 }
 
 pub enum ProbeEvent {
-    Levels([f32; 2]),
-    Done(Result<(), String>),
+    Done(Result<[Status; 2], String>),
 }
-fn probe(sender: &Sender<ProbeEvent>) -> anyhow::Result<()> {
+fn probe() -> anyhow::Result<[Status; 2]> {
     use notetaker_capture::{
         AudioSource, CaptureEvent, CaptureMessage, Channel, LevelMeter, LiveOptions, live_sources,
     };
@@ -545,7 +394,6 @@ fn probe(sender: &Sender<ProbeEvent>) -> anyhow::Result<()> {
     }
     drop(tx);
     let mut meters = [LevelMeter::default(), LevelMeter::default()];
-    let mut last_update = Instant::now();
     while result.is_ok() && origin.elapsed() < Duration::from_secs(5) {
         match rx.recv_timeout(Duration::from_millis(50)) {
             Ok(CaptureMessage::Frame(frame)) => {
@@ -560,13 +408,6 @@ fn probe(sender: &Sender<ProbeEvent>) -> anyhow::Result<()> {
                 result = Err(anyhow::anyhow!("Захват звука завершился раньше времени"));
             }
         }
-        if last_update.elapsed() >= Duration::from_millis(100) {
-            let levels = meters
-                .each_ref()
-                .map(|meter| ((meter.levels().average_dbfs + 60.0) / 60.0).clamp(0.0, 1.0) as f32);
-            let _ = sender.send(ProbeEvent::Levels(levels));
-            last_update = Instant::now();
-        }
     }
     for source in &mut sources {
         if let Err(error) = source.stop()
@@ -576,186 +417,13 @@ fn probe(sender: &Sender<ProbeEvent>) -> anyhow::Result<()> {
         }
     }
     result?;
-    anyhow::ensure!(
-        meters.iter().all(|meter| meter.levels().samples > 0),
-        "Не получен звук с одного из каналов"
-    );
-    anyhow::ensure!(
-        meters.iter().all(|meter| !meter.levels().is_silent(-60.0)),
-        "На одном из каналов тишина. Говорите и включите системный звук, затем повторите проверку."
-    );
-    Ok(())
-}
-
-/// Optional model: excluded from the six required setup steps and auto downloads.
-pub fn semantic_step(ui: &mut egui::Ui, state: &mut AppState) {
-    ui.strong("Поиск по смыслу (необязательно)");
-    ui.small("Локальная модель: 135 МБ. Тексты встреч остаются на компьютере.");
-    if notetaker_core::embedding::installed() {
-        ui.label("Модель установлена");
-        if !notetaker_core::embedding::worker_path().is_file()
-            && ui
-                .add_enabled(
-                    !state.downloading,
-                    egui::Button::new("Установить воркер поиска по смыслу"),
-                )
-                .clicked()
-        {
-            state.download("semantic".into());
-        }
-        if ui
-            .add_enabled(
-                !state.semantic_running,
-                egui::Button::new("Обновить индекс по смыслу"),
-            )
-            .clicked()
-        {
-            state.start_semantic_index();
-        }
-    } else if ui
-        .add_enabled(
-            !state.downloading && !state.recording.busy(),
-            egui::Button::new("Скачать модель поиска по смыслу"),
-        )
-        .clicked()
-    {
-        state.download("semantic".into());
-    }
-    if state.quickstart.download_model.as_deref() == Some("semantic") {
-        if state.downloading {
-            ui.spinner();
-            if let Some(message) = state.download_messages.back() {
-                ui.small(message);
-            }
-        }
-        if let Some(error) = &state.quickstart.download_error {
-            ui.colored_label(ui.visuals().error_fg_color, error);
-        }
-    }
-    if state.semantic_running {
-        ui.spinner();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn auto_readiness_requires_language_identifier_as_well_as_both_asr_models() {
-        let models = Models {
-            gigaam: Status::Ready,
-            parakeet: Status::Ready,
-            ..Default::default()
-        };
-        let settings = Settings {
-            model: "auto".into(),
-            ..Settings::default()
-        };
-        let llm = LlmSettings::default();
-        assert_eq!(
-            step_states(&models, &settings, &llm, false, None, None)[0],
-            Status::Missing
-        );
-        let models = Models {
-            auto: Status::Ready,
-            ..models
-        };
-        assert_eq!(
-            step_states(&models, &settings, &llm, false, None, None)[0],
+    Ok(meters.each_ref().map(|meter| {
+        if meter.levels().samples == 0 {
+            Status::Error("Нет доступа к звуку".into())
+        } else if meter.levels().is_silent(-60.0) {
+            Status::Error("Тишина. Включите звук и повторите проверку".into())
+        } else {
             Status::Ready
-        );
-    }
-
-    #[test]
-    fn checklist_distinguishes_models_provider_identity_and_optional_calendar() {
-        let mut settings = Settings::default();
-        let mut models = Models::default();
-        let llm = LlmSettings::default();
-        let steps = step_states(&models, &settings, &llm, false, None, None);
-        assert_eq!(
-            steps,
-            [
-                Status::Missing,
-                Status::Missing,
-                Status::Missing,
-                Status::Missing,
-                Status::Missing,
-                Status::Ready
-            ]
-        );
-        assert_eq!(essential_missing(&steps), 2);
-        for english in [false, true] {
-            models = Models::default();
-            if english {
-                models.parakeet = Status::Ready;
-            } else {
-                models.gigaam = Status::Ready;
-            }
-            let steps = step_states(&models, &settings, &llm, true, None, None);
-            assert_eq!(essential_missing(&steps), 0);
-            assert_eq!(steps[1], Status::Missing);
         }
-        models.diarization = Status::Ready;
-        settings.user_name = "Иван".into();
-        settings
-            .calendars
-            .push(notetaker_llm::calendar::Subscription {
-                id: "calendar-test".into(),
-                name: "Личный".into(),
-            });
-        assert!(
-            step_states(&models, &settings, &llm, true, None, None)
-                .iter()
-                .all(|s| *s == Status::Ready)
-        );
-        settings.detect_calls = false;
-        settings.hide_quickstart = true;
-        assert_eq!(
-            essential_missing(&step_states(&models, &settings, &llm, true, None, None)),
-            0
-        );
-        assert_eq!(
-            step_states(
-                &models,
-                &settings,
-                &llm,
-                true,
-                Some("Нет доступа"),
-                Some("Сеть")
-            )[2],
-            Status::Error("Нет доступа".into())
-        );
-        let mut invalid = llm;
-        invalid.defaults.hybrid = "unknown".into();
-        assert_eq!(
-            step_states(&models, &settings, &invalid, true, None, None)[2],
-            Status::Missing
-        );
-        models.gigaam = Status::Error("worker".into());
-        models.parakeet = Status::Missing;
-        assert!(matches!(
-            step_states(&models, &settings, &invalid, true, None, None)[0],
-            Status::Error(_)
-        ));
-    }
-
-    #[test]
-    fn auto_download_requires_asr_and_runs_once_unless_disabled() {
-        let mut settings = Settings::default();
-        let mut models = Models::default();
-        assert!(!should_auto_download(&settings, &models));
-        models.gigaam = Status::Ready;
-        assert!(should_auto_download(&settings, &models));
-        settings.auto_diarization_attempted = true;
-        assert!(!should_auto_download(&settings, &models));
-        settings.auto_diarization_attempted = false;
-        settings.auto_download_models = false;
-        assert!(!should_auto_download(&settings, &models));
-        settings.auto_download_models = true;
-        models.diarization = Status::Ready;
-        assert!(!should_auto_download(&settings, &models));
-        models.diarization = Status::Error("worker".into());
-        assert!(!should_auto_download(&settings, &models));
-    }
+    }))
 }

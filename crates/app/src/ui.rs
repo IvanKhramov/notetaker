@@ -47,6 +47,7 @@ pub struct NotetakerApp {
     toasts: VecDeque<Toast>,
     main_rect: Option<egui::Rect>,
     home: bool,
+    applied_zoom: Option<f32>,
     chat_page: bool,
     ask_text: String,
     focus_search: bool,
@@ -79,6 +80,7 @@ impl NotetakerApp {
             toasts: VecDeque::new(),
             main_rect: None,
             home: true,
+            applied_zoom: None,
             chat_page: false,
             ask_text: String::new(),
             focus_search: false,
@@ -95,7 +97,11 @@ impl NotetakerApp {
         self.state.ready
             && !self.state.recording.busy()
             && !self.state.settings_pending
-            && !self.state.downloading
+            && self
+                .state
+                .quickstart
+                .models
+                .speech_ready(&self.state.record_model)
             && !self.state.quickstart.probe_busy
     }
     fn sidebar(&mut self, ui: &mut egui::Ui) {
@@ -178,10 +184,6 @@ impl NotetakerApp {
                 self.chat_page = false;
             }
             ui.separator();
-            if ui.button("Быстрый старт").clicked() {
-                self.quickstart.open = true;
-                ui.close();
-            }
             if ui.button("Перечитать библиотеку").clicked() {
                 self.state.flush();
                 self.state.refresh();
@@ -201,6 +203,23 @@ impl NotetakerApp {
             .filter(|s| !s.is_empty())
             .unwrap_or("Встречи");
         theme::page_heading(ui, title);
+        if self
+            .state
+            .quickstart
+            .models
+            .missing(&self.state.settings.model)
+            .is_some()
+        {
+            crate::quickstart::model_status(ui, &mut self.state);
+            if !self
+                .state
+                .quickstart
+                .models
+                .speech_ready(&self.state.record_model)
+            {
+                ui.small("Запись станет доступна после подготовки распознавания.");
+            }
+        }
         let mut select = None;
         let mut start_event = None;
         let today = chrono::Local::now().date_naive();
@@ -302,7 +321,7 @@ impl NotetakerApp {
                         egui::pos2(rect.left() + 8.0, rect.center().y),
                         egui::Align2::LEFT_CENTER,
                         start.format("%H:%M"),
-                        egui::FontId::proportional(12.0),
+                        egui::FontId::proportional(theme::SMALL),
                         p.muted,
                     );
                     let attendees = row
@@ -337,7 +356,7 @@ impl NotetakerApp {
                                 .next()
                                 .unwrap_or('?')
                                 .to_uppercase(),
-                            egui::FontId::proportional(11.0),
+                            egui::FontId::proportional(theme::SMALL),
                             p.muted,
                         );
                     }
@@ -388,93 +407,85 @@ impl NotetakerApp {
         let mut ask = false;
         let mut stop = false;
         theme::bar(p).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal_wrapped(|ui| {
-                let r = &self.state.recording;
-                if r.busy() {
-                    if r.phase == Phase::Recording {
+            ui.horizontal(|ui| {
+                let phase = self.state.recording.phase;
+                let busy = self.state.recording.busy();
+                if busy {
+                    if phase == Phase::Recording {
                         theme::waveform(ui);
                     } else {
                         ui.spinner();
                     }
                     ui.label(
-                        RichText::new(timestamp(r.elapsed().as_millis() as u64)).color(p.muted),
+                        RichText::new(timestamp(self.state.recording.elapsed().as_millis() as u64))
+                            .color(p.muted),
                     );
-                    if matches!(r.phase, Phase::Finalizing) {
-                        ui.weak("Сохраняем…");
-                    }
                 }
-                let space = (if note {
-                    if r.busy() { 236.0 } else { 250.0 }
-                } else {
-                    146.0
-                }) + if r.busy() { 96.0 } else { 0.0 }
-                    + if self.ask_text.trim().is_empty() {
-                        0.0
-                    } else {
-                        96.0
-                    };
-                let response = ui.add_sized(
-                    [(ui.available_width() - space).max(60.0), 32.0],
-                    egui::TextEdit::singleline(&mut self.ask_text)
-                        .frame(egui::Frame::NONE)
-                        .align(egui::Align2::LEFT_CENTER)
-                        .hint_text(
-                            if note || (self.chat_page && self.state.chat.scope.is_some()) {
+                // Allocate actions first. The input takes the remaining width,
+                // including when fonts or zoom change. No guessed text widths.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let stopping = !self.state.recording.importing
+                        && matches!(phase, Phase::Starting | Phase::Recording);
+                    if stopping {
+                        stop = theme::button(ui, "Стоп", ButtonStyle::Stop).clicked();
+                    } else if !busy
+                        && ui
+                            .add_enabled(
+                                self.can_record(),
+                                egui::Button::new(RichText::new("Новая запись").color(p.on_accent))
+                                    .fill(p.accent)
+                                    .stroke(egui::Stroke::NONE),
+                            )
+                            .clicked()
+                    {
+                        self.state.prefill_call_title();
+                        self.show_record = true;
+                        self.state.inventory_pending = true;
+                        self.state.send(Command::Inventory);
+                    }
+                    if note
+                        && ui
+                            .button(if self.state.tab == Tab::Transcript {
+                                "Заметка"
+                            } else {
+                                "Транскрипт"
+                            })
+                            .clicked()
+                    {
+                        self.state.tab = if self.state.tab == Tab::Transcript {
+                            Tab::Enhanced
+                        } else {
+                            Tab::Transcript
+                        };
+                    }
+                    if !self.ask_text.trim().is_empty() {
+                        ask |= ui
+                            .add_enabled(
+                                self.state.ready
+                                    && !self.state.chat.busy
+                                    && !busy
+                                    && !self.state.unsaved()
+                                    && !self.state.settings_pending,
+                                egui::Button::new("Спросить"),
+                            )
+                            .on_disabled_hover_text("Дождитесь сохранения встречи")
+                            .clicked();
+                    }
+                    let response = ui.add_sized(
+                        [ui.available_width().max(24.0), 32.0],
+                        egui::TextEdit::singleline(&mut self.ask_text)
+                            .frame(egui::Frame::NONE)
+                            .align(egui::Align2::LEFT_CENTER)
+                            .hint_text(if phase == Phase::Finalizing {
+                                "Сохраняем…"
+                            } else if note || (self.chat_page && self.state.chat.scope.is_some()) {
                                 "Спросить про эту встречу…"
                             } else {
                                 "Спросить по всем встречам…"
-                            },
-                        ),
-                );
-                ask |= response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if !self.ask_text.trim().is_empty() {
-                    ask |= ui
-                        .add_enabled(
-                            self.state.ready
-                                && !self.state.chat.busy
-                                && !r.busy()
-                                && !self.state.unsaved()
-                                && !self.state.settings_pending,
-                            egui::Button::new("Спросить"),
-                        )
-                        .on_disabled_hover_text("Дождитесь сохранения встречи")
-                        .clicked();
-                }
-                if note
-                    && ui
-                        .button(if self.state.tab == Tab::Transcript {
-                            "Заметка"
-                        } else {
-                            "Транскрипт"
-                        })
-                        .clicked()
-                {
-                    self.state.tab = if self.state.tab == Tab::Transcript {
-                        Tab::Enhanced
-                    } else {
-                        Tab::Transcript
-                    };
-                }
-                let stopping =
-                    !r.importing && matches!(r.phase, Phase::Starting | Phase::Recording);
-                if stopping {
-                    stop = theme::button(ui, "Стоп", ButtonStyle::Stop).clicked();
-                } else if !r.busy()
-                    && ui
-                        .add_enabled(
-                            self.can_record(),
-                            egui::Button::new(RichText::new("Новая запись").color(p.on_accent))
-                                .fill(p.accent)
-                                .stroke(egui::Stroke::NONE),
-                        )
-                        .clicked()
-                {
-                    self.state.prefill_call_title();
-                    self.show_record = true;
-                    self.state.inventory_pending = true;
-                    self.state.send(Command::Inventory);
-                }
+                            }),
+                    );
+                    ask |= response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                });
             });
         });
         if stop {
@@ -636,7 +647,7 @@ impl NotetakerApp {
                                         date < chrono::Local::now().date_naive()
                                     });
                                 let label = RichText::new(&task.text)
-                                    .font(theme::semibold(14.0))
+                                    .font(theme::semibold(theme::BODY))
                                     .color(if overdue {
                                         Palette::of(ui).red
                                     } else {
@@ -849,7 +860,7 @@ impl NotetakerApp {
         ui.add_space(24.0);
         let mut title = egui::text::LayoutJob::simple(
             document.data.meta.title.clone(),
-            theme::semibold(30.0),
+            theme::semibold(theme::TITLE),
             Palette::of(ui).text,
             ui.available_width(),
         );
@@ -1174,7 +1185,7 @@ impl NotetakerApp {
         let mut open = self.show_record;
         theme::window(ctx, "Новая запись").open(&mut open).show(ctx, |ui| {
             ui.label("Название"); ui.text_edit_singleline(&mut self.state.title);
-            model_selector(ui, "record_model", &mut self.state.record_model);
+
             self.state.record_mode_edited |= mode_selector(ui, &mut self.state.record_mode);
             egui::ComboBox::from_id_salt("audio_session").selected_text(self.state.inventory.sessions.iter().find(|s| Some(s.pid) == self.state.process_id)
                 .map_or_else(|| "Весь системный звук".to_owned(), |s| format!("{} (PID {})", s.exe.as_deref().unwrap_or(&s.name), s.pid))).show_ui(ui, |ui| {
@@ -1193,9 +1204,10 @@ impl NotetakerApp {
             ui.small("macOS: весь системный звук, кроме notetaker. Нужны разрешения Microphone и System Audio Recording.");
             #[cfg(not(any(windows, target_os = "macos")))]
             ui.label("Захват звука пока реализован только на Windows. Библиотека, поиск, правки и конспекты работают на этой ОС.");
+            crate::quickstart::model_status(ui, &mut self.state);
             ui.horizontal(|ui| {
-                if ui.add_enabled(cfg!(any(windows, target_os = "macos")) && !self.state.recording.busy(), egui::Button::new(RichText::new("Начать запись").color(Palette::of(ui).on_accent)).fill(Palette::of(ui).accent)).clicked() { self.state.toggle_recording(); self.show_record = false; }
-                if ui.button("Скачать модель…").clicked() { self.show_settings = true; }
+                if ui.add_enabled(cfg!(any(windows, target_os = "macos")) && self.can_record(), egui::Button::new(RichText::new("Начать запись").color(Palette::of(ui).on_accent)).fill(Palette::of(ui).accent)).clicked() { self.state.toggle_recording(); self.show_record = false; }
+
             });
         });
         self.show_record &= open;
@@ -1213,7 +1225,7 @@ impl NotetakerApp {
             &mut self.maintenance,
             &mut self.organization,
         ) {
-            self.quickstart.open = true;
+            self.quickstart.reopen();
             self.show_settings = false;
         }
     }
@@ -1225,13 +1237,13 @@ impl NotetakerApp {
         let mut dismiss = false;
         let mut builder = egui::ViewportBuilder::default();
         if let Some(rect) = self.main_rect {
-            builder = builder.with_position(rect.right_bottom() - egui::vec2(368.0, 160.0));
+            builder = builder.with_position(rect.right_bottom() - egui::vec2(398.0, 208.0));
         }
         ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("call-notification"),
             builder
                 .with_title("notetaker · звонок")
-                .with_inner_size([350.0, 142.0])
+                .with_inner_size([380.0, 190.0])
                 .with_resizable(false)
                 .with_decorations(false)
                 .with_transparent(true)
@@ -1265,7 +1277,12 @@ impl NotetakerApp {
                         ui.horizontal(|ui| {
                             ui.add_enabled_ui(
                                 self.state.ready
-                                    && !self.state.downloading
+                                    && (matches!(prompt, CallPrompt::Stop { .. })
+                                        || self
+                                            .state
+                                            .quickstart
+                                            .models
+                                            .speech_ready(&self.state.record_model))
                                     && !self.state.quickstart.probe_busy
                                     && !self.state.settings_pending,
                                 |ui| {
@@ -1307,9 +1324,9 @@ impl NotetakerApp {
             egui::ViewportId::from_hash_of("recording-indicator"),
             egui::ViewportBuilder::default()
                 .with_title("notetaker · запись")
-                .with_inner_size([220.0, 52.0])
-                .with_min_inner_size([220.0, 52.0])
-                .with_max_inner_size([220.0, 52.0])
+                .with_inner_size([240.0, 64.0])
+                .with_min_inner_size([240.0, 64.0])
+                .with_max_inner_size([240.0, 64.0])
                 .with_resizable(false)
                 .with_decorations(false)
                 .with_transparent(true)
@@ -1410,7 +1427,16 @@ impl eframe::App for NotetakerApp {
         ) {
             self.exit();
         }
-        self.state.settings.theme.apply(ctx);
+        self.state.settings_draft.theme.apply(ctx);
+        if self.state.ready
+            && theme::sync_zoom(
+                ctx,
+                &mut self.applied_zoom,
+                &mut self.state.settings_draft.ui_zoom,
+            )
+        {
+            self.state.save_preferences();
+        }
         ctx.input(|input| {
             if !input.viewport().minimized.unwrap_or(false)
                 && let Some(rect) = input.viewport().outer_rect
@@ -1495,7 +1521,11 @@ impl eframe::App for NotetakerApp {
         }
         egui::Panel::left("sidebar")
             .resizable(false)
-            .exact_size(220.0)
+            .exact_size(if ctx.content_rect().width() < 800.0 {
+                190.0
+            } else {
+                236.0
+            })
             .frame(
                 egui::Frame::new()
                     .fill(p.sidebar)
@@ -1585,13 +1615,13 @@ impl eframe::App for NotetakerApp {
         }
         self.indicator(&ctx);
         self.call_notification(&ctx);
-        if self.quickstart.show(
-            &ctx,
-            &mut self.state,
-            &mut self.maintenance,
-            &mut self.organization,
-        ) {
-            self.show_settings = true;
+        let onboarding_open = self.quickstart.open;
+        self.quickstart.show(&ctx, &mut self.state);
+        if onboarding_open && !self.quickstart.open {
+            self.home = true;
+            self.chat_page = false;
+            self.people.close();
+            self.state.tasks_open = false;
         }
     }
 }
@@ -1611,7 +1641,7 @@ fn recording_pill(ui: &mut egui::Ui, elapsed: Duration) -> (bool, bool) {
         .corner_radius(26)
         .inner_margin(10)
         .show(ui, |ui| {
-            ui.set_min_width(198.0);
+            ui.set_min_width(218.0);
             ui.horizontal(|ui| {
                 theme::waveform(ui);
                 ui.add(egui::Label::new(timestamp(elapsed.as_millis() as u64)).selectable(false));
@@ -1709,7 +1739,11 @@ fn enhanced_document(
                     }
                     ui.label(
                         RichText::new(title)
-                            .font(theme::semibold(if level == 1 { 20.0 } else { 18.0 }))
+                            .font(theme::semibold(if level == 1 {
+                                theme::SECTION
+                            } else {
+                                theme::SUBHEADING
+                            }))
                             .color(ink),
                     );
                     index += 1;
@@ -1992,7 +2026,7 @@ fn note_layout(text: &str, p: Palette, width: f32) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
     job.wrap.max_width = width;
     let body = egui::TextFormat {
-        font_id: egui::FontId::proportional(14.0),
+        font_id: egui::FontId::proportional(theme::BODY),
         color: p.text,
         line_height: Some(24.0),
         ..Default::default()
@@ -2008,7 +2042,7 @@ fn note_layout(text: &str, p: Palette, width: f32) -> egui::text::LayoutJob {
                 prefix,
                 0.0,
                 egui::TextFormat {
-                    font_id: egui::FontId::proportional(7.0),
+                    font_id: egui::FontId::proportional(theme::SMALL),
                     color: p.muted.gamma_multiply(0.2),
                     line_height: Some(30.0),
                     ..Default::default()
@@ -2018,7 +2052,11 @@ fn note_layout(text: &str, p: Palette, width: f32) -> egui::text::LayoutJob {
                 title,
                 0.0,
                 egui::TextFormat {
-                    font_id: theme::semibold(if level == 1 { 20.0 } else { 18.0 }),
+                    font_id: theme::semibold(if level == 1 {
+                        theme::SECTION
+                    } else {
+                        theme::SUBHEADING
+                    }),
                     line_height: Some(30.0),
                     ..body.clone()
                 },
@@ -2233,7 +2271,9 @@ fn transcript_view(
                                             !live && editable,
                                             egui::Button::selectable(
                                                 document.speaker_ui.selected.contains(&segment.id),
-                                                RichText::new(label).size(12.0).color(p.muted),
+                                                RichText::new(label)
+                                                    .size(theme::SMALL)
+                                                    .color(p.muted),
                                             ),
                                         )
                                         .clicked()
@@ -2321,7 +2361,7 @@ mod tests {
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
-                        egui::vec2(220.0, 52.0),
+                        egui::vec2(240.0, 64.0),
                     )),
                     events,
                     ..Default::default()

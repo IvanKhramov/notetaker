@@ -20,6 +20,51 @@ pub fn model_label(id: &str) -> &str {
     }
 }
 
+pub fn default_speech_model(language: &str) -> &'static str {
+    if language.to_ascii_lowercase().starts_with("ru") {
+        "gigaam-v3"
+    } else {
+        "parakeet-v3"
+    }
+}
+
+fn system_language() -> &'static str {
+    static LANGUAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    LANGUAGE.get_or_init(read_system_language)
+}
+
+fn read_system_language() -> String {
+    for key in ["LC_ALL", "LC_MESSAGES", "LANG"] {
+        if let Ok(value) = std::env::var(key)
+            && !value.is_empty()
+            && value != "C"
+            && value != "C.UTF-8"
+        {
+            return value;
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if let Ok(output) = std::process::Command::new("defaults")
+        .args(["read", "-g", "AppleLocale"])
+        .output()
+    {
+        return String::from_utf8_lossy(&output.stdout).trim().into();
+    }
+    #[cfg(windows)]
+    if let Ok(output) = crate::worker::background_process(std::path::Path::new("powershell.exe"))
+        .args([
+            "-NoProfile",
+            "-Command",
+            "[System.Globalization.CultureInfo]::CurrentUICulture.Name",
+        ])
+        .output()
+    {
+        return String::from_utf8_lossy(&output.stdout).trim().into();
+    }
+    // The app's UI is Russian, unless the OS explicitly reports another language.
+    "ru".into()
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
@@ -28,6 +73,10 @@ pub struct Settings {
     /// Aliases separated by commas, semicolons or newlines.
     pub user_aliases: String,
     pub theme: crate::theme::Theme,
+    pub ui_zoom: f32,
+    /// None identifies a legacy config, whose user has already set up the app.
+    pub onboarding_complete: Option<bool>,
+    pub models_folder: Option<PathBuf>,
     pub library: PathBuf,
     pub model: String,
     pub asr_acceleration: notetaker_asr_proto::Provider,
@@ -62,9 +111,13 @@ pub struct Settings {
     pub calendar_timezone: String,
     pub mcp_exclude_local: bool,
     pub check_updates: bool,
-    pub hide_quickstart: bool,
-    pub auto_download_models: bool,
-    pub auto_diarization_attempted: bool,
+    // Retired preferences remain readable but are no longer written or used.
+    #[serde(skip_serializing, rename = "hide_quickstart")]
+    pub _hide_quickstart: bool,
+    #[serde(skip_serializing, rename = "auto_download_models")]
+    pub _auto_download_models: bool,
+    #[serde(skip_serializing, rename = "auto_diarization_attempted")]
+    pub _auto_diarization_attempted: bool,
 }
 
 impl Default for Settings {
@@ -79,8 +132,11 @@ impl Default for Settings {
             digest_reminder: false,
             user_aliases: String::new(),
             theme: crate::theme::Theme::Light,
+            ui_zoom: 1.0,
+            onboarding_complete: None,
+            models_folder: None,
             library: documents.join("notetaker"),
-            model: MODELS[0].into(),
+            model: default_speech_model(system_language()).into(),
             asr_acceleration: notetaker_asr_proto::Provider::Auto,
             asr_threads: 0,
             mode: Mode::Local,
@@ -122,9 +178,9 @@ impl Default for Settings {
             calendar_timezone: "Europe/Moscow".into(),
             mcp_exclude_local: true,
             check_updates: true,
-            hide_quickstart: false,
-            auto_download_models: true,
-            auto_diarization_attempted: false,
+            _hide_quickstart: false,
+            _auto_download_models: true,
+            _auto_diarization_attempted: false,
         }
     }
 }
@@ -140,7 +196,10 @@ impl Settings {
     pub fn load() -> Result<Self> {
         let path = Self::path()?;
         if !path.exists() {
-            return Ok(Self::default());
+            return Ok(Self {
+                onboarding_complete: Some(false),
+                ..Self::default()
+            });
         }
         let settings: Self =
             toml::from_str(&fs::read_to_string(path)?).context("Некорректный app.toml")?;
@@ -148,7 +207,32 @@ impl Settings {
         Ok(settings)
     }
 
+    pub fn models_path(&self) -> PathBuf {
+        self.models_folder.clone().unwrap_or_else(|| {
+            std::env::var_os("NOTETAKER_MODELS_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    ProjectDirs::from("", "", "notetaker")
+                        .expect("app data directory")
+                        .data_local_dir()
+                        .join("models")
+                })
+        })
+    }
+
+    pub fn needs_onboarding(&self) -> bool {
+        self.onboarding_complete == Some(false)
+    }
+
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.ui_zoom.is_finite() && (0.5..=2.0).contains(&self.ui_zoom),
+            "Масштаб: от 50% до 200%"
+        );
+        ensure!(
+            self.models_path().is_absolute(),
+            "Папка моделей должна быть абсолютной"
+        );
         ensure!(
             self.library.is_absolute(),
             "Путь библиотеки должен быть абсолютным"
@@ -379,17 +463,27 @@ mod tests {
     }
 
     #[test]
-    fn quickstart_preferences_roundtrip() {
-        let settings = Settings {
-            hide_quickstart: true,
-            auto_download_models: false,
-            auto_diarization_attempted: true,
-            ..Settings::default()
+    fn onboarding_and_zoom_preserve_legacy_config() {
+        let old: Settings = toml::from_str("hide_quickstart = false\nauto_download_models = false\nauto_diarization_attempted = true").unwrap();
+        assert!(!old.needs_onboarding());
+        let mut settings = Settings {
+            onboarding_complete: Some(false),
+            ui_zoom: 1.25,
+            ..old
         };
-        let restored: Settings = toml::from_str(&toml::to_string(&settings).unwrap()).unwrap();
-        assert!(restored.hide_quickstart);
-        assert!(!restored.auto_download_models);
-        assert!(restored.auto_diarization_attempted);
+        assert!(settings.needs_onboarding());
+        settings.onboarding_complete = Some(true);
+        let text = toml::to_string(&settings).unwrap();
+        assert!(!text.contains("hide_quickstart"));
+        assert!(!text.contains("auto_download_models"));
+        let restored: Settings = toml::from_str(&text).unwrap();
+        assert!(!restored.needs_onboarding());
+        assert_eq!(restored.ui_zoom, 1.25);
+        settings.ui_zoom = f32::NAN;
+        assert!(settings.validate().is_err());
+        assert_eq!(default_speech_model("ru_RU"), "gigaam-v3");
+        assert_eq!(default_speech_model("en-US"), "parakeet-v3");
+        assert_eq!(default_speech_model("de-DE"), "parakeet-v3");
     }
     #[test]
     fn asr_options_validate_and_preserve_legacy_defaults() {
@@ -423,9 +517,6 @@ mod tests {
         assert_eq!(settings.speakers, None);
         assert!(settings.detect_calls);
         assert!(settings.check_updates);
-        assert!(!settings.hide_quickstart);
-        assert!(settings.auto_download_models);
-        assert!(!settings.auto_diarization_attempted);
         assert!(settings.detect_browsers);
         assert!(settings.detect_any_microphone);
         assert!(settings.call_apps.is_empty());

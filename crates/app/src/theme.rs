@@ -84,8 +84,32 @@ impl Palette {
     }
 }
 
+// Shared type scale, in logical points at 100% zoom.
+pub const SMALL: f32 = 13.0;
+pub const BUTTON: f32 = 15.0;
+pub const BODY: f32 = 16.0;
+pub const SUBHEADING: f32 = 18.0;
+pub const SECTION: f32 = 21.0;
+pub const HEADING: f32 = 26.0;
+pub const TITLE: f32 = 32.0;
+
 pub fn semibold(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name("heading".into()))
+}
+
+/// Apply a settings selection once, then retain egui's native keyboard zoom.
+/// Returns true when a keyboard change needs to be persisted.
+pub fn sync_zoom(ctx: &egui::Context, applied: &mut Option<f32>, desired: &mut f32) -> bool {
+    if applied.is_none_or(|last| last != *desired) {
+        ctx.set_zoom_factor(*desired);
+        *applied = Some(*desired);
+    } else if (ctx.zoom_factor() - *desired).abs() > 0.001 {
+        *desired = ctx.zoom_factor().clamp(0.5, 2.0);
+        *applied = Some(*desired);
+        ctx.set_zoom_factor(*desired);
+        return true;
+    }
+    false
 }
 
 pub fn install(ctx: &egui::Context) {
@@ -132,16 +156,19 @@ pub fn install(ctx: &egui::Context) {
         style.spacing.scroll.bar_inner_margin = 3.0;
         style
             .text_styles
-            .insert(TextStyle::Body, FontId::proportional(14.0));
+            .insert(TextStyle::Body, FontId::proportional(BODY));
         style
             .text_styles
-            .insert(TextStyle::Button, FontId::proportional(14.0));
+            .insert(TextStyle::Button, FontId::proportional(BUTTON));
         style
             .text_styles
-            .insert(TextStyle::Small, FontId::proportional(11.5));
+            .insert(TextStyle::Small, FontId::proportional(SMALL));
+        style
+            .text_styles
+            .insert(TextStyle::Monospace, FontId::monospace(BUTTON));
         style.text_styles.insert(
             TextStyle::Heading,
-            FontId::new(24.0, FontFamily::Name("heading".into())),
+            FontId::new(HEADING, FontFamily::Name("heading".into())),
         );
         let v = &mut style.visuals;
         *v = if theme == egui::Theme::Dark {
@@ -224,20 +251,8 @@ impl<'a> Dialog<'a> {
         self.open = Some(open);
         self
     }
-    pub fn id(mut self, id: egui::Id) -> Self {
-        self.window = self.window.id(id);
-        self
-    }
-    pub fn anchor(mut self, align: egui::Align2, offset: [f32; 2]) -> Self {
-        self.window = self.window.anchor(align, offset);
-        self
-    }
     pub fn default_width(mut self, width: f32) -> Self {
         self.window = self.window.default_width(width);
-        self
-    }
-    pub fn default_height(mut self, height: f32) -> Self {
-        self.window = self.window.default_height(height);
         self
     }
     pub fn default_size(mut self, size: [f32; 2]) -> Self {
@@ -257,7 +272,7 @@ impl<'a> Dialog<'a> {
         self.window.show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.add(
-                    egui::Label::new(egui::RichText::new(&self.title).font(semibold(16.0)))
+                    egui::Label::new(egui::RichText::new(&self.title).font(semibold(SUBHEADING)))
                         .truncate(),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -371,7 +386,7 @@ pub fn styled_button(p: Palette, text: &str, style: ButtonStyle) -> egui::Button
 pub fn section_caption(ui: &mut egui::Ui, text: &str) {
     ui.label(
         egui::RichText::new(text)
-            .size(12.0)
+            .size(SMALL)
             .color(Palette::of(ui).muted),
     );
 }
@@ -399,7 +414,7 @@ pub fn chip(ui: &mut egui::Ui, text: &str) {
     chip_frame(p).show(ui, |ui| {
         ui.add_sized(
             [0.0, 18.0],
-            egui::Label::new(egui::RichText::new(text).size(11.5).color(p.muted)),
+            egui::Label::new(egui::RichText::new(text).size(SMALL).color(p.muted)),
         );
     });
 }
@@ -416,7 +431,7 @@ pub fn filter_chip(
                 egui::vec2(if dot.is_some() { 18.0 } else { 9.0 }, 5.0);
             ui.spacing_mut().interact_size.y = 25.0;
             ui.add(
-                egui::Button::new(egui::RichText::new(text).size(11.5).color(if selected {
+                egui::Button::new(egui::RichText::new(text).size(SMALL).color(if selected {
                     p.text
                 } else {
                     p.muted
@@ -497,7 +512,7 @@ pub fn nav_row(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response 
     };
     let mut job = egui::text::LayoutJob::simple(
         text.to_owned(),
-        FontId::proportional(14.0),
+        FontId::proportional(BODY),
         p.text,
         (response.rect.width() - inset - 8.0).max(1.0),
     );
@@ -512,8 +527,11 @@ pub fn nav_row(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response 
 pub fn setting_row<R>(ui: &mut egui::Ui, label: &str, value: impl FnOnce(&mut egui::Ui) -> R) -> R {
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = 3.0;
-        let result = ui
-            .horizontal(|ui| {
+        let result = if ui.available_width() < 440.0 {
+            ui.label(label);
+            ui.horizontal(value).inner
+        } else {
+            ui.horizontal(|ui| {
                 ui.allocate_ui_with_layout(
                     egui::vec2(ui.available_width() * 0.48, 32.0),
                     egui::Layout::left_to_right(egui::Align::Center),
@@ -524,7 +542,8 @@ pub fn setting_row<R>(ui: &mut egui::Ui, label: &str, value: impl FnOnce(&mut eg
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), value)
                     .inner
             })
-            .inner;
+            .inner
+        };
         ui.separator();
         result
     })
@@ -587,22 +606,59 @@ pub fn bar(p: Palette) -> egui::Frame {
 mod tests {
     use super::*;
     #[test]
+    fn settings_and_native_zoom_shortcuts_share_the_persisted_scale() {
+        let ctx = egui::Context::default();
+        let mut applied = None;
+        let mut desired = 1.25;
+        let frame = |ctx: &egui::Context| {
+            ctx.run_ui(Default::default(), |_| {})
+                .drop_without_applying_deltas();
+        };
+        assert!(!sync_zoom(&ctx, &mut applied, &mut desired));
+        frame(&ctx);
+        assert_eq!(ctx.zoom_factor(), 1.25);
+        for (key, expected) in [
+            (egui::Key::Equals, 1.4),
+            (egui::Key::Minus, 1.3),
+            (egui::Key::Num0, 1.0),
+        ] {
+            ctx.run_ui(
+                egui::RawInput {
+                    events: vec![egui::Event::Key {
+                        key,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::COMMAND,
+                    }],
+                    ..Default::default()
+                },
+                |_| {},
+            )
+            .drop_without_applying_deltas();
+            frame(&ctx);
+            assert!(sync_zoom(&ctx, &mut applied, &mut desired));
+            assert!((desired - expected).abs() < 0.001);
+            assert!(!sync_zoom(&ctx, &mut applied, &mut desired));
+        }
+    }
+    #[test]
     fn embedded_font_covers_ui_text_and_symbols() {
         let ctx = egui::Context::default();
         install(&ctx);
         let output = ctx.run_pass(egui::RawInput::default(), |ctx| {
             ctx.fonts_mut(|fonts| {
                 for font in [
-                    FontId::proportional(16.0),
-                    FontId::monospace(16.0),
-                    FontId::new(16.0, FontFamily::Name("heading".into())),
+                    FontId::proportional(BODY),
+                    FontId::monospace(BODY),
+                    FontId::new(BODY, FontFamily::Name("heading".into())),
                 ] {
                     assert!(fonts.has_glyphs(
                         &font,
                         "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдеёжзийклмнопрстуфхцчшщъыьэюя +·…–«»"
                     ));
                 }
-                assert!(fonts.has_glyphs(&FontId::proportional(16.0), "?"));
+                assert!(fonts.has_glyphs(&FontId::proportional(BODY), "?"));
             });
         });
         output.drop_without_applying_deltas();

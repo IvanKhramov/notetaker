@@ -443,7 +443,7 @@ impl Panel {
                                     .unwrap_or('?')
                                     .to_uppercase()
                                     .to_string(),
-                                theme::semibold(14.0),
+                                theme::semibold(theme::BODY),
                                 p.muted,
                             );
                             ui.vertical(|ui| {
@@ -454,7 +454,7 @@ impl Panel {
                                             person.name,
                                             if person.hidden { " (скрыт)" } else { "" }
                                         ))
-                                        .font(theme::semibold(14.0)),
+                                        .font(theme::semibold(theme::BODY)),
                                     )
                                     .clicked()
                                 {
@@ -678,7 +678,7 @@ impl Panel {
                                 series.title,
                                 series.meetings.len()
                             ))
-                            .font(theme::semibold(16.0)),
+                            .font(theme::semibold(theme::SUBHEADING)),
                         )
                         .clicked()
                     {

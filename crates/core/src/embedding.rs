@@ -23,7 +23,22 @@ pub struct EmbedResponse {
     pub vector: Vec<f32>,
     pub error: Option<String>,
 }
+// Desktop preference, separate from the process environment (which is unsafe to
+// mutate once workers exist). Child processes receive the resolved path explicitly.
+static MODELS_DIRECTORY: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
+pub fn set_models_dir(path: PathBuf) {
+    *MODELS_DIRECTORY.write().expect("models directory lock") = Some(path);
+}
+
 pub fn models_dir() -> Result<PathBuf> {
+    if let Some(path) = MODELS_DIRECTORY
+        .read()
+        .expect("models directory lock")
+        .clone()
+    {
+        return Ok(path);
+    }
     if let Some(path) = std::env::var_os("NOTETAKER_MODELS_DIR") {
         return Ok(PathBuf::from(path));
     }
@@ -72,9 +87,7 @@ pub struct LocalEmbedder {
 impl LocalEmbedder {
     pub fn start() -> Result<Self> {
         if !installed() {
-            return Err(Error::Embedding(
-                "Скачайте модель «Поиск по смыслу» в настройках".into(),
-            ));
+            return Err(Error::Embedding("Модель поиска ещё загружается".into()));
         }
         let mut command = Command::new(worker_path());
         command

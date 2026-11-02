@@ -95,7 +95,11 @@ impl Embedder for RemoteEmbedder {
 }
 /// Cache only the local process. It is killed on failure, then retried next time.
 /// A busy indexing/query worker never blocks another query: FTS remains usable.
-static LOCAL: OnceLock<Mutex<Option<LocalEmbedder>>> = OnceLock::new();
+struct CachedLocal {
+    directory: std::path::PathBuf,
+    embedder: LocalEmbedder,
+}
+static LOCAL: OnceLock<Mutex<Option<CachedLocal>>> = OnceLock::new();
 pub fn search(
     library: &Library,
     query: &str,
@@ -118,15 +122,28 @@ pub fn search(
     if notetaker_core::embedding::installed() {
         if !library.semantic_ready(notetaker_core::embedding::MODEL_ID)? {
             let mut outcome = keyword()?;
-            outcome.note=Some("Индекс по смыслу ещё не готов: обновите его в настройках или через notetaker reindex --semantic".into());
+            outcome.note = Some("Индекс по смыслу ещё готовится. Пока ищем по словам".into());
             return Ok(outcome);
         }
         if let Ok(mut worker) = LOCAL.get_or_init(|| Mutex::new(None)).try_lock() {
-            if worker.is_none() {
-                *worker = LocalEmbedder::start().ok();
+            let directory = notetaker_core::embedding::model_dir()?;
+            if worker
+                .as_ref()
+                .is_none_or(|cached| cached.directory != directory)
+            {
+                *worker = LocalEmbedder::start().ok().map(|embedder| CachedLocal {
+                    directory,
+                    embedder,
+                });
             }
-            if let Some(embedder) = worker.as_mut() {
-                match library.search_filtered(query, limit, mode, filter, Some(embedder)) {
+            if let Some(cached) = worker.as_mut() {
+                match library.search_filtered(
+                    query,
+                    limit,
+                    mode,
+                    filter,
+                    Some(&mut cached.embedder),
+                ) {
                     Ok(hits) => return Ok(SearchOutcome { hits, note: None }),
                     Err(_) => *worker = None,
                 }
