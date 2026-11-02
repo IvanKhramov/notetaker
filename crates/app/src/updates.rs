@@ -135,71 +135,53 @@ impl Updates {
     }
     pub fn ui(&mut self, ctx: &egui::Context, busy: bool) {
         if let Some(release) = self.release.clone() {
-            let mut later = false;
-            crate::theme::window(
+            let preparing =
+                self.receiver.is_some() || self.prepared.is_some() || self.helper.is_some();
+            let action = crate::theme::update_prompt(
                 ctx,
                 format!(
                     "Доступна версия {}",
                     release.tag_name.trim_start_matches('v')
                 ),
-            )
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::RIGHT_BOTTOM, [-20.0, -20.0])
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(
-                            !busy
-                                && self.receiver.is_none()
-                                && self.prepared.is_none()
-                                && self.helper.is_none()
-                                && !self.exit,
-                            egui::Button::new("Обновить"),
-                        )
-                        .clicked()
-                    {
-                        let (tx, rx) = mpsc::channel();
-                        self.receiver = Some(rx);
-                        let context = ctx.clone();
-                        let release = release.clone();
-                        std::thread::spawn(move || {
-                            let _ = tx.send(Message::Prepared(prepare(&release)));
-                            context.request_repaint();
-                        });
-                    }
-                    if ui.button("Что нового").clicked() {
-                        let _ = windows::open_url(&release.notes_url());
-                    }
-                    later = ui
-                        .add_enabled(
-                            self.receiver.is_none()
-                                && self.prepared.is_none()
-                                && self.helper.is_none(),
-                            egui::Button::new("Позже"),
-                        )
-                        .clicked();
-                });
-                if busy {
-                    ui.small("Обновление доступно после завершения текущих задач.");
+                if preparing {
+                    "Подготовка обновления…"
+                } else if busy {
+                    "Обновление доступно после завершения текущих задач."
+                } else {
+                    "Новая версия готова к установке."
+                },
+                "Обновить",
+                !busy && !preparing && !self.exit,
+                !preparing,
+                true,
+            );
+            match action {
+                crate::theme::UpdateAction::Install => {
+                    let (tx, rx) = mpsc::channel();
+                    self.receiver = Some(rx);
+                    let context = ctx.clone();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(Message::Prepared(prepare(&release)));
+                        context.request_repaint();
+                    });
                 }
-                if self.receiver.is_some() || self.prepared.is_some() || self.helper.is_some() {
-                    ui.small("Подготовка обновления…");
+                crate::theme::UpdateAction::Notes => {
+                    let _ = windows::open_url(&release.notes_url());
                 }
-            });
-            if later {
-                self.release = None;
+                crate::theme::UpdateAction::Later => self.release = None,
+                crate::theme::UpdateAction::None => {}
             }
         }
         if let Some(message) = self.message.clone() {
-            crate::theme::window(ctx, "Обновление")
-                .collapsible(false)
-                .show(ctx, |ui| {
-                    ui.label(message);
-                    if ui.button("Закрыть").clicked() {
-                        self.message = None;
-                    }
-                });
+            let close = crate::theme::window(ctx, "Обновление").show(ctx, |ui| {
+                ui.label(message);
+                if ui.button("Закрыть").clicked() {
+                    self.message = None;
+                }
+            });
+            if close {
+                self.message = None;
+            }
         }
     }
 }

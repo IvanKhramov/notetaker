@@ -197,14 +197,149 @@ pub fn install(ctx: &egui::Context) {
     }
 }
 
-/// Keep dialogs inside the app viewport, including their frame and title bar.
-pub fn window<'a>(ctx: &egui::Context, title: impl egui::IntoAtoms<'a>) -> egui::Window<'a> {
+/// Shared document-style dialog header, with a quiet title and a close action.
+pub struct Dialog<'a> {
+    window: egui::Window<'a>,
+    title: String,
+    open: Option<&'a mut bool>,
+}
+
+pub fn window<'a>(ctx: &egui::Context, title: impl Into<String>) -> Dialog<'a> {
     let bounds = ctx.content_rect().shrink(16.0);
-    egui::Window::new(title)
-        .default_pos(bounds.center() - egui::vec2(280.0, 260.0))
-        .max_width(bounds.width())
-        .max_height(bounds.height())
-        .constrain_to(bounds)
+    let title = title.into();
+    Dialog {
+        window: egui::Window::new(title.clone())
+            .title_bar(false)
+            .default_pos(bounds.center() - egui::vec2(280.0, 260.0))
+            .max_width(bounds.width())
+            .max_height(bounds.height())
+            .constrain_to(bounds),
+        title,
+        open: None,
+    }
+}
+
+impl<'a> Dialog<'a> {
+    pub fn open(mut self, open: &'a mut bool) -> Self {
+        self.open = Some(open);
+        self
+    }
+    pub fn id(mut self, id: egui::Id) -> Self {
+        self.window = self.window.id(id);
+        self
+    }
+    pub fn anchor(mut self, align: egui::Align2, offset: [f32; 2]) -> Self {
+        self.window = self.window.anchor(align, offset);
+        self
+    }
+    pub fn default_width(mut self, width: f32) -> Self {
+        self.window = self.window.default_width(width);
+        self
+    }
+    pub fn default_height(mut self, height: f32) -> Self {
+        self.window = self.window.default_height(height);
+        self
+    }
+    pub fn default_size(mut self, size: [f32; 2]) -> Self {
+        self.window = self.window.default_size(size);
+        self
+    }
+    pub fn resizable(mut self, resizable: bool) -> Self {
+        self.window = self.window.resizable(resizable);
+        self
+    }
+    /// Returns true when the header close button was pressed.
+    pub fn show(self, ctx: &egui::Context, contents: impl FnOnce(&mut egui::Ui)) -> bool {
+        if self.open.as_deref() == Some(&false) {
+            return false;
+        }
+        let mut close = false;
+        self.window.show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(&self.title).font(semibold(16.0)))
+                        .truncate(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    close = button(ui, "×", ButtonStyle::Ghost)
+                        .on_hover_text("Закрыть")
+                        .clicked();
+                });
+            });
+            ui.add_space(4.0);
+            ui.separator();
+            ui.add_space(8.0);
+            egui::ScrollArea::vertical()
+                .id_salt("dialog_body")
+                .auto_shrink([false, true])
+                .max_height(ui.available_height().max(80.0))
+                .show(ui, contents);
+        });
+        if close && let Some(open) = self.open {
+            *open = false;
+        }
+        close
+    }
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+#[derive(Default)]
+pub enum UpdateAction {
+    #[default]
+    None,
+    Install,
+    Notes,
+    Later,
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+pub fn update_prompt(
+    ctx: &egui::Context,
+    title: String,
+    message: &str,
+    install_label: &str,
+    can_install: bool,
+    can_dismiss: bool,
+    show_notes: bool,
+) -> UpdateAction {
+    let mut action = UpdateAction::None;
+    let close = window(ctx, title)
+        .default_width(420.0)
+        .resizable(false)
+        .anchor(egui::Align2::RIGHT_BOTTOM, [-20.0, -20.0])
+        .show(ctx, |ui| {
+            if !message.is_empty() {
+                ui.label(message);
+                ui.add_space(8.0);
+            }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        can_install,
+                        styled_button(Palette::of(ui), install_label, ButtonStyle::Primary),
+                    )
+                    .clicked()
+                {
+                    action = UpdateAction::Install;
+                }
+                if show_notes && button(ui, "Что нового", ButtonStyle::Ghost).clicked() {
+                    action = UpdateAction::Notes;
+                }
+                if ui
+                    .add_enabled(
+                        can_dismiss,
+                        styled_button(Palette::of(ui), "Позже", ButtonStyle::Ghost),
+                    )
+                    .clicked()
+                {
+                    action = UpdateAction::Later;
+                }
+            });
+        });
+    if close && can_dismiss {
+        action = UpdateAction::Later;
+    }
+    action
 }
 
 pub enum ButtonStyle {

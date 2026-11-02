@@ -106,8 +106,7 @@ impl Maintenance {
     }
     pub fn dialogs(&mut self, ctx: &egui::Context, busy: bool) {
         if self.crashed {
-            crate::theme::window(ctx, "Прошлый запуск завершился ошибкой")
-                .collapsible(false)
+            let close = crate::theme::window(ctx, "Прошлый запуск завершился ошибкой")
                 .resizable(false)
                 .show(ctx, |ui| {
                     ui.label("Диагностика сохранена в папке логов.");
@@ -119,16 +118,23 @@ impl Maintenance {
                         diagnostics::acknowledge_crash();
                     }
                 });
+            if close {
+                self.crashed = false;
+                diagnostics::acknowledge_crash();
+            }
         }
         if let Some(message) = self.message.clone() {
-            crate::theme::window(ctx, "Диагностика")
-                .collapsible(false)
+            let close = crate::theme::window(ctx, "Диагностика")
+                .default_width(460.0)
                 .show(ctx, |ui| {
                     ui.label(message);
                     if ui.button("Закрыть").clicked() {
                         self.message = None;
                     }
                 });
+            if close {
+                self.message = None;
+            }
         }
         #[cfg(any(windows, target_os = "macos"))]
         self.updates.ui(ctx, busy);
@@ -142,13 +148,25 @@ impl Maintenance {
             crate::theme::toggle(ui, &mut settings.check_updates, "Проверять обновления");
         });
         self.windows_settings(ui);
-        if ui.button("Открыть папку логов").clicked() {
-            self.open_logs();
-        }
-        if ui
-            .add_enabled(self.report.is_none(), egui::Button::new("Собрать отчёт"))
-            .clicked()
-        {
+        crate::theme::setting_row(ui, "Папка логов", |ui| {
+            if crate::theme::button(ui, "Открыть ›", crate::theme::ButtonStyle::Ghost).clicked()
+            {
+                self.open_logs();
+            }
+        });
+        let collect =
+            crate::theme::setting_row(ui, "Диагностический отчёт", |ui| {
+                ui.add_enabled(
+                    self.report.is_none(),
+                    crate::theme::styled_button(
+                        crate::theme::Palette::of(ui),
+                        "Собрать ›",
+                        crate::theme::ButtonStyle::Ghost,
+                    ),
+                )
+                .clicked()
+            });
+        if collect {
             // Serialize only app settings; LLM credentials/config never enter here.
             let config = toml::Value::try_from(settings.clone())
                 .unwrap_or_else(|_| toml::Value::Table(Default::default()));
@@ -180,16 +198,16 @@ impl Maintenance {
     pub fn windows_settings(&mut self, ui: &mut egui::Ui) {
         #[cfg(any(windows, target_os = "macos"))]
         {
-            if ui
-                .checkbox(
-                    &mut self.autostart,
-                    if cfg!(target_os = "macos") {
-                        "Запускать при входе в macOS"
-                    } else {
-                        "Запускать при входе в Windows"
-                    },
-                )
-                .changed()
+            if crate::theme::toggle(
+                ui,
+                &mut self.autostart,
+                if cfg!(target_os = "macos") {
+                    "Запускать при входе в macOS"
+                } else {
+                    "Запускать при входе в Windows"
+                },
+            )
+            .changed()
                 && notetaker_runtime::platform::set_autostart(self.autostart).is_err()
             {
                 self.autostart = notetaker_runtime::platform::autostart();
@@ -199,10 +217,9 @@ impl Maintenance {
         #[cfg(not(any(windows, target_os = "macos")))]
         {
             let mut disabled = false;
-            ui.add_enabled(
-                false,
-                egui::Checkbox::new(&mut disabled, "Запускать при входе в Windows"),
-            );
+            ui.add_enabled_ui(false, |ui| {
+                crate::theme::toggle(ui, &mut disabled, "Запускать при входе в систему");
+            });
         }
     }
 }

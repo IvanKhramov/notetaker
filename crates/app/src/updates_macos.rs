@@ -70,16 +70,20 @@ impl Updates {
         let Some(release) = &self.release else {
             return;
         };
-        let mut later = false;
-        crate::theme::window(ctx, format!("Доступен notetaker {}", release.tag_name)).collapsible(false).show(ctx, |ui| {
-            ui.label("Скачайте DMG, завершите запись и закройте notetaker. Замените приложение в Applications.");
-            if ui.button("Открыть релиз / скачать DMG").clicked() {
+        match crate::theme::update_prompt(
+            ctx,
+            format!("Доступен notetaker {}", release.tag_name),
+            "Скачайте DMG, завершите запись и закройте notetaker. Замените приложение в Applications.",
+            "Открыть релиз / скачать DMG",
+            true,
+            true,
+            false,
+        ) {
+            crate::theme::UpdateAction::Install => {
                 let _ = notetaker_runtime::unix::open_url(&release.notes_url());
             }
-            later = ui.button("Позже").clicked();
-        });
-        if later {
-            self.release = None;
+            crate::theme::UpdateAction::Later => self.release = None,
+            _ => {}
         }
     }
 }

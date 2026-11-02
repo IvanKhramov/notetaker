@@ -146,19 +146,20 @@ impl Panel {
                 if self.receiver.is_some() {
                     ui.spinner();
                 }
-                egui::ScrollArea::vertical()
-                    .max_height(420.0)
-                    .show(ui, |ui| {
-                        for p in &self.previews {
-                            crate::theme::bar(crate::theme::Palette::of(ui)).show(ui, |ui| {
-                                ui.strong(&p.task.text);
-                                ui.label(&p.endpoint);
+                ui.scope(|ui| {
+                    for p in &self.previews {
+                        crate::theme::card(crate::theme::Palette::of(ui), false).show(ui, |ui| {
+                            ui.strong(&p.task.text);
+                            ui.label(&p.endpoint);
+                            ui.collapsing("Данные для отправки", |ui| {
                                 ui.monospace(
                                     serde_json::to_string_pretty(&p.body).unwrap_or_default(),
                                 );
                             });
-                        }
-                    });
+                        });
+                        ui.separator();
+                    }
+                });
                 let local = self.previews.iter().any(|p| p.local);
                 if local {
                     ui.colored_label(

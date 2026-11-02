@@ -411,10 +411,11 @@ impl Panel {
     }
     fn people_screen(&mut self, ui: &mut egui::Ui) {
         theme::page_heading(ui, "Люди");
-        ui.text_edit_singleline(&mut self.query);
+        ui.add(egui::TextEdit::singleline(&mut self.query).hint_text("Поиск по имени или почте…"));
         ui.checkbox(&mut self.show_hidden, "Показать скрытых");
         let mut selected = None;
         if let Some(snapshot) = &self.snapshot {
+            let mut shown = 0;
             for person in &snapshot.people {
                 if (!person.hidden || self.show_hidden)
                     && (self.query.is_empty()
@@ -424,6 +425,7 @@ impl Panel {
                             .contains(&self.query.to_lowercase())
                         || person.matches(&self.query))
                 {
+                    shown += 1;
                     theme::card(theme::Palette::of(ui), false).show(ui, |ui| {
                         ui.set_width((ui.available_width() - 2.0).max(1.0));
                         ui.horizontal(|ui| {
@@ -468,6 +470,8 @@ impl Panel {
             }
             if snapshot.people.is_empty() {
                 ui.weak("Люди появятся из участников календаря, имён спикеров и задач");
+            } else if shown == 0 {
+                ui.weak("Никого не найдено. Попробуйте другое имя или почту.");
             }
         }
         if let Some(person) = selected {
@@ -761,6 +765,9 @@ impl Panel {
                     }
                 }
             });
+        if self.digest.is_none() && self.receiver.is_none() {
+            ui.weak("Выберите период и участников, чтобы собрать итоги встреч.");
+        }
         if ui
             .add_enabled(
                 self.receiver.is_none(),

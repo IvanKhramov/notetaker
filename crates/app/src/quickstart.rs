@@ -25,9 +25,9 @@ pub enum Status {
 impl Status {
     fn label(&self) -> &str {
         match self {
-            Self::Ready => "[+] Готово",
-            Self::Missing => "[ ] Не настроено",
-            Self::Error(_) => "[!] Ошибка",
+            Self::Ready => "Готово",
+            Self::Missing => "Не настроено",
+            Self::Error(_) => "Ошибка",
         }
     }
 }
@@ -333,15 +333,14 @@ impl Panel {
             .open(&mut open)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .default_width(620.0)
-            .collapsible(false)
+            .default_height(620.0)
             .resizable(true)
             .show(ctx, |ui| {
-                theme::section_caption(ui, "Быстрый старт");
                 let completed = steps.iter().filter(|s| **s == Status::Ready).count();
-                ui.heading(if essential_missing(&steps) == 0 { "Можно начинать запись".to_owned() } else { format!("Настроено {completed} из 6") });
+                ui.label(egui::RichText::new(if essential_missing(&steps) == 0 { "Можно начинать запись".to_owned() } else { format!("Настроено {completed} из 6") }).font(theme::semibold(16.0)));
                 ui.add(egui::ProgressBar::new(completed as f32 / 6.0).fill(Palette::of(ui).text).desired_height(4.0));
                 ui.small("Настройте запись и конспекты здесь. Календарь и проверку звука можно пропустить.");
-                egui::ScrollArea::vertical().id_salt("quickstart_steps").max_height((ctx.content_rect().height() - 350.0).max(100.0)).show(ui, |ui| {
+                ui.vertical(|ui| {
                     semantic_step(ui, state);
                     ui.separator();
                     organization.shared_step(ui, !state.semantic_running && state.can_save_settings());
@@ -464,14 +463,15 @@ impl Panel {
 
 fn row(ui: &mut egui::Ui, status: &Status, title: &str, explanation: &str) {
     ui.add_space(12.0);
-    ui.separator();
-    ui.horizontal_wrapped(|ui| {
-        if matches!(status, Status::Error(_)) {
-            ui.colored_label(Palette::of(ui).red, status.label());
-        } else {
-            ui.small(status.label());
-        }
-        ui.strong(title);
+    theme::setting_row(ui, title, |ui| {
+        ui.colored_label(
+            if matches!(status, Status::Error(_)) {
+                Palette::of(ui).red
+            } else {
+                Palette::of(ui).muted
+            },
+            status.label(),
+        );
     });
     ui.small(explanation);
     if let Status::Error(error) = status {
