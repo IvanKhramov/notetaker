@@ -127,6 +127,24 @@ fn openai_streams_sse_deltas_and_sends_chat_request() {
 }
 
 #[test]
+fn compatible_stream_can_finish_with_done_without_a_finish_reason() {
+    let server = Mock::start(
+        "200 OK",
+        "text/event-stream",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\ndata: [DONE]\n\n",
+        "",
+    );
+    assert_eq!(
+        server
+            .provider(ProviderKind::Openai)
+            .complete(&request(), &mut |_| {})
+            .unwrap(),
+        "answer"
+    );
+    server.handle.join().unwrap();
+}
+
+#[test]
 fn openai_accepts_nonstreaming_compatible_server() {
     let server = Mock::start(
         "200 OK",
@@ -248,7 +266,7 @@ fn incomplete_or_truncated_streams_are_errors() {
         ),
         (
             "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
-            "token limit",
+            "лимита",
         ),
         (
             "data: {\"error\":{\"message\":\"private data\"}}\n\n",
@@ -409,4 +427,131 @@ fn folder_chat_retrieves_before_limit_and_keeps_local_completion() {
     let prompt = body["messages"][1]["content"].as_str().unwrap();
     assert!(prompt.contains("INSIDE"));
     assert!(!prompt.contains("OUTSIDE"));
+}
+
+#[test]
+fn streaming_cutoff_keeps_all_text_including_the_final_delta() {
+    for done in ["", "data: [DONE]\n\n"] {
+        let body = format!(
+            "data: {{\"choices\":[{{\"delta\":{{\"content\":\"Начало \"}}}}]}}\n\n\
+             data: {{\"choices\":[{{\"delta\":{{\"content\":\"конспекта\"}},\"finish_reason\":\"length\"}}]}}\n\n{done}"
+        );
+        let server = Mock::start("200 OK", "text/event-stream", &body, "");
+        let mut deltas = String::new();
+        let error = server
+            .provider(ProviderKind::Openai)
+            .complete(&request(), &mut |text| deltas.push_str(text))
+            .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<OutputLimit>().unwrap().text,
+            "Начало конспекта"
+        );
+        assert_eq!(deltas, "Начало конспекта");
+        server.handle.join().unwrap();
+    }
+}
+
+#[test]
+fn json_cutoff_keeps_partial_text_for_both_providers() {
+    for (kind, body, expected) in [
+        (
+            ProviderKind::Openai,
+            r#"{"choices":[{"message":{"content":"partial"},"finish_reason":"length"}]}"#,
+            "partial",
+        ),
+        (
+            ProviderKind::Openai,
+            r#"{"choices":[{"message":{"content":null},"finish_reason":"length"}]}"#,
+            "",
+        ),
+        (
+            ProviderKind::Anthropic,
+            r#"{"content":[{"type":"thinking","thinking":"private reasoning"},{"type":"text","text":"partial"}],"stop_reason":"max_tokens"}"#,
+            "partial",
+        ),
+    ] {
+        let server = Mock::start("200 OK", "application/json", body, "");
+        let mut deltas = String::new();
+        let error = server
+            .provider(kind)
+            .complete(&request(), &mut |text| deltas.push_str(text))
+            .unwrap_err();
+        assert_eq!(error.downcast_ref::<OutputLimit>().unwrap().text, expected);
+        assert_eq!(deltas, expected);
+        assert!(!error.to_string().contains("private reasoning"));
+        server.handle.join().unwrap();
+    }
+}
+
+#[test]
+fn reasoning_models_use_completion_limit_without_changing_compatible_servers() {
+    for (base_url, model, parameter) in [
+        (
+            "https://api.openai.com/v1",
+            "gpt-4o",
+            "max_completion_tokens",
+        ),
+        (
+            "https://openrouter.ai/api/v1",
+            "openai/o3-mini",
+            "max_completion_tokens",
+        ),
+        (
+            "http://localhost:8000/v1",
+            "o1-preview",
+            "max_completion_tokens",
+        ),
+        (
+            "http://localhost:8000/v1",
+            "gpt-5-mini",
+            "max_completion_tokens",
+        ),
+        ("http://localhost:11434/v1", "gpt-oss:20b", "max_tokens"),
+        ("http://localhost:11434/v1", "qwen3:8b", "max_tokens"),
+        (
+            "https://openrouter.ai/api/v1",
+            "deepseek/deepseek-r1",
+            "max_tokens",
+        ),
+        (
+            "http://localhost:8000/v1",
+            "meta-llama/Llama-3.1",
+            "max_tokens",
+        ),
+    ] {
+        let mut config = ProviderConfig {
+            id: "test".into(),
+            kind: ProviderKind::Openai,
+            base_url: base_url.into(),
+            model: model.into(),
+            api_key_env: None,
+            key_source: Default::default(),
+            context_tokens: 4096,
+        };
+        assert_eq!(output_token_parameter(&config), parameter);
+        let server = Mock::start(
+            "200 OK",
+            "application/json",
+            r#"{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}"#,
+            "",
+        );
+        config.base_url.clone_from(&server.base);
+        let provider = HttpProvider::with_key(config, Mode::Local, None).unwrap();
+        provider.complete(&request(), &mut |_| {}).unwrap();
+        let (_, body) = server.handle.join().unwrap();
+        let sent_parameter = if model == "gpt-4o" {
+            "max_tokens"
+        } else {
+            parameter
+        };
+        assert_eq!(body[sent_parameter], request().max_output_tokens);
+        assert_eq!(
+            body.get(if sent_parameter == "max_tokens" {
+                "max_completion_tokens"
+            } else {
+                "max_tokens"
+            }),
+            None
+        );
+    }
 }

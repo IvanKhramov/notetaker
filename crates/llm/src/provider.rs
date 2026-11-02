@@ -20,10 +20,29 @@ pub struct CompletionRequest {
     pub max_output_tokens: usize,
 }
 
+/// A token cutoff is recoverable, including when reasoning used the whole budget.
+/// Display never includes the private completion text.
+#[derive(Debug)]
+pub struct OutputLimit {
+    pub text: String,
+}
+
+impl std::fmt::Display for OutputLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Модель достигла лимита ответа. Увеличьте контекст модели или выберите другую модель и повторите запрос.")
+    }
+}
+
+impl std::error::Error for OutputLimit {}
+
 /// A completion returns the full text and calls on_text with incremental deltas.
 /// Callbacks can receive partial text before an error; persist only on success.
+/// Token cutoffs return OutputLimit with all available text for recovery.
 pub trait Provider: Send + Sync {
     fn config(&self) -> &ProviderConfig;
+    fn is_cancelled(&self) -> bool {
+        false
+    }
     fn complete(
         &self,
         request: &CompletionRequest,
@@ -174,6 +193,10 @@ impl Provider for HttpProvider {
         &self.config
     }
 
+    fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+
     fn complete(
         &self,
         request: &CompletionRequest,
@@ -181,15 +204,16 @@ impl Provider for HttpProvider {
     ) -> Result<String> {
         let text = match self.config.kind {
             ProviderKind::Openai => {
-                let response = self.response(json!({
+                let mut body = json!({
                     "model": self.config.model,
                     "messages": [
                         {"role": "system", "content": request.system},
                         {"role": "user", "content": request.user}
                     ],
-                    "max_tokens": request.max_output_tokens,
                     "stream": true
-                }))?;
+                });
+                body[output_token_parameter(&self.config)] = json!(request.max_output_tokens);
+                let response = self.response(body)?;
                 if response
                     .headers()
                     .get(reqwest::header::CONTENT_TYPE)
@@ -200,15 +224,17 @@ impl Provider for HttpProvider {
                 } else {
                     // Some local OpenAI-compatible servers ignore stream=true.
                     let value: Value = response.json().context("invalid OpenAI JSON response")?;
-                    ensure!(
-                        value["choices"][0]["finish_reason"] != "length",
-                        "LLM output reached the token limit"
-                    );
+                    let limited = value["choices"][0]["finish_reason"] == "length";
                     let text = value["choices"][0]["message"]["content"]
                         .as_str()
+                        .or_else(|| limited.then_some(""))
                         .context("OpenAI response has no message text")?
                         .to_owned();
                     on_text(&text);
+                    ensure!(!self.cancel.is_cancelled(), "Запрос отменён");
+                    if limited {
+                        return Err(OutputLimit { text }.into());
+                    }
                     text
                 }
             }
@@ -220,10 +246,6 @@ impl Provider for HttpProvider {
                     "max_tokens": request.max_output_tokens
                 }))?;
                 let value: Value = response.json().context("invalid Anthropic JSON response")?;
-                ensure!(
-                    value["stop_reason"] != "max_tokens",
-                    "LLM output reached the token limit"
-                );
                 let blocks = value["content"]
                     .as_array()
                     .context("Anthropic response has no content blocks")?;
@@ -238,13 +260,38 @@ impl Provider for HttpProvider {
                     }
                 }
                 on_text(&text);
+                ensure!(!self.cancel.is_cancelled(), "Запрос отменён");
+                if value["stop_reason"] == "max_tokens" {
+                    return Err(OutputLimit { text }.into());
+                }
                 text
             }
             _ => unreachable!("HTTP provider"),
         };
         ensure!(!self.cancel.is_cancelled(), "Запрос отменён");
-        ensure!(!text.trim().is_empty(), "LLM returned an empty completion");
+        ensure!(
+            !text.trim().is_empty(),
+            "Модель вернула пустой ответ. Выберите другую модель или увеличьте контекст и повторите запрос."
+        );
         Ok(text)
+    }
+}
+
+fn output_token_parameter(config: &ProviderConfig) -> &'static str {
+    // OpenAI reasoning models reject max_tokens. Ollama and older compatible
+    // servers document max_tokens, so do not switch arbitrary models globally.
+    // OpenRouter accepts either field and routes it to the upstream provider.
+    let model = config.model.rsplit('/').next().unwrap_or(&config.model);
+    if model.starts_with("o1")
+        || model.starts_with("o3")
+        || model.starts_with("o4")
+        || model.starts_with("gpt-5")
+        || reqwest::Url::parse(&config.base_url)
+            .is_ok_and(|url| url.host_str() == Some("api.openai.com"))
+    {
+        "max_completion_tokens"
+    } else {
+        "max_tokens"
     }
 }
 
@@ -256,6 +303,7 @@ fn read_sse(
     let mut text = String::new();
     let mut event = String::new();
     let mut finished = false;
+    let mut limited = false;
     for line in BufReader::new(response)
         .lines()
         .chain(std::iter::once(Ok(String::new())))
@@ -269,7 +317,8 @@ fn read_sse(
             event.push_str(data.strip_prefix(' ').unwrap_or(data));
         } else if line.is_empty() && !event.is_empty() {
             if event.trim() == "[DONE]" {
-                return Ok(text);
+                finished = true;
+                break;
             }
             let value: Value = serde_json::from_str(&event).context("invalid OpenAI SSE event")?;
             ensure!(
@@ -278,10 +327,7 @@ fn read_sse(
             );
             if let Some(choices) = value["choices"].as_array() {
                 for choice in choices {
-                    ensure!(
-                        choice["finish_reason"] != "length",
-                        "LLM output reached the token limit"
-                    );
+                    limited |= choice["finish_reason"] == "length";
                     if !choice["finish_reason"].is_null() {
                         finished = true;
                     }
@@ -293,6 +339,10 @@ fn read_sse(
             }
             event.clear();
         }
+    }
+    ensure!(!cancel.is_cancelled(), "Запрос отменён");
+    if limited {
+        return Err(OutputLimit { text }.into());
     }
     if !finished {
         bail!("OpenAI event stream ended before completion");

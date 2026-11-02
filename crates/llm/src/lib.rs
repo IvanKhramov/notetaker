@@ -26,7 +26,7 @@ pub use config::{
 pub use enhance::{
     EnhanceResult, enhance, enhance_meeting, enhance_meeting_if_unedited, estimate_tokens,
 };
-pub use provider::{CompletionRequest, HttpProvider, Provider};
+pub use provider::{CompletionRequest, HttpProvider, OutputLimit, Provider};
 pub use template::Template;
 
 pub use cli::{Cancellation, CliProvider, find_cli, open_login};

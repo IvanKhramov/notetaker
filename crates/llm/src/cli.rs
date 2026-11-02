@@ -321,6 +321,9 @@ impl Provider for CliProvider {
     fn config(&self) -> &ProviderConfig {
         &self.config
     }
+    fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
     fn complete(
         &self,
         request: &CompletionRequest,
