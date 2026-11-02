@@ -46,6 +46,8 @@ pub struct NotetakerApp {
     tasks_by_meeting: bool,
     toasts: VecDeque<Toast>,
     main_rect: Option<egui::Rect>,
+    /// Where the recording pill is now, and where the next one opens.
+    indicator: IndicatorPosition,
     home: bool,
     applied_zoom: Option<f32>,
     chat_page: bool,
@@ -69,6 +71,7 @@ impl NotetakerApp {
             cache: CommonMarkCache::default(),
             image_viewer: None,
             enhanced_preview: true,
+            indicator: IndicatorPosition::load(),
             show_record: false,
             show_settings: false,
             settings_panel: Default::default(),
@@ -1316,13 +1319,19 @@ impl NotetakerApp {
             )
         });
         if !show {
+            self.indicator.closed();
             return;
         }
         let mut stop = false;
         let mut open = false;
+        let mut builder = egui::ViewportBuilder::default();
+        if let Some(position) = self.indicator.spawn {
+            builder = builder.with_position(position);
+        }
+        let indicator = &mut self.indicator;
         ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("recording-indicator"),
-            egui::ViewportBuilder::default()
+            builder
                 .with_title("notetaker · запись")
                 .with_inner_size([240.0, 64.0])
                 .with_min_inner_size([240.0, 64.0])
@@ -1334,6 +1343,13 @@ impl NotetakerApp {
                 .with_active(false),
             |ui, _| {
                 (open, stop) = recording_pill(ui, self.state.recording.elapsed());
+                ui.input(|input| {
+                    if let Some(rect) = input.viewport().outer_rect
+                        && !input.pointer.primary_down()
+                    {
+                        indicator.moved(rect.min);
+                    }
+                });
                 if ui.input(|i| i.viewport().close_requested()) {
                     ui.ctx()
                         .send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -1826,6 +1842,56 @@ pub(crate) fn model_selector(ui: &mut egui::Ui, id: &str, model: &mut String) {
         });
 }
 
+/// The pill is recreated each time it hides, so keep its last position here and
+/// on disk instead of letting it jump back to the default corner.
+#[derive(Default)]
+struct IndicatorPosition {
+    spawn: Option<egui::Pos2>,
+    current: Option<egui::Pos2>,
+}
+impl IndicatorPosition {
+    fn path() -> Option<std::path::PathBuf> {
+        crate::config::Settings::path()
+            .ok()
+            .map(|path| path.with_file_name("indicator.txt"))
+    }
+    fn load() -> Self {
+        let spawn = Self::path()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .and_then(|text| parse_position(&text));
+        Self {
+            spawn,
+            current: spawn,
+        }
+    }
+    fn moved(&mut self, position: egui::Pos2) {
+        if self
+            .current
+            .is_some_and(|current| current.distance(position) < 1.0)
+        {
+            return;
+        }
+        self.current = Some(position);
+        if let Some(path) = Self::path() {
+            let _ = crate::config::atomic_write(
+                &path,
+                &format!("{} {}", position.x.round(), position.y.round()),
+            );
+        }
+    }
+    fn closed(&mut self) {
+        // Only now: moving the builder position while the pill is open would
+        // fight the user's drag.
+        self.spawn = self.current;
+    }
+}
+fn parse_position(text: &str) -> Option<egui::Pos2> {
+    let mut parts = text.split_whitespace().map(str::parse::<f32>);
+    let (Some(Ok(x)), Some(Ok(y)), None) = (parts.next(), parts.next(), parts.next()) else {
+        return None;
+    };
+    (x.is_finite() && y.is_finite()).then(|| egui::pos2(x, y))
+}
 fn indicator_visible(phase: Phase, minimized: bool, focused: bool) -> bool {
     phase == Phase::Recording && (minimized || !focused)
 }
@@ -2592,6 +2658,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn indicator_position_roundtrips_and_rejects_garbage() {
+        assert_eq!(parse_position("120 -40"), Some(egui::pos2(120.0, -40.0)));
+        assert_eq!(parse_position("1 2 3"), None);
+        assert_eq!(parse_position("x 2"), None);
+        assert_eq!(parse_position("NaN 2"), None);
+        let mut position = IndicatorPosition {
+            spawn: None,
+            current: Some(egui::pos2(5.0, 6.0)),
+        };
+        assert_eq!(position.spawn, None);
+        position.closed();
+        assert_eq!(position.spawn, Some(egui::pos2(5.0, 6.0)));
+    }
     #[test]
     fn indicator_only_shows_during_recording_outside_main_window() {
         assert!(!indicator_visible(Phase::Recording, false, true));

@@ -59,7 +59,7 @@ fn read_command(stream: &mut UnixStream) -> Option<u8> {
     // Linux accepted sockets block; macOS ones inherit O_NONBLOCK already, so
     // a failure here (peer gone) still leaves a nonblocking read.
     let _ = stream.set_nonblocking(true);
-    let deadline = Instant::now() + Duration::from_millis(100);
+    let deadline = Instant::now() + Duration::from_secs(1);
     let mut command = [0];
     loop {
         match stream.read(&mut command) {
