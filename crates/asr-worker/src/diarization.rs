@@ -10,8 +10,8 @@ use sherpa_onnx::{
 
 use crate::models;
 
-#[path = "diarization/cleanup.rs"]
-mod cleanup;
+#[path = "diarization/clustering.rs"]
+pub(crate) mod clustering;
 
 /// Sherpa 2.0.0 uses complete-linkage cosine distance (1 - cosine).
 /// Keep the upstream ERes2Net default; raising it globally can merge real voices.
@@ -43,7 +43,7 @@ fn waveform(path: &Path) -> Result<Vec<f32>> {
     Ok(samples)
 }
 
-fn extractor_config(threads: i32) -> Result<SpeakerEmbeddingExtractorConfig> {
+pub(crate) fn extractor_config(threads: i32) -> Result<SpeakerEmbeddingExtractorConfig> {
     let root = models::models_dir()?;
     let path = models::installed(&root, &models::ERES2NET)?.join(models::ERES2NET.files[0]);
     Ok(SpeakerEmbeddingExtractorConfig {
@@ -106,7 +106,7 @@ fn mean_embedding(
 
 /// Keep the clean parts of a turn, rather than rejecting a whole long turn
 /// because of one brief overlap. Prefer long evidence for stable centroids.
-fn clean_ranges(turns: &[SpeakerTurn], id: &str) -> Vec<TimeRange> {
+pub(crate) fn clean_ranges(turns: &[SpeakerTurn], id: &str) -> Vec<TimeRange> {
     let mut ranges = Vec::new();
     for turn in turns.iter().filter(|t| t.speaker == id) {
         let mut parts = vec![(turn.start_ms, turn.end_ms)];
@@ -138,7 +138,7 @@ fn clean_ranges(turns: &[SpeakerTurn], id: &str) -> Vec<TimeRange> {
     ranges
 }
 
-fn cluster_embedding(
+pub(crate) fn cluster_embedding(
     extractor: &SpeakerEmbeddingExtractor,
     samples: &[f32],
     ranges: &[TimeRange],
@@ -168,6 +168,74 @@ fn cluster_embedding(
         .then(|| extractor.compute(&stream))
         .flatten()
         .and_then(normalize)
+}
+
+/// Fresh embeddings for individual turns allow old mixed labels to split.
+/// Only non-overlapped speech trains the clustering; cap comparison audio at 10 s.
+pub(crate) fn comparison_evidence(
+    turns: &[SpeakerTurn],
+    samples: &[f32],
+    extractor: &SpeakerEmbeddingExtractor,
+) -> (Vec<clustering::Evidence>, BTreeMap<String, Vec<f32>>) {
+    let mut ranges = BTreeMap::new();
+    for turn in turns {
+        ranges
+            .entry(turn.speaker.clone())
+            .or_insert_with(|| clean_ranges(turns, &turn.speaker));
+    }
+    let evidence = turns
+        .iter()
+        .map(|turn| {
+            let clean: Vec<_> = ranges[&turn.speaker]
+                .iter()
+                .filter_map(|r| {
+                    let start_ms = r.start_ms.max(turn.start_ms);
+                    let end_ms = r.end_ms.min(turn.end_ms).min(start_ms + 10000);
+                    (end_ms > start_ms).then_some(TimeRange { start_ms, end_ms })
+                })
+                .collect();
+            clustering::Evidence {
+                clean_ms: clean.iter().map(|r| r.end_ms - r.start_ms).sum(),
+                embedding: cluster_embedding(extractor, samples, &clean),
+            }
+        })
+        .collect();
+    let fallback = ranges
+        .into_iter()
+        .filter_map(|(id, clean)| {
+            let clean: Vec<_> = clean
+                .into_iter()
+                .map(|r| TimeRange {
+                    start_ms: r.start_ms,
+                    end_ms: r.end_ms.min(r.start_ms + 10000),
+                })
+                .collect();
+            let embedding = cluster_embedding(extractor, samples, &clean).or_else(|| {
+                // Assignment only: even fully overlapped or very brief groups need
+                // a comparison vector. These samples never train the clusters.
+                let mut speech = Vec::new();
+                for turn in turns.iter().filter(|t| t.speaker == id) {
+                    let start =
+                        (turn.start_ms.saturating_mul(16)).min(samples.len() as u64) as usize;
+                    let end = (turn.end_ms.saturating_mul(16)).min(samples.len() as u64) as usize;
+                    speech.extend_from_slice(&samples[start..end.min(start + 10 * 16000)]);
+                    if speech.len() >= 10 * 16000 {
+                        break;
+                    }
+                }
+                let stream = extractor.create_stream()?;
+                stream.accept_waveform(16000, &speech);
+                stream.input_finished();
+                extractor
+                    .is_ready(&stream)
+                    .then(|| extractor.compute(&stream))
+                    .flatten()
+                    .and_then(normalize)
+            });
+            embedding.map(|e| (id, e))
+        })
+        .collect();
+    (evidence, fallback)
 }
 
 pub fn embed(path: &Path, ranges: &[TimeRange], threads: i32) -> Result<Vec<f32>> {
@@ -253,14 +321,8 @@ pub(crate) fn refine(
         let extractor = SpeakerEmbeddingExtractor::create(&extractor_config(threads)?)
             .context("load voice extractor")?;
         if speakers.is_none() && ids.len() > 1 {
-            let centroids = ids
-                .iter()
-                .filter_map(|id| {
-                    let ranges = clean_ranges(&result.turns, id);
-                    cluster_embedding(&extractor, samples, &ranges).map(|e| (id.clone(), e))
-                })
-                .collect();
-            cleanup::reassign(&mut result.turns, &centroids);
+            let (evidence, fallback) = comparison_evidence(&result.turns, samples, &extractor);
+            clustering::reassign(&mut result.turns, &evidence, &fallback);
         }
         // Number the surviving voices by first appearance. Comparison vectors
         // remain worker-local when the voice library is disabled.

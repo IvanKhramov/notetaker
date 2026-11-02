@@ -7,6 +7,8 @@ use sherpa_onnx::{OfflineSpeakerDiarization, OfflineSpeakerDiarizationConfig};
 #[allow(dead_code)]
 #[path = "../src/diarization.rs"]
 mod diarization;
+#[path = "../src/diarization/cleanup.rs"]
+mod legacy_cleanup;
 #[allow(dead_code)]
 #[path = "../src/models.rs"]
 mod models;
@@ -101,7 +103,8 @@ fn call_audio_speaker_counts() {
     );
     config.embedding.num_threads = 2;
     config.clustering.threshold = threshold;
-    let diarizer = OfflineSpeakerDiarization::create(&config).unwrap();
+    let fixed = std::env::var_os("NOTETAKER_EVAL_FIXED").is_some();
+    let legacy = std::env::var_os("NOTETAKER_EVAL_LEGACY").is_some();
     let mut report = Vec::new();
     for case in cases.as_array().unwrap() {
         let name = case["name"].as_str().unwrap();
@@ -114,10 +117,17 @@ fn call_audio_speaker_counts() {
             .samples::<i16>()
             .map(|s| f32::from(s.unwrap()) / 32768.0)
             .collect();
-        let cache = fixtures.join(format!("{name}-threshold-{threshold}.json"));
+        let target = fixed.then(|| case["speakers"].as_u64().unwrap() as u32);
+        config.clustering.num_clusters = target.map_or(-1, |n| n as i32);
+        let mode = target.map_or_else(
+            || format!("threshold-{threshold}"),
+            |n| format!("fixed-{n}"),
+        );
+        let cache = fixtures.join(format!("{name}-{mode}.json"));
         let baseline: Diarization = if cache.is_file() {
             serde_json::from_slice(&std::fs::read(&cache).unwrap()).unwrap()
         } else {
+            let diarizer = OfflineSpeakerDiarization::create(&config).unwrap();
             let result = diarizer.process(&samples).unwrap();
             let result = Diarization {
                 turns: result
@@ -139,11 +149,46 @@ fn call_audio_speaker_counts() {
         // Cached turn labels let threshold sweeps and cleanup tuning avoid a
         // second expensive segmentation pass over the identical recording.
         result.embeddings.clear();
-        if std::env::var_os("NOTETAKER_EVAL_BASELINE_ONLY").is_none() {
-            diarization::refine(&mut result, &samples, None, embeddings, 2).unwrap();
+        if legacy && !fixed {
+            let extractor = sherpa_onnx::SpeakerEmbeddingExtractor::create(
+                &diarization::extractor_config(2).unwrap(),
+            )
+            .unwrap();
+            let centroids = counts(&baseline)
+                .keys()
+                .filter_map(|id| {
+                    let ranges = diarization::clean_ranges(&baseline.turns, id);
+                    diarization::cluster_embedding(&extractor, &samples, &ranges)
+                        .map(|e| (id.clone(), e))
+                })
+                .collect();
+            legacy_cleanup::reassign(&mut result.turns, &centroids);
+        } else if std::env::var_os("NOTETAKER_EVAL_DUMP").is_some() && !fixed {
+            assert!(
+                !embeddings,
+                "dump mode evaluates worker-local comparison vectors"
+            );
+            let extractor = sherpa_onnx::SpeakerEmbeddingExtractor::create(
+                &diarization::extractor_config(2).unwrap(),
+            )
+            .unwrap();
+            let (evidence, fallback) =
+                diarization::comparison_evidence(&baseline.turns, &samples, &extractor);
+            let turns: Vec<_> = baseline.turns.iter().zip(&evidence).map(|(turn, e)| {
+                serde_json::json!({"turn": turn, "clean_ms": e.clean_ms, "embedding": e.embedding})
+            }).collect();
+            std::fs::write(
+                fixtures.join(format!("{name}-comparison.json")),
+                serde_json::to_vec(&serde_json::json!({"turns": turns, "fallback": fallback}))
+                    .unwrap(),
+            )
+            .unwrap();
+            diarization::clustering::reassign(&mut result.turns, &evidence, &fallback);
+        } else if std::env::var_os("NOTETAKER_EVAL_BASELINE_ONLY").is_none() {
+            diarization::refine(&mut result, &samples, target, embeddings, 2).unwrap();
         }
         std::fs::write(
-            fixtures.join(format!("{name}-current.json")),
+            fixtures.join(format!("{name}-{mode}-current.json")),
             serde_json::to_vec_pretty(&result).unwrap(),
         )
         .unwrap();
@@ -164,21 +209,40 @@ fn call_audio_speaker_counts() {
         println!("one-to-one attribution: {before_accuracy:.3}/{after_accuracy:.3}");
         report.push(serde_json::json!({"name": name, "expected": case["speakers"], "baseline": before, "current": after, "baseline_purity": purity(&baseline, truth), "current_purity": purity(&result, truth), "baseline_accuracy": before_accuracy, "current_accuracy": after_accuracy}));
         assert!(!after.is_empty());
-        assert!(after.len() <= before.len());
-        assert!(
-            after_accuracy >= before_accuracy - 0.02,
-            "cleanup worsened attribution for {name}"
-        );
-        assert!(
-            purity(&result, truth) + 1e-6 >= purity(&baseline, truth),
-            "cleanup introduced false merges for {name}"
-        );
+        if fixed {
+            // Sherpa may return fewer active labels after segmentation, even
+            // when num_clusters is exact. Measure that limitation, do not invent turns.
+            assert!(after.len() <= speakers, "fixed count for {name}");
+        } else if !legacy && std::env::var_os("NOTETAKER_EVAL_BASELINE_ONLY").is_none() {
+            assert!(
+                after.len().abs_diff(speakers) <= 1,
+                "speaker count for {name}: {}",
+                after.len()
+            );
+            assert!(
+                after_accuracy >= before_accuracy - 0.02,
+                "attribution for {name}"
+            );
+            assert!(
+                purity(&result, truth) + 1e-6 >= purity(&baseline, truth),
+                "false merges for {name}"
+            );
+        }
         if !embeddings {
             assert!(result.embeddings.is_empty());
         }
     }
     std::fs::write(
-        fixtures.join(format!("report-{threshold}.json")),
+        fixtures.join(format!(
+            "report-round2-{}.json",
+            if fixed {
+                "fixed".to_string()
+            } else if legacy {
+                "legacy".to_string()
+            } else {
+                threshold.to_string()
+            }
+        )),
         serde_json::to_vec_pretty(&report).unwrap(),
     )
     .unwrap();
