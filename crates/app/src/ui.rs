@@ -9,7 +9,7 @@ use notetaker_core::Mode;
 
 use crate::{
     attachments::ImageInput,
-    config::MODELS,
+    config::{DocumentAction, MODELS},
     detection::CallPrompt,
     state::{AppState, Document, Phase, Tab, edit_segment, speaker, timestamp},
     theme::{self, ButtonStyle, Palette, ToastLevel},
@@ -755,6 +755,17 @@ impl NotetakerApp {
         let mut enhance = false;
         let mut export = None;
         let mut series_action = None;
+        let mut action = None;
+        let mut pin_toggle = None;
+        let pinned = self.state.settings_draft.pinned_actions.clone();
+        let (can_edit_summary, can_send) =
+            (document.generation.is_none() && !locked, can_send_tasks);
+        let enabled = move |action: DocumentAction| match action {
+            DocumentAction::EditSummary => can_edit_summary,
+            DocumentAction::Regenerate => can_enhance,
+            DocumentAction::SendTasks => can_send,
+            _ => true,
+        };
         ui.horizontal(|ui| {
             if theme::button(ui, "‹ Встречи", ButtonStyle::Ghost).clicked() {
                 self.home = true;
@@ -767,27 +778,21 @@ impl NotetakerApp {
                 ))
                 .ui(ui, |ui| {
                     ui.set_width(280.0);
-                    if theme::nav_row(ui, "Редактировать мои заметки", false).clicked()
-                    {
-                        self.state.tab = Tab::Notes;
-                        ui.close();
-                    }
-                    if ui
-                        .add_enabled(
-                            document.generation.is_none() && !locked,
-                            egui::Button::new("Редактировать конспект"),
-                        )
-                        .clicked()
-                    {
-                        self.state.tab = Tab::Enhanced;
-                        self.enhanced_preview = false;
-                        ui.close();
-                    }
-                    if theme::nav_row(ui, "Читать документ", false).clicked() {
-                        self.state.tab = Tab::Enhanced;
-                        self.enhanced_preview = true;
-                        ui.close();
-                    }
+                    let mut row = |ui: &mut egui::Ui, item: DocumentAction| {
+                        if ui
+                            .add_enabled_ui(enabled(item), |ui| {
+                                theme::nav_row(ui, item.label(), false)
+                            })
+                            .inner
+                            .clicked()
+                        {
+                            action = Some(item);
+                            ui.close();
+                        }
+                    };
+                    row(ui, DocumentAction::EditNotes);
+                    row(ui, DocumentAction::EditSummary);
+                    row(ui, DocumentAction::Read);
                     ui.separator();
                     theme::setting_row(ui, "Шаблон", |ui| {
                         egui::ComboBox::from_id_salt("template")
@@ -798,66 +803,21 @@ impl NotetakerApp {
                                 }
                             });
                     });
-                    enhance = ui
-                        .add_enabled(can_enhance, egui::Button::new("Пересоздать конспект"))
-                        .clicked();
-                    if enhance {
-                        ui.close();
-                    }
-                    if theme::nav_row(ui, "Копировать", false).clicked() {
-                        ui.ctx().copy_text(if document.data.enhanced.is_empty() {
-                            document.data.notes.clone()
-                        } else {
-                            document.data.enhanced.clone()
-                        });
-                        ui.close();
-                    }
-                    if theme::nav_row(ui, "Копировать конспект и транскрипт", false).clicked()
-                    {
-                        let summary = if document.data.enhanced.is_empty() {
-                            &document.data.notes
-                        } else {
-                            &document.data.enhanced
-                        };
-                        let transcript = document
-                            .data
-                            .transcript
-                            .export(notetaker_core::ExportFormat::Md)
-                            .unwrap_or_default();
-                        ui.ctx().copy_text(format!(
-                            "{}\n\n## Транскрипт\n\n{}",
-                            summary.trim_end(),
-                            transcript.trim_end()
-                        ));
-                        ui.close();
-                    }
-                    if theme::nav_row(ui, "Показать в папке", false).clicked() {
-                        export = Some(Command::Reveal(path.clone()));
-                        ui.close();
-                    }
-                    if ui
-                        .add_enabled(
-                            can_send_tasks,
-                            egui::Button::new("Отправить задачи в трекер…"),
-                        )
-                        .clicked()
-                    {
-                        send_tasks = true;
-                        ui.close();
+                    for item in [
+                        DocumentAction::Regenerate,
+                        DocumentAction::Copy,
+                        DocumentAction::CopyAll,
+                        DocumentAction::Reveal,
+                        DocumentAction::SendTasks,
+                    ] {
+                        row(ui, item);
                     }
                     ui.menu_button("Серия встречи", |ui| {
                         series_action =
                             self.people
                                 .header(ui, &document.data.meta, !locked && can_enhance);
                     });
-                    if theme::nav_row(ui, "Экспорт конспекта Markdown", false).clicked()
-                    {
-                        export = Some(Command::Export {
-                            meeting: document.data.meeting.clone(),
-                            text: document.data.enhanced.clone(),
-                        });
-                        ui.close();
-                    }
+                    row(ui, DocumentAction::ExportSummary);
                     ui.menu_button("Экспорт транскрипта", |ui| {
                         for (format, label) in [
                             (notetaker_core::ExportFormat::Md, "Markdown"),
@@ -876,9 +836,70 @@ impl NotetakerApp {
                             }
                         }
                     });
+                    ui.separator();
+                    ui.menu_button("Кнопки на панели", |ui| {
+                        for item in DocumentAction::ALL {
+                            let mut on = pinned.contains(&item);
+                            if ui.checkbox(&mut on, item.label()).changed() {
+                                pin_toggle = Some(item);
+                            }
+                        }
+                    });
                 });
+                // Right-to-left layout: reverse so pinned buttons read in menu order.
+                for &item in pinned.iter().rev() {
+                    if ui
+                        .add_enabled(
+                            enabled(item),
+                            theme::styled_button(
+                                Palette::of(ui),
+                                item.short_label(),
+                                ButtonStyle::Ghost,
+                            ),
+                        )
+                        .on_hover_text(item.label())
+                        .clicked()
+                    {
+                        action = Some(item);
+                    }
+                }
             });
         });
+        let summary = if document.data.enhanced.is_empty() {
+            &document.data.notes
+        } else {
+            &document.data.enhanced
+        };
+        match action {
+            Some(DocumentAction::EditNotes) => self.state.tab = Tab::Notes,
+            Some(DocumentAction::EditSummary | DocumentAction::Read) => {
+                self.state.tab = Tab::Enhanced;
+                self.enhanced_preview = action == Some(DocumentAction::Read);
+            }
+            Some(DocumentAction::Regenerate) => enhance = true,
+            Some(DocumentAction::Copy) => ui.ctx().copy_text(summary.clone()),
+            Some(DocumentAction::CopyAll) => {
+                let transcript = document
+                    .data
+                    .transcript
+                    .export(notetaker_core::ExportFormat::Md)
+                    .unwrap_or_default();
+                ui.ctx().copy_text(format!(
+                    "{}\n\n## Транскрипт\n\n{}",
+                    summary.trim_end(),
+                    transcript.trim_end()
+                ));
+            }
+            Some(DocumentAction::Reveal) => export = Some(Command::Reveal(path.clone())),
+            Some(DocumentAction::SendTasks) => send_tasks = true,
+            Some(DocumentAction::ExportSummary) => {
+                export = Some(Command::Export {
+                    meeting: document.data.meeting.clone(),
+                    text: document.data.enhanced.clone(),
+                })
+            }
+            None => {}
+        }
         ui.add_space(24.0);
         let mut title = egui::text::LayoutJob::simple(
             document.data.meta.title.clone(),
@@ -912,6 +933,19 @@ impl NotetakerApp {
             // Folder assignment keeps its existing atomic save and sync-conflict handling.
             self.organization.meeting(ui, &mut self.state);
         });
+        if let Some(item) = pin_toggle {
+            let mut list = pinned;
+            if let Some(index) = list.iter().position(|a| *a == item) {
+                list.remove(index);
+            } else {
+                list.push(item);
+            }
+            self.state.settings_draft.pinned_actions = DocumentAction::ALL
+                .into_iter()
+                .filter(|a| list.contains(a))
+                .collect();
+            self.state.save_preferences();
+        }
         if send_tasks {
             self.trackers.prepare(ui.ctx(), &self.state, tracker_tasks);
         }
