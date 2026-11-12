@@ -812,6 +812,25 @@ impl NotetakerApp {
                         });
                         ui.close();
                     }
+                    if theme::nav_row(ui, "Копировать конспект и транскрипт", false).clicked()
+                    {
+                        let summary = if document.data.enhanced.is_empty() {
+                            &document.data.notes
+                        } else {
+                            &document.data.enhanced
+                        };
+                        let transcript = document
+                            .data
+                            .transcript
+                            .export(notetaker_core::ExportFormat::Md)
+                            .unwrap_or_default();
+                        ui.ctx().copy_text(format!(
+                            "{}\n\n## Транскрипт\n\n{}",
+                            summary.trim_end(),
+                            transcript.trim_end()
+                        ));
+                        ui.close();
+                    }
                     if theme::nav_row(ui, "Показать в папке", false).clicked() {
                         export = Some(Command::Reveal(path.clone()));
                         ui.close();
