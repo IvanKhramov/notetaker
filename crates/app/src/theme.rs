@@ -487,12 +487,19 @@ pub fn segmented<T: Copy + PartialEq>(ui: &mut egui::Ui, selected: &mut T, value
     });
 }
 /// Animated recording state. It is the only colored ornament in navigation.
-pub fn waveform(ui: &mut egui::Ui) {
+/// Recording indicator. Its bars follow the captured level, so a silent input shows as flat.
+pub fn waveform(ui: &mut egui::Ui, level: f32) {
     let p = Palette::of(ui);
+    // Perceptual scale: speech peaks around 0.1..0.5 fill most of the height.
+    let amplitude = ui.ctx().animate_value_with_time(
+        ui.scope_id().with("waveform"),
+        level.clamp(0.0, 1.0).sqrt(),
+        0.12,
+    );
     let (rect, _) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::hover());
     let time = ui.input(|i| i.time) as f32;
     for n in 0..5 {
-        let height = 4.0 + 12.0 * (time * 3.0 + n as f32 * 1.2).sin().abs();
+        let height = 3.0 + 14.0 * amplitude * (time * 3.0 + n as f32 * 1.2).sin().abs();
         let x = rect.left() + 3.0 + n as f32 * 4.0;
         ui.painter().line_segment(
             [

@@ -68,6 +68,26 @@ impl Library {
         &self.root
     }
 
+    /// Moves a meeting out of the library into `<library>/.trash`. Nothing is erased:
+    /// the folder stays there, with its audio, until someone removes it by hand.
+    pub fn trash_meeting(&self, meeting: &Meeting) -> Result<PathBuf> {
+        let name = meeting
+            .path
+            .file_name()
+            .filter(|_| meeting.path.parent() == Some(self.root.as_path()))
+            .ok_or_else(|| std::io::Error::other("meeting is not in this library"))?;
+        let trash = self.root.join(".trash");
+        fs::create_dir_all(&trash)?;
+        let mut target = trash.join(name);
+        if target.exists() {
+            let mut unique = name.to_owned();
+            unique.push(format!("-{}", Utc::now().timestamp_millis()));
+            target = trash.join(unique);
+        }
+        fs::rename(&meeting.path, &target)?;
+        Ok(target)
+    }
+
     /// Metadata is published last so incomplete creations are skipped by listing.
     pub fn create_meeting(&self, meta: MeetingMeta) -> Result<Meeting> {
         let base = format!(
@@ -105,7 +125,8 @@ impl Library {
         let mut meetings = Vec::new();
         for entry in fs::read_dir(&self.root)? {
             let entry = entry?;
-            if entry.file_name() == ".notetaker" || !entry.file_type()?.is_dir() {
+            let name = entry.file_name();
+            if name == ".notetaker" || name == ".trash" || !entry.file_type()?.is_dir() {
                 continue;
             }
             let meeting = Meeting { path: entry.path() };

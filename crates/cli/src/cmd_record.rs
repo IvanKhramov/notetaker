@@ -123,7 +123,7 @@ pub fn run(args: Args) -> Result<()> {
                 eprintln!("Final pass: {completed}/{total}")
             }
             PipelineEvent::Finished { .. } => break,
-            PipelineEvent::Lag { .. } => {}
+            PipelineEvent::Lag { .. } | PipelineEvent::Levels { .. } => {}
         }
     }
     let meeting = session.wait()?;

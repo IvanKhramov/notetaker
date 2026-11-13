@@ -117,6 +117,25 @@ fn roundtrip_and_atomic_replacement() {
 }
 
 #[test]
+fn trashed_meeting_leaves_the_list_and_keeps_its_files() {
+    let (_dir, library) = fixture();
+    let keep = library.create_meeting(meta("Keep")).unwrap();
+    let gone = library.create_meeting(meta("Gone")).unwrap();
+    gone.write_enhanced("summary").unwrap();
+    let target = library.trash_meeting(&gone).unwrap();
+    assert!(!gone.path().exists());
+    assert!(target.join("enhanced.md").is_file());
+    let listed = library.list_meetings().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].path(), keep.path());
+    library.reindex_incremental().unwrap();
+    // A meeting of another library is refused.
+    let (_other_dir, other) = fixture();
+    assert!(other.trash_meeting(&keep).is_err());
+    assert!(keep.path().exists());
+}
+
+#[test]
 fn slug_transliterates_and_resolves_collisions() {
     let (_directory, library) = fixture();
     let prefix = meta("")

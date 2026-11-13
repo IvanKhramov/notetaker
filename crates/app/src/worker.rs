@@ -256,6 +256,15 @@ pub enum Command {
         settings: Settings,
         file: PathBuf,
     },
+    Rename {
+        meeting: Meeting,
+        title: String,
+    },
+    /// Move a meeting into the library's `.trash` folder.
+    Trash {
+        root: PathBuf,
+        meeting: Meeting,
+    },
     /// Recognize an existing meeting again from its saved audio.
     Retranscribe {
         settings: Settings,
@@ -331,6 +340,14 @@ pub enum Event {
     },
     Exported(Result<PathBuf, String>),
     Revealed(Result<(), String>),
+    Renamed {
+        path: PathBuf,
+        result: Result<String, String>,
+    },
+    Trashed {
+        path: PathBuf,
+        result: Result<(), String>,
+    },
     Boot {
         settings: Settings,
         llm: LlmSettings,
@@ -634,6 +651,26 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                     thread::spawn(move || {
                         let _ =
                             events.send(Event::Revealed(reveal_file(&path).map_err(error_text)));
+                    });
+                }
+                Command::Rename { meeting, title } => {
+                    let result = meeting
+                        .update_meta(|meta| meta.title = title.clone())
+                        .map(|()| title)
+                        .map_err(|error| error_text(error.into()));
+                    let _ = events.send(Event::Renamed {
+                        path: meeting.path().to_owned(),
+                        result,
+                    });
+                }
+                Command::Trash { root, meeting } => {
+                    let result = Library::open(&root)
+                        .and_then(|library| library.trash_meeting(&meeting))
+                        .map(|_| ())
+                        .map_err(|error| error_text(error.into()));
+                    let _ = events.send(Event::Trashed {
+                        path: meeting.path().to_owned(),
+                        result,
                     });
                 }
                 Command::Export { meeting, text } => {
@@ -1183,9 +1220,21 @@ fn record(
             request: 0,
             notice: None,
         };
-        asr.start()
-            .context("Модель ASR недоступна. Откройте настройки и нажмите «Скачать»")?;
-        asr.preloaded = true;
+        match asr.start() {
+            Ok(()) => asr.preloaded = true,
+            // A live meeting cannot be repeated: record the sound even when recognition
+            // is broken. The text is recovered later from the saved audio.
+            Err(error) if import_file.is_none() && existing.is_none() => {
+                let _ = events.send(Event::Pipeline(PipelineEvent::Warning(format!(
+                    "Распознавание недоступно: {error:#}. Звук записывается; текст можно получить после встречи кнопкой «Распознать из аудио»."
+                ))));
+            }
+            Err(error) => {
+                return Err(
+                    error.context("Модель ASR недоступна. Откройте настройки и нажмите «Скачать»")
+                );
+            }
+        }
         let config = RecordingConfig {
             folder: request.settings.folder.clone(),
             mode_override: request.settings.folder_mode_override,

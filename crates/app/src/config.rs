@@ -78,10 +78,12 @@ pub enum DocumentAction {
     Reveal,
     SendTasks,
     ExportSummary,
+    Rename,
+    Delete,
 }
 
 impl DocumentAction {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 11] = [
         Self::EditNotes,
         Self::EditSummary,
         Self::Read,
@@ -91,6 +93,8 @@ impl DocumentAction {
         Self::Reveal,
         Self::SendTasks,
         Self::ExportSummary,
+        Self::Rename,
+        Self::Delete,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -103,6 +107,8 @@ impl DocumentAction {
             Self::Reveal => "Показать в папке",
             Self::SendTasks => "Отправить задачи в трекер…",
             Self::ExportSummary => "Экспорт конспекта Markdown",
+            Self::Rename => "Переименовать…",
+            Self::Delete => "Удалить встречу…",
         }
     }
     /// Header buttons are narrow; the full label stays in the tooltip.
@@ -117,6 +123,8 @@ impl DocumentAction {
             Self::Reveal => "В папке",
             Self::SendTasks => "В трекер",
             Self::ExportSummary => "Экспорт",
+            Self::Rename => "Переименовать",
+            Self::Delete => "Удалить",
         }
     }
 }
