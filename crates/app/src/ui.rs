@@ -213,6 +213,9 @@ impl NotetakerApp {
                 self.state.refresh();
                 ui.close();
             }
+            if self.maintenance.check_updates_button(ui) {
+                ui.close();
+            }
         });
         theme::nav_label(ui, more, "Ещё", false);
         if theme::nav_row(ui, "Настройки", self.show_settings).clicked() {

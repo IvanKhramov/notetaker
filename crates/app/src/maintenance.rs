@@ -104,6 +104,37 @@ impl Maintenance {
             false
         }
     }
+    /// Starts an update check now; its result appears as the update prompt or a message.
+    #[cfg(any(windows, target_os = "macos"))]
+    pub fn check_updates_now(&mut self) {
+        self.updates.check_now();
+    }
+    #[cfg(any(windows, target_os = "macos"))]
+    pub fn updates_checking(&self) -> bool {
+        self.updates.checking()
+    }
+    /// "Проверить обновления" button with its in-progress state; true when clicked.
+    pub fn check_updates_button(&mut self, ui: &mut egui::Ui) -> bool {
+        #[cfg(any(windows, target_os = "macos"))]
+        {
+            let checking = self.updates_checking();
+            let label = if checking {
+                "Проверяю…"
+            } else {
+                "Проверить обновления"
+            };
+            if ui
+                .add_enabled(!checking, egui::Button::new(label))
+                .clicked()
+            {
+                self.check_updates_now();
+                return true;
+            }
+        }
+        #[cfg(not(any(windows, target_os = "macos")))]
+        let _ = ui;
+        false
+    }
     pub fn dialogs(&mut self, ctx: &egui::Context, busy: bool) {
         if self.crashed {
             let close = crate::theme::window(ctx, "Прошлый запуск завершился ошибкой")
