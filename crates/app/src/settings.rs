@@ -318,6 +318,14 @@ impl Panel {
                 );
                 ui.add_enabled_ui(cfg!(any(windows, target_os = "macos")), |ui| {
                     theme::toggle(ui, &mut settings.check_updates, "Проверять обновления");
+                    hint(ui, "Раз в час и при запуске.");
+                    theme::setting_row(
+                        ui,
+                        &format!("Версия {}", env!("CARGO_PKG_VERSION")),
+                        |ui| {
+                            maintenance.check_updates_button(ui);
+                        },
+                    );
                 });
             }
             Section::Recording => {

@@ -15,11 +15,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-const INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+const INTERVAL: Duration = Duration::from_secs(60 * 60);
 const MAX_INSTALLER: u64 = 1024 * 1024 * 1024;
 
 enum Message {
-    Checked(Option<Release>),
+    Checked(Result<Option<Release>>),
     Prepared(Result<Prepared>),
 }
 struct Prepared {
@@ -39,6 +39,10 @@ pub struct Updates {
     helper: Option<Helper>,
     message: Option<String>,
     exit: bool,
+    /// A user-requested check reports every outcome and ignores the setting.
+    manual: bool,
+    /// "Позже" hides this tag from automatic checks; a manual check shows it again.
+    dismissed: Option<String>,
 }
 impl Default for Updates {
     fn default() -> Self {
@@ -50,17 +54,28 @@ impl Default for Updates {
             helper: None,
             message: None,
             exit: false,
+            manual: false,
+            dismissed: None,
         }
     }
 }
 impl Updates {
+    pub fn check_now(&mut self) {
+        if !self.exit && self.prepared.is_none() && self.helper.is_none() {
+            self.manual = true;
+            self.next_check = Instant::now();
+        }
+    }
+    pub fn checking(&self) -> bool {
+        self.manual && self.release.is_none()
+    }
     /// Returns true only after the copied helper acknowledges startup. The app
     /// then uses its normal flush/shutdown path before any files are replaced.
     pub fn tick(&mut self, ctx: &egui::Context, enabled: bool, busy: bool) -> bool {
-        if !enabled {
+        if !enabled && !self.manual {
             self.release = None;
         }
-        if enabled
+        if (enabled || self.manual)
             && !self.exit
             && self.receiver.is_none()
             && self.prepared.is_none()
@@ -72,8 +87,7 @@ impl Updates {
             self.receiver = Some(rx);
             let context = ctx.clone();
             std::thread::spawn(move || {
-                let release = check().ok().flatten(); // Offline/rate limits are quiet.
-                let _ = tx.send(Message::Checked(release));
+                let _ = tx.send(Message::Checked(check()));
                 context.request_repaint();
             });
         }
@@ -82,11 +96,7 @@ impl Updates {
                 Ok(message) => {
                     self.receiver = None;
                     match message {
-                        Message::Checked(release) => {
-                            if enabled {
-                                self.release = release;
-                            }
-                        }
+                        Message::Checked(result) => self.checked(result, enabled),
                         Message::Prepared(Ok(prepared)) => self.prepared = Some(prepared),
                         Message::Prepared(Err(_)) => {
                             diagnostics::event("update preparation failed");
@@ -99,6 +109,10 @@ impl Updates {
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
             }
+        }
+        if enabled && self.receiver.is_none() {
+            // An idle egui window does not repaint; wake it for the next hourly check.
+            ctx.request_repaint_after(self.next_check.saturating_duration_since(Instant::now()));
         }
         if !busy
             && !self.exit
@@ -132,6 +146,31 @@ impl Updates {
             }
         }
         false
+    }
+    fn checked(&mut self, result: Result<Option<Release>>, enabled: bool) {
+        match result {
+            Ok(Some(release))
+                if self.manual
+                    || (enabled && self.dismissed.as_deref() != Some(&release.tag_name)) =>
+            {
+                self.release = Some(release);
+            }
+            Ok(None) if self.manual => {
+                self.manual = false;
+                self.message = Some(format!(
+                    "Установлена последняя версия {}.",
+                    env!("CARGO_PKG_VERSION")
+                ));
+            }
+            Err(_) if self.manual => {
+                self.manual = false;
+                self.message = Some(
+                    "Не удалось проверить обновления. Проверьте соединение и повторите.".into(),
+                );
+            }
+            // Automatic checks stay quiet offline, on rate limits and for a dismissed tag.
+            _ => {}
+        }
     }
     pub fn ui(&mut self, ctx: &egui::Context, busy: bool) {
         if let Some(release) = self.release.clone() {
@@ -168,7 +207,11 @@ impl Updates {
                 crate::theme::UpdateAction::Notes => {
                     let _ = windows::open_url(&release.notes_url());
                 }
-                crate::theme::UpdateAction::Later => self.release = None,
+                crate::theme::UpdateAction::Later => {
+                    self.dismissed = Some(release.tag_name.clone());
+                    self.release = None;
+                    self.manual = false;
+                }
                 crate::theme::UpdateAction::None => {}
             }
         }
