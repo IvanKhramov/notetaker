@@ -25,7 +25,7 @@ jobs:
       contents: read
       checks: read
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: Require the tagged commit on main
@@ -55,14 +55,14 @@ jobs:
     needs: gate
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install the pinned Rust toolchain
         # Version, components and targets come from rust-toolchain.toml.
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           prefix-key: v2
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/sherpa-onnx-libs
           key: sherpa-onnx-libs-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
@@ -117,14 +117,14 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: '14.4'
       SHERPA_TARGET_ARCH: arm64
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install the pinned Rust toolchain
         # Version, components and targets come from rust-toolchain.toml.
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           prefix-key: v2-macos-arm64
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/sherpa-onnx-libs
           key: sherpa-onnx-libs-macos-arm64-${{ hashFiles('Cargo.lock') }}
@@ -148,7 +148,7 @@ jobs:
       group: winget-${{ github.event.release.tag_name || inputs.version }}
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Generate manifests from published release
         id: manifests
         shell: pwsh
