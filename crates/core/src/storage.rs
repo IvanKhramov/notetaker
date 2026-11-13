@@ -344,8 +344,22 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut temporary = NamedTempFile::new_in(path.parent().expect("meeting file has a parent"))?;
     temporary.write_all(bytes)?;
     temporary.as_file().sync_all()?;
-    temporary.persist(path).map_err(|error| error.error)?;
-    Ok(())
+    // Sync clients and antivirus briefly hold the target open on Windows; the
+    // rename then fails with PermissionDenied and succeeds a moment later.
+    let mut attempt = 0;
+    loop {
+        match temporary.persist(path) {
+            Ok(_) => return Ok(()),
+            Err(error)
+                if error.error.kind() == std::io::ErrorKind::PermissionDenied && attempt < 4 =>
+            {
+                attempt += 1;
+                temporary = error.file;
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(error) => return Err(error.error.into()),
+        }
+    }
 }
 
 fn slug(title: &str) -> String {

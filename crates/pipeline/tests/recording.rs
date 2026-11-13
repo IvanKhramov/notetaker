@@ -343,6 +343,16 @@ fn crashed_worker_restarts_once_and_recording_survives() {
 }
 
 #[test]
+fn separate_crashes_each_get_one_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    // Attempt 2 succeeds between the two crashes, so the second one restarts again.
+    let (session, stats) = start(dir.path(), config(), vec![1, 3], None);
+    drain(&session);
+    session.wait().unwrap();
+    assert_eq!(stats.lock().unwrap().starts, 3);
+}
+
+#[test]
 fn second_crash_does_not_restart_and_preserves_audio_and_work_for_recovery() {
     let dir = tempfile::tempdir().unwrap();
     let (session, stats) = start(dir.path(), config(), vec![1, 2], None);

@@ -385,12 +385,24 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
     let (events, messages) = mpsc::channel();
     thread::spawn(move || {
         let mut warnings = Vec::new();
+        let mut rejected = |error: anyhow::Error, path: anyhow::Result<std::path::PathBuf>| {
+            let kept = path
+                .ok()
+                .and_then(|path| crate::config::keep_broken(&path))
+                .map_or_else(String::new, |copy| {
+                    format!(
+                        " Настройки сброшены, прежний файл сохранён: {}",
+                        notetaker_core::display_path(&copy)
+                    )
+                });
+            warnings.push(format!("{error:#}.{kept}"));
+        };
         let settings = Settings::load().unwrap_or_else(|error| {
-            warnings.push(format!("{error:#}"));
+            rejected(error, Settings::path());
             Settings::default()
         });
         let llm = LlmSettings::load().unwrap_or_else(|error| {
-            warnings.push(format!("{error:#}"));
+            rejected(error, notetaker_llm::Config::path());
             LlmSettings::default()
         });
         if let Err(error) =
