@@ -67,7 +67,7 @@ impl Palette {
                 sidebar: rgb(247, 246, 243),
                 card: Color32::WHITE,
                 text: rgb(31, 31, 28),
-                muted: rgb(138, 135, 127),
+                muted: rgb(110, 107, 100),
                 border: rgb(230, 228, 223),
                 soft: rgb(247, 246, 243),
                 hover: rgb(240, 239, 234),
@@ -86,6 +86,8 @@ impl Palette {
 
 // Shared type scale, in logical points at 100% zoom.
 pub const SMALL: f32 = 13.0;
+/// Width kept free for a dialog's floating scroll bar: bar 5 + inner margin 3 + gap.
+pub const SCROLL_LANE: f32 = 10.0;
 pub const BUTTON: f32 = 15.0;
 pub const BODY: f32 = 16.0;
 pub const SUBHEADING: f32 = 18.0;
@@ -154,6 +156,10 @@ pub fn install(ctx: &egui::Context) {
         style.spacing.scroll.bar_width = 5.0;
         style.spacing.scroll.floating_width = 3.0;
         style.spacing.scroll.bar_inner_margin = 3.0;
+        // The handle uses the text color; keep it a quiet hint until hovered.
+        style.spacing.scroll.dormant_handle_opacity = 0.25;
+        style.spacing.scroll.active_handle_opacity = 0.35;
+        style.spacing.scroll.interact_handle_opacity = 0.6;
         style
             .text_styles
             .insert(TextStyle::Body, FontId::proportional(BODY));
@@ -196,7 +202,12 @@ pub fn install(ctx: &egui::Context) {
         v.code_bg_color = p.soft;
         v.warn_fg_color = p.red;
         v.error_fg_color = p.red;
-        v.selection.bg_fill = p.selected;
+        // Accent tint: the neutral `selected` fill is invisible on white text areas.
+        v.selection.bg_fill = if v.dark_mode {
+            Color32::from_rgb(46, 78, 52)
+        } else {
+            Color32::from_rgb(208, 230, 212)
+        };
         v.selection.stroke = Stroke::new(1.0, p.text);
         for widget in [
             &mut v.widgets.noninteractive,
@@ -388,6 +399,12 @@ pub fn styled_button(p: Palette, text: &str, style: ButtonStyle) -> egui::Button
         .corner_radius(8)
 }
 
+/// A text action inside prose. Always underlined: links use the text color and would
+/// otherwise read as a plain sentence until hovered.
+pub fn action_link(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    ui.link(egui::RichText::new(text).underline())
+}
+
 pub fn section_caption(ui: &mut egui::Ui, text: &str) {
     ui.label(
         egui::RichText::new(text)
@@ -487,18 +504,30 @@ pub fn waveform(ui: &mut egui::Ui) {
 }
 
 pub fn nav_row(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response {
-    let p = Palette::of(ui);
     let response = ui.add_sized(
         [ui.available_width(), 34.0],
-        egui::Button::new("")
-            .fill(if selected {
-                p.selected
-            } else {
-                Color32::TRANSPARENT
-            })
-            .stroke(Stroke::NONE)
-            .corner_radius(6),
+        nav_button(Palette::of(ui), selected),
     );
+    nav_label(ui, response, text, selected)
+}
+/// The empty frame of a navigation row; `nav_label` paints its text.
+pub fn nav_button(p: Palette, selected: bool) -> egui::Button<'static> {
+    egui::Button::new("")
+        .fill(if selected {
+            p.selected
+        } else {
+            Color32::TRANSPARENT
+        })
+        .stroke(Stroke::NONE)
+        .corner_radius(6)
+}
+pub fn nav_label(
+    ui: &mut egui::Ui,
+    response: egui::Response,
+    text: &str,
+    selected: bool,
+) -> egui::Response {
+    let p = Palette::of(ui);
     if response.hovered() && !selected {
         ui.painter().rect_filled(response.rect, 6, p.hover);
     }
@@ -531,8 +560,10 @@ pub fn nav_row(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response 
 
 pub fn setting_row<R>(ui: &mut egui::Ui, label: &str, value: impl FnOnce(&mut egui::Ui) -> R) -> R {
     ui.scope(|ui| {
+        // The divider precedes the row, so a hint drawn right after a row stays in its group.
+        ui.separator();
         ui.spacing_mut().item_spacing.y = 3.0;
-        let result = if ui.available_width() < 440.0 {
+        if ui.available_width() < 440.0 {
             ui.label(label);
             ui.horizontal(value).inner
         } else {
@@ -548,9 +579,7 @@ pub fn setting_row<R>(ui: &mut egui::Ui, label: &str, value: impl FnOnce(&mut eg
                     .inner
             })
             .inner
-        };
-        ui.separator();
-        result
+        }
     })
     .inner
 }

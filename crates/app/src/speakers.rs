@@ -82,7 +82,14 @@ pub fn rename_menu(
             },
         );
     }
-    ui.menu_button("…", |ui| {
+    // Quiet, frameless: a framed 32px button outweighed the speaker name.
+    let more = crate::theme::styled_button(
+        crate::theme::Palette::of(ui),
+        "…",
+        crate::theme::ButtonStyle::Ghost,
+    )
+    .small();
+    egui::containers::menu::MenuButton::from_button(more).ui(ui, |ui| {
         let name_key = ui.make_persistent_id(("speaker-name", meta.id, id));
         let all_key = name_key.with("everywhere");
         let mut name = ui

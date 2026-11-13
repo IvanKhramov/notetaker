@@ -205,7 +205,8 @@ impl Panel {
                     ui.separator();
                     ui.vertical(|ui| {
                         ui.set_min_width((ui.available_width() - 8.0).min(470.0));
-                        ui.style_mut().spacing.scroll.floating = false;
+                        // A floating bar in its own lane: quiet like the rest, never over controls.
+                        ui.style_mut().spacing.scroll.floating_allocated_width = theme::SCROLL_LANE;
                         ui.heading(self.section.label());
                         ui.add_space(12.0);
                         egui::ScrollArea::vertical()
@@ -321,12 +322,6 @@ impl Panel {
             }
             Section::Recording => {
                 let settings = &mut state.settings_draft;
-                ui.collapsing("Для опытных", |ui| {
-                    theme::setting_row(ui, "Модель распознавания", |ui| {
-                        crate::ui::model_selector(ui, "settings_model", &mut settings.model);
-                    });
-                    hint(ui, "Выбранная модель загрузится автоматически.");
-                });
                 theme::setting_row(ui, "Режим новых встреч", |ui| {
                     egui::ComboBox::from_id_salt("settings_mode")
                         .selected_text(if settings.mode == notetaker_core::Mode::Local {
@@ -449,6 +444,12 @@ impl Panel {
                         });
                     },
                 );
+                ui.collapsing("Для опытных", |ui| {
+                    theme::setting_row(ui, "Модель распознавания", |ui| {
+                        crate::ui::model_selector(ui, "settings_model", &mut settings.model);
+                    });
+                    hint(ui, "Выбранная модель загрузится автоматически.");
+                });
                 ui.collapsing("Сохранённые голоса", |ui| {
                     if state.voices.voices.is_empty() {
                         hint(ui, "Голосов пока нет. Назовите участника в транскрипте.");

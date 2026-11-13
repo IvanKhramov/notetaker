@@ -168,12 +168,10 @@ impl NotetakerApp {
             self.state.tasks_open = false;
         }
         ui.add_space((ui.available_height() - 88.0).max(0.0));
-        egui::containers::menu::MenuButton::from_button(theme::styled_button(
-            Palette::of(ui),
-            "Ещё",
-            ButtonStyle::Ghost,
-        ))
-        .ui(ui, |ui| {
+        // Same look as the neighbouring nav rows: a ghost button here read as disabled.
+        let more = theme::nav_button(Palette::of(ui), false)
+            .min_size(egui::vec2(ui.available_width(), 34.0));
+        let (more, _) = egui::containers::menu::MenuButton::from_button(more).ui(ui, |ui| {
             ui.set_min_width(180.0);
             if theme::nav_row(ui, "Задачи", self.state.tasks_open).clicked() {
                 self.people.close();
@@ -193,6 +191,7 @@ impl NotetakerApp {
                 ui.close();
             }
         });
+        theme::nav_label(ui, more, "Ещё", false);
         if theme::nav_row(ui, "Настройки", self.show_settings).clicked() {
             self.show_settings = true;
         }

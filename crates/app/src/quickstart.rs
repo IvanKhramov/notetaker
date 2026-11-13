@@ -145,7 +145,7 @@ pub fn model_status(ui: &mut egui::Ui, state: &mut AppState) {
     } else if let Some(error) = state.quickstart.download_error.clone() {
         ui.horizontal_wrapped(|ui| {
             ui.colored_label(Palette::of(ui).red, error);
-            if ui.link("Повторить").clicked() {
+            if theme::action_link(ui, "Повторить").clicked() {
                 state.quickstart.retry_at = None;
             }
         });
@@ -278,6 +278,8 @@ impl Panel {
                     });
                 });
                 ui.add_space(8.0);
+                // Reserve the bar's lane so it never covers the right edge of fields.
+                ui.style_mut().spacing.scroll.floating_allocated_width = theme::SCROLL_LANE;
                 egui::ScrollArea::vertical().max_height((ctx.content_rect().height() - if self.step == 0 { 260.0 } else { 180.0 }).max(80.0))
                     .show(ui, |ui| {
                     match self.step {
@@ -301,7 +303,7 @@ impl Panel {
                             ui.small("Если нет доступа: Параметры → Конфиденциальность → Микрофон. Разрешите доступ приложениям.");
                             #[cfg(not(any(windows, target_os = "macos")))]
                             ui.small("Проверка и запись звука доступны на macOS и Windows.");
-                            if self.probe_status.is_some() && ui.link("Проверить ещё раз").clicked() { self.start_probe(state); }
+                            if self.probe_status.is_some() && theme::action_link(ui, "Проверить ещё раз").clicked() { self.start_probe(state); }
 
                         }
                         1 => {
@@ -325,7 +327,7 @@ impl Panel {
                                     });
                                     if let Some(error) = &state.quickstart.calendar_error { ui.colored_label(Palette::of(ui).red, error); }
                                 } else { ui.label("Календарь подключён"); }
-                                if ui.link("Пропустить календарь").clicked() { self.calendar_url.clear(); }
+                                if theme::action_link(ui, "Пропустить календарь").clicked() { self.calendar_url.clear(); }
                             });
                             egui::CollapsingHeader::new("AI для конспектов").show(ui, |ui| {
                                 ui.label("Текст встречи будет отправлен выбранному AI. Аудио останется на компьютере.");
@@ -353,7 +355,7 @@ impl Panel {
                         if check_audio && cfg!(any(windows, target_os = "macos")) { self.start_probe(state); }
                         else { next = true; }
                     }
-                    if ui.link("Пропустить").clicked() { next = true; }
+                    if theme::action_link(ui, "Пропустить").clicked() { next = true; }
                 });
             });
         if next {
