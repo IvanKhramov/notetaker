@@ -22,14 +22,14 @@ jobs:
         os: [windows-latest, ubuntu-latest, macos-15]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install the pinned Rust toolchain
         # Version, components and targets come from rust-toolchain.toml.
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           prefix-key: v2
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/sherpa-onnx-libs
           key: sherpa-onnx-libs-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
@@ -62,14 +62,14 @@ jobs:
         run: ./scripts/package-windows.ps1
       - name: Upload Windows applications
         if: runner.os == 'Windows'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: notetaker-windows-x64
           path: ${{ steps.package.outputs.payload }}
           if-no-files-found: error
       - name: Upload optional embedding worker
         if: runner.os == 'Windows'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: notetaker-windows-x64-embed
           path: |
@@ -96,7 +96,7 @@ jobs:
         run: ./scripts/check-installer.ps1 -SetupExe $env:SETUP_EXE
       - name: Upload Windows installer
         if: runner.os == 'Windows'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: notetaker-windows-x64-installer
           path: |
@@ -121,7 +121,7 @@ jobs:
         run: ./scripts/package-macos.sh --skip-build
       - name: Upload macOS applications
         if: runner.os == 'macOS'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: notetaker-macos-arm64
           path: |
