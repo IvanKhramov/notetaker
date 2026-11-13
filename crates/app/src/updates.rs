@@ -290,6 +290,18 @@ fn prepare(release: &Release) -> Result<Prepared> {
         .error_for_status()?
         .take(4096)
         .read_to_string(&mut checksum_text)?;
+    if let Some(key) = update::SIGNING_KEY {
+        // The checksum comes from the same release as the installer; only the
+        // signature shows that the release owner produced it.
+        let mut signature = String::new();
+        client
+            .get(&release.signature(checksum)?.browser_download_url)
+            .send()?
+            .error_for_status()?
+            .take(1024)
+            .read_to_string(&mut signature)?;
+        update::verify_signature(key, checksum_text.as_bytes(), &signature)?;
+    }
     let mut response = client
         .get(&installer.browser_download_url)
         .send()?

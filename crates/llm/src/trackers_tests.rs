@@ -70,7 +70,9 @@ impl Mock {
 
 struct Store;
 impl CredentialStore for Store {
-    fn read(&self, _: &str) -> Result<String> {
+    fn read(&self, id: &str) -> Result<String> {
+        // No saved origin: a key from before the origin binding.
+        anyhow::ensure!(!id.starts_with("tracker-origin/"), "no entry");
         Ok("test-key".into())
     }
     fn write(&self, _: &str, _: &str) -> Result<()> {
@@ -289,6 +291,50 @@ fn kaiten_destinations_use_bearer_and_explicit_pagination() {
     );
 }
 
+#[derive(Default)]
+struct MemoryStore(std::sync::Mutex<std::collections::HashMap<String, String>>);
+impl CredentialStore for MemoryStore {
+    fn read(&self, id: &str) -> Result<String> {
+        self.0
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("no entry"))
+    }
+    fn write(&self, id: &str, value: &str) -> Result<()> {
+        self.0.lock().unwrap().insert(id.into(), value.into());
+        Ok(())
+    }
+}
+#[test]
+fn tracker_key_is_released_only_to_the_origin_it_was_saved_for() {
+    let store = MemoryStore::default();
+    let mut config = TrackerConfig {
+        kind: TrackerKind::Kaiten,
+        base_url: "https://kaiten.example.org/".into(),
+        credential_id: "work".into(),
+        ..Default::default()
+    };
+    save_secret(&config, "token", &store).unwrap();
+    assert_eq!(secret_for(&config, &store).unwrap(), "token");
+    // A path change stays on the same origin.
+    config.base_url = "https://kaiten.example.org/api".into();
+    assert_eq!(secret_for(&config, &store).unwrap(), "token");
+    // Another member of a shared library points the folder at their own host.
+    config.base_url = "https://attacker.example.net".into();
+    let error = secret_for(&config, &store).unwrap_err().to_string();
+    assert!(error.contains("Адрес трекера изменился"));
+    assert!(!error.contains("token"));
+
+    // A key saved before the binding existed is bound by its first use.
+    let legacy = MemoryStore::default();
+    legacy.write("tracker/work", "token").unwrap();
+    config.base_url = "https://kaiten.example.org".into();
+    assert_eq!(secret_for(&config, &legacy).unwrap(), "token");
+    config.base_url = "https://attacker.example.net".into();
+    assert!(secret_for(&config, &legacy).is_err());
+}
 #[test]
 fn shared_tracker_configuration_rejects_url_credentials_and_query_secrets() {
     for url in [

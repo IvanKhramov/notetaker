@@ -40,6 +40,10 @@ pub struct NotetakerApp {
     image_viewer: Option<String>,
     /// Asks before a regenerated summary replaces one the user edited by hand.
     confirm_regenerate: bool,
+    /// New title being typed in the rename dialog.
+    rename: Option<String>,
+    confirm_delete: bool,
+    import_picker: Option<std::sync::mpsc::Receiver<Option<std::path::PathBuf>>>,
     enhanced_preview: bool,
     show_record: bool,
     show_settings: bool,
@@ -78,6 +82,9 @@ impl NotetakerApp {
             cache: CommonMarkCache::default(),
             image_viewer: None,
             confirm_regenerate: false,
+            rename: None,
+            confirm_delete: false,
+            import_picker: None,
             enhanced_preview: true,
             indicator: IndicatorPosition::load(),
             show_record: false,
@@ -216,10 +223,38 @@ impl NotetakerApp {
                 self.state.refresh();
                 ui.close();
             }
+            if ui
+                .add_enabled(
+                    self.import_picker.is_none() && self.can_record(),
+                    egui::Button::new("Импортировать запись…"),
+                )
+                .on_hover_text("Аудио или видео с диска: будет распознано как новая встреча")
+                .clicked()
+            {
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.import_picker = Some(rx);
+                let ctx = ui.ctx().clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(rfd::FileDialog::new().pick_file());
+                    ctx.request_repaint();
+                });
+                ui.close();
+            }
             if self.maintenance.check_updates_button(ui) {
                 ui.close();
             }
         });
+        if let Some(picked) = self
+            .import_picker
+            .as_ref()
+            .and_then(|picker| picker.try_recv().ok())
+        {
+            self.import_picker = None;
+            if let Some(file) = picked {
+                self.home = false;
+                self.state.import_recording(file);
+            }
+        }
         theme::nav_label(ui, more, "Ещё", false);
         if theme::nav_row(ui, "Настройки", self.show_settings).clicked() {
             self.show_settings = true;
@@ -443,7 +478,7 @@ impl NotetakerApp {
                 let busy = self.state.recording.busy();
                 if busy {
                     if phase == Phase::Recording {
-                        theme::waveform(ui);
+                        theme::waveform(ui, self.state.recording.level());
                     } else {
                         ui.spinner();
                     }
@@ -523,6 +558,8 @@ impl NotetakerApp {
                                     }
                                     None => "Завершаю запись…".to_owned(),
                                 }
+                            } else if let Some(notice) = self.state.recording.silence_notice() {
+                                notice.to_owned()
                             } else if busy {
                                 "Идёт запись. Чат доступен после неё.".to_owned()
                             } else if note || (self.chat_page && self.state.chat.scope.is_some()) {
@@ -809,6 +846,7 @@ impl NotetakerApp {
             DocumentAction::EditSummary => can_edit_summary,
             DocumentAction::Regenerate => can_enhance,
             DocumentAction::SendTasks => can_send,
+            DocumentAction::Rename | DocumentAction::Delete => can_enhance && !locked,
             _ => true,
         };
         ui.horizontal(|ui| {
@@ -863,6 +901,8 @@ impl NotetakerApp {
                                 .header(ui, &document.data.meta, !locked && can_enhance);
                     });
                     row(ui, DocumentAction::ExportSummary);
+                    row(ui, DocumentAction::Rename);
+                    row(ui, DocumentAction::Delete);
                     ui.menu_button("Экспорт транскрипта", |ui| {
                         for (format, label) in [
                             (notetaker_core::ExportFormat::Md, "Markdown"),
@@ -952,6 +992,8 @@ impl NotetakerApp {
                     text: document.data.enhanced.clone(),
                 })
             }
+            Some(DocumentAction::Rename) => self.rename = Some(document.data.meta.title.clone()),
+            Some(DocumentAction::Delete) => self.confirm_delete = true,
             None => {}
         }
         ui.add_space(24.0);
@@ -1237,6 +1279,68 @@ impl NotetakerApp {
         if retranscribe {
             self.state.retranscribe(&path);
         }
+        if let Some(title) = &mut self.rename {
+            let mut save = false;
+            let mut cancel = false;
+            let closed = theme::window(ui.ctx(), "Переименовать встречу")
+                .default_width(420.0)
+                .resizable(false)
+                .show(ui.ctx(), |ui| {
+                    let field = ui.add(
+                        egui::TextEdit::singleline(title)
+                            .desired_width(f32::INFINITY)
+                            .hint_text("Название встречи"),
+                    );
+                    if !field.has_focus() && !field.lost_focus() {
+                        field.request_focus();
+                    }
+                    save = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        save |= ui
+                            .add_enabled(
+                                !title.trim().is_empty(),
+                                theme::styled_button(
+                                    Palette::of(ui),
+                                    "Сохранить",
+                                    ButtonStyle::Primary,
+                                ),
+                            )
+                            .clicked();
+                        cancel = theme::button(ui, "Отмена", ButtonStyle::Secondary).clicked();
+                    });
+                });
+            if save && !title.trim().is_empty() {
+                let title = std::mem::take(title);
+                self.state.rename_meeting(&path, &title);
+                self.rename = None;
+            } else if cancel || closed {
+                self.rename = None;
+            }
+        }
+        if self.confirm_delete {
+            let mut delete = false;
+            let mut keep = false;
+            let closed = theme::window(ui.ctx(), "Удалить встречу?")
+                .default_width(420.0)
+                .resizable(false)
+                .show(ui.ctx(), |ui| {
+                    ui.label(
+                        "Встреча исчезнет из списка и поиска. Её файлы, включая аудио, переедут в папку .trash внутри библиотеки: оттуда их можно вернуть или стереть вручную.",
+                    );
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        delete = theme::button(ui, "Удалить", ButtonStyle::Primary).clicked();
+                        keep = theme::button(ui, "Отмена", ButtonStyle::Secondary).clicked();
+                    });
+                });
+            if delete {
+                self.state.trash_meeting(&path);
+            }
+            if delete || keep || closed {
+                self.confirm_delete = false;
+            }
+        }
         if self.confirm_regenerate {
             let mut regenerate = false;
             let mut keep = false;
@@ -1496,7 +1600,11 @@ impl NotetakerApp {
                 .with_window_level(egui::WindowLevel::AlwaysOnTop)
                 .with_active(false),
             |ui, _| {
-                (open, stop) = recording_pill(ui, self.state.recording.elapsed());
+                (open, stop) = recording_pill(
+                    ui,
+                    self.state.recording.elapsed(),
+                    self.state.recording.level(),
+                );
                 ui.input(|input| {
                     if let Some(rect) = input.viewport().outer_rect
                         && !input.pointer.primary_down()
@@ -1828,7 +1936,7 @@ impl eframe::App for NotetakerApp {
     }
 }
 /// A click opens the main window; dragging any part except Stop moves the pill.
-fn recording_pill(ui: &mut egui::Ui, elapsed: Duration) -> (bool, bool) {
+fn recording_pill(ui: &mut egui::Ui, elapsed: Duration, level: f32) -> (bool, bool) {
     let p = Palette::of(ui);
     let background = ui.interact(
         ui.max_rect(),
@@ -1845,7 +1953,7 @@ fn recording_pill(ui: &mut egui::Ui, elapsed: Duration) -> (bool, bool) {
         .show(ui, |ui| {
             ui.set_min_width(218.0);
             ui.horizontal(|ui| {
-                theme::waveform(ui);
+                theme::waveform(ui, level);
                 ui.add(egui::Label::new(timestamp(elapsed.as_millis() as u64)).selectable(false));
                 ui.add_space(16.0);
                 stop = theme::button(ui, "Стоп", ButtonStyle::Stop).clicked();
@@ -2626,7 +2734,8 @@ mod tests {
                     egui::CentralPanel::default()
                         .frame(egui::Frame::NONE)
                         .show(root, |ui| {
-                            result = super::recording_pill(ui, std::time::Duration::from_secs(48));
+                            result =
+                                super::recording_pill(ui, std::time::Duration::from_secs(48), 0.3);
                         });
                 },
             );

@@ -60,6 +60,11 @@ pub enum PipelineEvent {
         seconds: f64,
     },
     LiveDisabled,
+    /// Peak amplitude (0..1) of each channel since the previous report, about four times a second.
+    Levels {
+        mic: f32,
+        system: f32,
+    },
     /// Capture stopped for silence; final transcription and Finished follow.
     AutoStopped,
     CaptureEvent(CaptureEvent),
@@ -398,6 +403,8 @@ fn record(
         // A capture or disk error ends the recording, but the audio written so far is
         // still finalized and recognized. Skipping that left an unreadable opus file.
         let mut failure: Option<anyhow::Error> = None;
+        let mut levels = [0f32; 2];
+        let mut levels_at = Duration::ZERO;
         loop {
             if stop.0.load(Ordering::Acquire) {
                 explicit_end = Some(sample_position(origin.elapsed()));
@@ -424,6 +431,11 @@ fn record(
                 Ok(message) => {
                     if let CaptureMessage::Frame(frame) = &message {
                         silence.observe(origin.elapsed(), frame);
+                        let level = &mut levels[channel_index(frame.channel)];
+                        *level = frame
+                            .samples
+                            .iter()
+                            .fold(*level, |peak, sample| peak.max(sample.abs()));
                     }
                     if let Err(error) = capture(
                         message,
@@ -439,6 +451,11 @@ fn record(
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+            if origin.elapsed().saturating_sub(levels_at) >= Duration::from_millis(250) {
+                levels_at = origin.elapsed();
+                let [mic, system] = std::mem::take(&mut levels);
+                let _ = events.send(PipelineEvent::Levels { mic, system });
             }
             if silence.expired(origin.elapsed())
                 && stop

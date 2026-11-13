@@ -49,6 +49,10 @@ pub struct Recording {
     pub capture_incomplete: bool,
     pub progress: Option<(usize, usize)>,
     pub messages: VecDeque<String>,
+    /// Latest peak of the microphone and of the system audio, 0..1.
+    pub levels: [f32; 2],
+    /// Since when each channel has delivered digital silence.
+    silent_since: [Option<Instant>; 2],
     audio_warnings: AudioWarnings,
 }
 impl Recording {
@@ -59,6 +63,27 @@ impl Recording {
         self.stopped
             .unwrap_or_else(|| self.started.map_or(Duration::ZERO, |start| start.elapsed()))
     }
+    /// Loudest channel right now, for the recording indicator.
+    pub fn level(&self) -> f32 {
+        self.levels[0].max(self.levels[1])
+    }
+    /// What to tell the user when a channel stays silent during a recording.
+    pub fn silence_notice(&self) -> Option<&'static str> {
+        if self.phase != Phase::Recording {
+            return None;
+        }
+        let silent = |channel: usize, seconds: u64| {
+            self.silent_since[channel]
+                .is_some_and(|since| since.elapsed() >= Duration::from_secs(seconds))
+        };
+        // A live microphone always carries room noise; other people may be quiet for a while.
+        match (silent(0, 20), silent(1, 120)) {
+            (true, true) => Some("Звука нет. Проверьте микрофон и звук компьютера."),
+            (true, false) => Some("Микрофон не даёт звука. Проверьте его в системе."),
+            (false, true) => Some("Давно не слышно собеседников."),
+            (false, false) => None,
+        }
+    }
     pub fn message(&mut self, text: String) {
         if self.messages.len() == 8 {
             self.messages.pop_front();
@@ -68,6 +93,17 @@ impl Recording {
     pub fn apply(&mut self, event: &PipelineEvent) {
         match event {
             PipelineEvent::Lag { seconds } => self.lag = *seconds,
+            PipelineEvent::Levels { mic, system } => {
+                self.levels = [*mic, *system];
+                for (level, since) in self.levels.iter().zip(&mut self.silent_since) {
+                    // About -66 dBFS: below any real microphone noise floor.
+                    if *level > 0.0005 {
+                        *since = None;
+                    } else {
+                        since.get_or_insert_with(Instant::now);
+                    }
+                }
+            }
             PipelineEvent::LiveDisabled => self.live_disabled = true,
             PipelineEvent::Warning(message) => self.message(message.clone()),
             PipelineEvent::CaptureIssue(issue) => {
@@ -879,7 +915,6 @@ impl AppState {
             cancel: self.chat.cancel.clone(),
         });
     }
-    #[allow(dead_code)] // Retained backend; this feature is no longer exposed in the UI.
     pub fn import_recording(&mut self, file: PathBuf) {
         if !self.ready
             || self
@@ -907,6 +942,39 @@ impl AppState {
             ..Recording::default()
         };
         self.send(Command::Import { settings, file });
+    }
+    fn meeting_idle(&self, path: &std::path::Path) -> bool {
+        self.ready
+            && !self.recording.busy()
+            && self.enhancing.is_none()
+            && !self.settings_pending
+            && !self.unsaved()
+            && self
+                .documents
+                .get(path)
+                .is_some_and(|doc| !doc.saving && !doc.speaker_ui.recalculating)
+    }
+    pub fn rename_meeting(&mut self, path: &std::path::Path, title: &str) {
+        let title = title.trim();
+        if title.is_empty() || !self.meeting_idle(path) {
+            return;
+        }
+        let meeting = self.documents[path].data.meeting.clone();
+        self.send(Command::Rename {
+            meeting,
+            title: title.to_owned(),
+        });
+    }
+    /// Moves the meeting to the library's `.trash` folder; nothing is erased.
+    pub fn trash_meeting(&mut self, path: &std::path::Path) {
+        if !self.meeting_idle(path) {
+            return;
+        }
+        let meeting = self.documents[path].data.meeting.clone();
+        self.send(Command::Trash {
+            root: self.settings.library.clone(),
+            meeting,
+        });
     }
     /// Finishes an interrupted meeting from its saved audio.
     pub fn retranscribe(&mut self, path: &std::path::Path) {
@@ -1686,6 +1754,30 @@ impl AppState {
                     self.error = Some(error);
                 }
             }
+            Event::Renamed { path, result } => match result {
+                Ok(title) => {
+                    if let Some(document) = self.documents.get_mut(&path) {
+                        document.data.meta.title = title;
+                    }
+                    self.refresh();
+                }
+                Err(error) => self.error = Some(error),
+            },
+            Event::Trashed { path, result } => match result {
+                Ok(()) => {
+                    self.documents.remove(&path);
+                    if self.selected.as_ref() == Some(&path) {
+                        self.selected = None;
+                    }
+                    self.notices.push((
+                        crate::theme::ToastLevel::Success,
+                        "Встреча удалена из списка. Её файлы лежат в папке .trash библиотеки."
+                            .into(),
+                    ));
+                    self.refresh();
+                }
+                Err(error) => self.error = Some(error),
+            },
             Event::Exported(result) => match result {
                 Ok(path) => self.exported.push_back(path),
                 Err(error) => self.error = Some(error),
@@ -3141,6 +3233,31 @@ mod tests {
         assert!(doc.summary_stale());
         doc.template = "general".into();
         assert!(!doc.summary_stale());
+    }
+    #[test]
+    fn silent_channels_are_reported_only_while_recording() {
+        let mut recording = Recording {
+            phase: Phase::Recording,
+            ..Recording::default()
+        };
+        recording.apply(&PipelineEvent::Levels {
+            mic: 0.0,
+            system: 0.2,
+        });
+        assert_eq!(recording.level(), 0.2);
+        assert!(recording.silence_notice().is_none());
+        // The microphone has been flat for longer than room noise would allow.
+        recording.silent_since[0] = Instant::now().checked_sub(Duration::from_secs(21));
+        assert!(recording.silence_notice().unwrap().contains("Микрофон"));
+        recording.apply(&PipelineEvent::Levels {
+            mic: 0.01,
+            system: 0.0,
+        });
+        assert!(recording.silence_notice().is_none());
+        recording.silent_since[1] = Instant::now().checked_sub(Duration::from_secs(121));
+        assert!(recording.silence_notice().unwrap().contains("собеседников"));
+        recording.phase = Phase::Finalizing;
+        assert!(recording.silence_notice().is_none());
     }
     #[test]
     fn interrupted_meeting_is_flagged_and_sent_for_recognition() {

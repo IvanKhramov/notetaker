@@ -63,6 +63,39 @@ fn base(config: &TrackerConfig) -> Result<String> {
     );
     Ok(config.base_url.trim_end_matches('/').to_owned())
 }
+fn origin(config: &TrackerConfig) -> Result<String> {
+    Ok(reqwest::Url::parse(&base(config)?)?
+        .origin()
+        .ascii_serialization())
+}
+/// Saves a tracker key together with the origin it is meant for. The key name and
+/// the address live in a shared folder file that other members can edit, so the
+/// address the key was entered for is remembered locally, next to the key.
+pub fn save_secret(
+    config: &TrackerConfig,
+    secret: &str,
+    store: &dyn CredentialStore,
+) -> Result<()> {
+    ensure!(!config.credential_id.is_empty(), "Укажите имя ключа");
+    let origin = origin(config)?;
+    store.write(&format!("tracker/{}", config.credential_id), secret)?;
+    store.write(&format!("tracker-origin/{}", config.credential_id), &origin)
+}
+/// Reads a tracker key only for the origin it was saved for.
+fn secret_for(config: &TrackerConfig, store: &dyn CredentialStore) -> Result<String> {
+    let secret = store.read(&format!("tracker/{}", config.credential_id))?;
+    let origin = origin(config)?;
+    let binding = format!("tracker-origin/{}", config.credential_id);
+    match store.read(&binding) {
+        Ok(saved) => ensure!(
+            saved == origin,
+            "Адрес трекера изменился после сохранения ключа: был {saved}, стал {origin}. Если это ваше изменение, введите ключ заново в настройках папки."
+        ),
+        // Keys saved before the binding existed are bound on their first use.
+        Err(_) => store.write(&binding, &origin)?,
+    }
+    Ok(secret)
+}
 /// Reject embedded URL credentials before configuration enters a shared file.
 pub fn validate_config(config: &TrackerConfig) -> Result<()> {
     base(config)?;
@@ -298,7 +331,7 @@ pub fn send(
     let secret = if config.credential_id.is_empty() {
         None
     } else {
-        Some(store.read(&format!("tracker/{}", config.credential_id))?)
+        Some(secret_for(config, store)?)
     };
     ensure!(
         config.kind == TrackerKind::Webhook || secret.is_some(),
@@ -385,7 +418,7 @@ pub fn kaiten_destinations(
     store: &dyn CredentialStore,
 ) -> Result<KaitenDestinations> {
     let root = base(config)?;
-    let token = store.read(&format!("tracker/{}", config.credential_id))?;
+    let token = secret_for(config, store)?;
     let client = Client::builder()
         .timeout(Duration::from_secs(20))
         .redirect(reqwest::redirect::Policy::none())

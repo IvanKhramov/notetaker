@@ -425,11 +425,12 @@ impl Panel {
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let result = (|| {
-                use notetaker_llm::CredentialStore;
                 if !secret.is_empty() {
-                    anyhow::ensure!(!config.credential_id.is_empty(), "Укажите имя ключа");
-                    notetaker_llm::OsCredentialStore
-                        .write(&format!("tracker/{}", config.credential_id), &secret)?;
+                    notetaker_llm::trackers::save_secret(
+                        &config,
+                        &secret,
+                        &notetaker_llm::OsCredentialStore,
+                    )?;
                 }
                 notetaker_llm::trackers::kaiten_destinations(
                     &config,
@@ -637,18 +638,14 @@ impl Panel {
                                         notetaker_llm::trackers::validate_config(c)?;
                                     }
                                     if !secret.is_empty() {
-                                        use notetaker_llm::CredentialStore;
                                         let c = settings
                                             .tracker
                                             .as_ref()
                                             .ok_or_else(|| anyhow::anyhow!("Выберите трекер"))?;
-                                        anyhow::ensure!(
-                                            !c.credential_id.is_empty(),
-                                            "Укажите имя ключа"
-                                        );
-                                        notetaker_llm::OsCredentialStore.write(
-                                            &format!("tracker/{}", c.credential_id),
+                                        notetaker_llm::trackers::save_secret(
+                                            c,
                                             &secret,
+                                            &notetaker_llm::OsCredentialStore,
                                         )?;
                                     }
                                     if !old.is_empty() && old != name {

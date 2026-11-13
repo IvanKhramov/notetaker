@@ -48,7 +48,7 @@ impl NotetakerApp {
         if screen == 5 { app.state.tab = Tab::Transcript; }
         app
     }
-    pub fn pill(ui: &mut egui::Ui) { recording_pill(ui, Duration::from_secs(123)); }
+    pub fn pill(ui: &mut egui::Ui) { recording_pill(ui, Duration::from_secs(123), 0.3); }
 }
 '''
     if path.stem in {"ui", "state", "quickstart"}:
