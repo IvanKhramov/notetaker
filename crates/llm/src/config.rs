@@ -130,7 +130,7 @@ impl Config {
         for id in [&config.defaults.local, &config.defaults.hybrid] {
             ensure!(
                 config.providers.iter().any(|provider| &provider.id == id),
-                "selected LLM provider is not configured"
+                "AI для этого режима не выбран. Откройте «Настройки → AI»."
             );
         }
         for choice in [
@@ -198,7 +198,7 @@ impl Config {
             .providers
             .iter()
             .find(|provider| provider.id == id)
-            .context("selected LLM provider is not configured")?;
+            .context("AI для этого режима не выбран. Откройте «Настройки → AI».")?;
         provider.validate(mode)?;
         Ok(provider)
     }
@@ -245,7 +245,7 @@ impl ProviderConfig {
                 || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback());
             if !loopback {
                 bail!(
-                    "local-only meeting requires a loopback LLM provider (localhost, 127.0.0.1 or ::1)"
+                    "Встреча в режиме Local: нужен локальный AI (localhost). Переключите встречу в Hybrid или настройте локальный AI."
                 );
             }
         }

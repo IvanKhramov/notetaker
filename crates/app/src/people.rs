@@ -591,6 +591,9 @@ impl Panel {
             ui.label(&self.brief);
             if ui.button("Копировать сводку").clicked() {
                 ui.ctx().copy_text(self.brief.clone());
+                state
+                    .notices
+                    .push((theme::ToastLevel::Success, "Сводка скопирована".into()));
             }
         }
         let mut open = None;
@@ -814,6 +817,9 @@ impl Panel {
             ui.horizontal(|ui| {
                 if ui.button("Копировать").clicked() {
                     ui.ctx().copy_text(digest.markdown.clone());
+                    state
+                        .notices
+                        .push((theme::ToastLevel::Success, "Дайджест скопирован".into()));
                 }
                 if ui.button("Показать в папке").clicked() {
                     state.send(Command::Reveal(path.clone()));

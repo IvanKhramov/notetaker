@@ -244,6 +244,15 @@ impl Default for Settings {
     }
 }
 
+/// Keeps a rejected config next to the original. The app then runs on defaults, and
+/// the next settings save would otherwise overwrite the user's file for good.
+pub fn keep_broken(path: &Path) -> Option<PathBuf> {
+    let mut name = path.file_name()?.to_owned();
+    name.push(".broken");
+    let copy = path.with_file_name(name);
+    fs::copy(path, &copy).ok().map(|_| copy)
+}
+
 impl Settings {
     pub fn path() -> Result<PathBuf> {
         Ok(ProjectDirs::from("", "", "notetaker")

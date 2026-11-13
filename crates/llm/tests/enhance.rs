@@ -200,7 +200,7 @@ fn local_only_guard_also_prevents_custom_provider_invocation() {
         &mut |_| {},
     )
     .unwrap_err();
-    assert!(error.to_string().contains("local-only"));
+    assert!(error.to_string().contains("нужен локальный AI"));
     assert!(provider.calls.lock().unwrap().is_empty());
 }
 
@@ -216,7 +216,7 @@ fn oversized_notes_fail_before_provider_invocation() {
         &mut |_| {},
     )
     .unwrap_err();
-    assert!(error.to_string().contains("too small"));
+    assert!(error.to_string().contains("не помещается в контекст"));
     assert!(provider.calls.lock().unwrap().is_empty());
 }
 

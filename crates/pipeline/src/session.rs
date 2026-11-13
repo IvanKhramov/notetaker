@@ -367,19 +367,25 @@ fn record(
         }
         drop(tx);
         let mut explicit_end = None;
+        // A capture or disk error ends the recording, but the audio written so far is
+        // still finalized and recognized. Skipping that left an unreadable opus file.
+        let mut failure: Option<anyhow::Error> = None;
         loop {
             if stop.0.load(Ordering::Acquire) {
                 explicit_end = Some(sample_position(origin.elapsed()));
                 sources.stop(events);
                 for message in rx.try_iter() {
-                    capture(
+                    if let Err(error) = capture(
                         message,
                         meeting,
                         &mut tracks,
                         &queue,
                         &jobs_tx,
                         &mut stopped,
-                    )?;
+                    ) {
+                        failure.get_or_insert(error);
+                        break;
+                    }
                 }
                 break;
             }
@@ -391,14 +397,17 @@ fn record(
                     if let CaptureMessage::Frame(frame) = &message {
                         silence.observe(origin.elapsed(), frame);
                     }
-                    capture(
+                    if let Err(error) = capture(
                         message,
                         meeting,
                         &mut tracks,
                         &queue,
                         &jobs_tx,
                         &mut stopped,
-                    )?;
+                    ) {
+                        failure = Some(error);
+                        break;
+                    }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -421,15 +430,19 @@ fn record(
             .unwrap_or(0)
             .max(explicit_end.unwrap_or(0));
         for track in &mut tracks {
-            track.pad_to(end, queue.enabled.load(Ordering::Acquire), |c| {
+            if let Err(error) = track.pad_to(end, queue.enabled.load(Ordering::Acquire), |c| {
                 queue.enqueue(c, &jobs_tx)
-            })?;
+            }) {
+                failure.get_or_insert(error);
+            }
             track
                 .chunker
                 .flush(track.channel, |c| queue.enqueue(c, &jobs_tx));
         }
         for track in tracks {
-            track.finish()?;
+            if let Err(error) = track.finish() {
+                failure.get_or_insert(error);
+            }
         }
         let mut meta = meeting.read_meta()?;
         meta.ended_at = Some(ended);
@@ -445,7 +458,7 @@ fn record(
         jobs_tx
             .send(Job::Final(wavs.clone()))
             .context("ASR thread stopped")?;
-        Ok(())
+        failure.map_or(Ok(()), Err)
     })();
     drop(jobs_tx);
     let recognized = asr_handle
@@ -602,7 +615,12 @@ impl<A: Asr> Recognizer<A> {
                 self.asr.transcribe(input.clone(), channel, offset)
             })();
             match result {
-                Ok(segments) => return Ok(segments),
+                Ok(segments) => {
+                    // One restart per failure, not per session: crashes an hour apart
+                    // must not cost the final pass.
+                    self.restarted = false;
+                    return Ok(segments);
+                }
                 Err(error) => {
                     let message = format!("ASR: {error:#}");
                     let _ = queue.events.send(PipelineEvent::Error(message.clone()));
@@ -644,7 +662,9 @@ fn run_asr(
                     ) {
                         Ok(segments) if queue.enabled.load(Ordering::Acquire) => {
                             let mut segments = convert(segments, chunk.channel, Source::Live);
-                            meeting.update_transcript(|transcript| {
+                            // The final pass rewrites these segments, so a failed live
+                            // write must not stop recognition for the rest of the meeting.
+                            let saved = meeting.update_transcript(|transcript| {
                                 transcript.segments.extend(segments.clone());
                                 sort(&mut transcript.segments);
                                 crate::echo::suppress_echo(&mut transcript.segments);
@@ -654,8 +674,18 @@ fn run_asr(
                                         .iter()
                                         .any(|retained| retained.id == segment.id)
                                 });
-                            })?;
-                            let _ = queue.events.send(PipelineEvent::LiveSegments(segments));
+                            });
+                            match saved {
+                                Ok(()) => {
+                                    let _ =
+                                        queue.events.send(PipelineEvent::LiveSegments(segments));
+                                }
+                                Err(error) => {
+                                    let _ = queue.events.send(PipelineEvent::Warning(format!(
+                                        "Не удалось сохранить текст во время записи: {error}"
+                                    )));
+                                }
+                            }
                         }
                         Ok(_) => {}
                         Err(_) => queue.disable(),

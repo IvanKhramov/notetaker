@@ -173,7 +173,7 @@ fn enhance_with_warnings(
         .unwrap_or(0);
     let capacity = config.context_tokens.checked_sub(output_tokens + fixed)
         .filter(|capacity| *capacity > 16)
-        .context("LLM context_tokens is too small for the template, metadata, user notes and output; increase it or shorten notes/template")?;
+        .context("Встреча не помещается в контекст модели. Сократите заметки или выберите модель с большим контекстом.")?;
     // Leave one token for rounding at the evidence boundary.
     let evidence_chars = capacity.saturating_sub(1).saturating_mul(3);
     let evidence = transcript_text(transcript, evidence_chars)?;

@@ -50,7 +50,8 @@ Microphone и System Audio Recording. После этого показывает
 подзаголовки 18/21, заголовки 26/32. Это наша адаптация читаемого интерфейса,
 не измеренные размеры Granola. Именованные размеры заданы в `theme.rs`.
 «Общие → Масштаб интерфейса» и Ctrl+= / Ctrl+- / Ctrl+0 сохраняют масштаб.
-Превью реального egui: `python3 scripts/render-onboarding.py`, результаты
+Превью реального egui: `python3 scripts/render-onboarding.py` (нужны `xvfb-run`,
+`libxkbcommon-x11-0` и программный OpenGL), результаты
 в `target/onboarding-previews`, галерея `index.html`: 84 PNG, светлая/тёмная
 темы, 1280×800 и 960×640, также 150% в маленьком окне. Подключения показаны
 и в раскрытом виде. Это Linux-рендер с fixture-данными, без аудио, загрузок

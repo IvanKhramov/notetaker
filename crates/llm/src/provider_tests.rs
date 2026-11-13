@@ -236,7 +236,7 @@ fn local_only_rejects_remote_before_reading_key_or_connecting() {
             .err()
             .unwrap()
             .to_string();
-        assert!(error.contains("local-only"));
+        assert!(error.contains("нужен локальный AI"));
     }
 }
 

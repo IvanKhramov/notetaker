@@ -222,7 +222,7 @@ pub fn count_control(
             response.on_disabled_hover_text(reason);
         }
         if document.speaker_ui.recalculating {
-            ui.weak("Пересчитываю спикеров…");
+            ui.weak("Пересчитываю собеседников…");
         }
     });
     if let Some(count) = document.speaker_ui.pending_count {
@@ -257,7 +257,24 @@ pub fn controls(
 ) -> Option<SpeakerEdit> {
     let mut edit = None;
     let timeline = transcript.speaker_timeline();
-    ui.horizontal_wrapped(|ui| {
+    // With a single speaker the menu would open empty.
+    if timeline.speakers.len() >= 2 {
+        ui.horizontal_wrapped(|ui| {
+            merge_menu(ui, &timeline, &mut edit);
+        });
+    }
+    if state.undo.is_none() && state.selected.is_empty() {
+        return edit;
+    }
+    selection_controls(ui, transcript, meta, state, &timeline, edit)
+}
+
+fn merge_menu(
+    ui: &mut egui::Ui,
+    timeline: &notetaker_core::SpeakerTimeline,
+    edit: &mut Option<SpeakerEdit>,
+) {
+    {
         egui::containers::menu::MenuButton::from_button(crate::theme::styled_button(
             crate::theme::Palette::of(ui),
             "Объединить собеседников…",
@@ -268,7 +285,7 @@ pub fn controls(
                 ui.menu_button(&speaker.name, |ui| {
                     for other in &timeline.speakers {
                         if other.id != speaker.id && ui.button(&other.name).clicked() {
-                            edit = Some(SpeakerEdit::Merge {
+                            *edit = Some(SpeakerEdit::Merge {
                                 from: speaker.id.clone(),
                                 into: other.id.clone(),
                             });
@@ -278,10 +295,17 @@ pub fn controls(
                 });
             }
         });
-    });
-    if state.undo.is_none() && state.selected.is_empty() {
-        return edit;
     }
+}
+
+fn selection_controls(
+    ui: &mut egui::Ui,
+    transcript: &Transcript,
+    meta: &MeetingMeta,
+    state: &mut SpeakerUi,
+    timeline: &notetaker_core::SpeakerTimeline,
+    mut edit: Option<SpeakerEdit>,
+) -> Option<SpeakerEdit> {
     ui.horizontal_wrapped(|ui| {
         if let Some(undo) = &state.undo
             && ui.button("Отменить объединение").clicked()
@@ -310,7 +334,7 @@ pub fn controls(
                         assign(ui, speaker.id.clone(), None);
                     }
                 }
-                if ui.button("Новый спикер").clicked() {
+                if ui.button("Новый собеседник").clicked() {
                     assign(ui, transcript.new_speaker_id(), None);
                 }
                 if let Some(event) = &meta.calendar_event {

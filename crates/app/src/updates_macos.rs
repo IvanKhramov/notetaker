@@ -60,9 +60,10 @@ impl Updates {
                         .send()?
                         .error_for_status()?
                         .json()?;
-                    Ok(release
-                        .newer_than(env!("CARGO_PKG_VERSION"))?
-                        .then_some(release))
+                    Ok(
+                        (release.newer_than(env!("CARGO_PKG_VERSION"))? && release.dmg().is_ok())
+                            .then_some(release),
+                    )
                 })();
                 let _ = tx.send(release);
                 ctx.request_repaint();
