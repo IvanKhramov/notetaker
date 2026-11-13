@@ -46,14 +46,21 @@ pub struct DocumentData {
     pub enhanced: String,
     pub transcript: Transcript,
     pub revisions: Revisions,
+    /// The recording or its final pass did not finish and the audio is still on disk.
+    pub unfinished: bool,
 }
 impl DocumentData {
     pub fn read(meeting: Meeting) -> Result<Self> {
         let notes = meeting.load_notes()?;
         let enhanced = meeting.load_enhanced()?;
         let transcript = meeting.load_transcript()?;
+        let meta = meeting.read_meta()?;
+        // The work folder is removed only by a completed final pass.
+        let unfinished = (meta.ended_at.is_none() || meeting.path().join("audio/.work").is_dir())
+            && (meeting.mic_audio_path().is_file() || meeting.system_audio_path().is_file());
         Ok(Self {
-            meta: meeting.read_meta()?,
+            meta,
+            unfinished,
             notes: notes.value,
             enhanced: enhanced.value,
             transcript: transcript.value,
@@ -248,6 +255,11 @@ pub enum Command {
     Import {
         settings: Settings,
         file: PathBuf,
+    },
+    /// Recognize an existing meeting again from its saved audio.
+    Retranscribe {
+        settings: Settings,
+        meeting: Meeting,
     },
     Enhance {
         meeting: Meeting,
@@ -765,7 +777,7 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                 }
                 Command::Record(request) => {
                     let events = events.clone();
-                    thread::spawn(move || record(request, None, &events));
+                    thread::spawn(move || record(request, None, None, &events));
                 }
                 Command::Import { settings, file } => {
                     let events = events.clone();
@@ -780,6 +792,25 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                                 app: None,
                             },
                             Some(file),
+                            None,
+                            &events,
+                        )
+                    });
+                }
+                Command::Retranscribe { settings, meeting } => {
+                    let events = events.clone();
+                    thread::spawn(move || {
+                        record(
+                            RecordRequest {
+                                settings,
+                                title: String::new(),
+                                brief: None,
+                                event: None,
+                                process_id: None,
+                                app: None,
+                            },
+                            None,
+                            Some(meeting),
                             &events,
                         )
                     });
@@ -1113,7 +1144,12 @@ pub(crate) fn background_process(binary: &Path) -> Process {
     }
     command
 }
-fn record(request: RecordRequest, import_file: Option<PathBuf>, events: &Sender<Event>) {
+fn record(
+    request: RecordRequest,
+    import_file: Option<PathBuf>,
+    existing: Option<Meeting>,
+    events: &Sender<Event>,
+) {
     let mut path = None;
     let mut meeting_for_reload = None;
     let result: Result<()> = (|| {
@@ -1169,7 +1205,9 @@ fn record(request: RecordRequest, import_file: Option<PathBuf>, events: &Sender<
                 .then(|| Duration::from_secs(u64::from(request.settings.auto_stop_minutes) * 60)),
             ..RecordingConfig::default()
         };
-        let session = if let Some(file) = &import_file {
+        let session = if let Some(meeting) = &existing {
+            RecordingSession::retranscribe_with_asr(meeting.clone(), asr, config)?
+        } else if let Some(file) = &import_file {
             RecordingSession::import_with_asr(
                 library.clone(),
                 file,
@@ -1215,7 +1253,7 @@ fn record(request: RecordRequest, import_file: Option<PathBuf>, events: &Sender<
         let document = DocumentData::read(meeting)?;
         if events
             .send(Event::Started {
-                importing: import_file.is_some(),
+                importing: import_file.is_some() || existing.is_some(),
                 document: Box::new(document),
                 stop: session.stop_handle(),
             })

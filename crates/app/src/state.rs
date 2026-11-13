@@ -908,6 +908,37 @@ impl AppState {
         };
         self.send(Command::Import { settings, file });
     }
+    /// Finishes an interrupted meeting from its saved audio.
+    pub fn retranscribe(&mut self, path: &std::path::Path) {
+        if !self.ready
+            || self
+                .documents
+                .values()
+                .any(|doc| doc.speaker_ui.recalculating)
+            || self.recording.busy()
+            || self.enhancing.is_some()
+            || self.downloading
+            || self.quickstart.probe_busy
+            || self.settings_pending
+            || self.exit_requested
+            || self.unsaved()
+        {
+            return;
+        }
+        let Some(document) = self.documents.get(path) else {
+            return;
+        };
+        let mut settings = self.settings.clone();
+        settings.folder = document.data.meta.folder.clone();
+        settings.folder_mode_override = None;
+        let meeting = document.data.meeting.clone();
+        self.recording = Recording {
+            phase: Phase::Starting,
+            importing: true,
+            ..Recording::default()
+        };
+        self.send(Command::Retranscribe { settings, meeting });
+    }
     pub fn toggle_recording(&mut self) {
         if self.recording.busy() {
             self.recording.request_stop();
@@ -3110,6 +3141,27 @@ mod tests {
         assert!(doc.summary_stale());
         doc.template = "general".into();
         assert!(!doc.summary_stale());
+    }
+    #[test]
+    fn interrupted_meeting_is_flagged_and_sent_for_recognition() {
+        let (mut state, commands, _root, path) = fixture();
+        state.ready = true;
+        let meeting = state.documents[&path].data.meeting.clone();
+        // A fresh meeting has no ended_at; without audio there is nothing to recover.
+        assert!(!state.documents[&path].data.unfinished);
+        std::fs::create_dir_all(meeting.path().join("audio")).unwrap();
+        std::fs::write(meeting.system_audio_path(), b"OggS").unwrap();
+        let data = DocumentData::read(meeting.clone()).unwrap();
+        assert!(data.unfinished);
+        state.retranscribe(&path);
+        let Command::Retranscribe { meeting: sent, .. } = commands.try_recv().unwrap() else {
+            panic!("expected recognition");
+        };
+        assert_eq!(sent.path(), meeting.path());
+        assert!(state.recording.busy());
+        // A second click while it runs is ignored.
+        state.retranscribe(&path);
+        assert!(commands.try_recv().is_err());
     }
     #[test]
     fn manual_summary_without_ai_explains_setup_instead_of_sending() {

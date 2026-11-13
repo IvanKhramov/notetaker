@@ -6,6 +6,7 @@ mod audio;
 mod decode;
 mod echo;
 mod import;
+mod recover;
 pub use echo::suppress_echo;
 mod session;
 

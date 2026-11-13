@@ -79,7 +79,17 @@ image_root="$staging/image"
 mkdir "$image_root"
 mv "$app" "$staging/Applications" "$image_root/"
 dmg="$out/notetaker-$version-macos-arm64.dmg"
-hdiutil create -volname "notetaker $version" -srcfolder "$image_root" -ov -format UDZO "$dmg"
+# hdiutil intermittently fails with "Resource busy" on CI runners; retry it.
+for attempt in 1 2 3 4 5; do
+  if hdiutil create -volname "notetaker $version" -srcfolder "$image_root" -ov -format UDZO "$dmg"; then
+    break
+  fi
+  if [ "$attempt" = 5 ]; then
+    echo 'hdiutil create failed after 5 attempts' >&2
+    exit 1
+  fi
+  sleep 10
+done
 (cd "$out" && shasum -a 256 "$(basename "$dmg")" > "$(basename "$dmg").sha256")
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
   echo "dmg=$dmg" >> "$GITHUB_OUTPUT"

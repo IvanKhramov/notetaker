@@ -50,6 +50,22 @@ pub(crate) fn decode(
     }
 }
 
+/// Decodes one of our own opus tracks. A recording cut short by a crash has no
+/// end-of-stream page and may end in a torn page; everything before that is kept.
+pub(crate) fn decode_recording(
+    path: &Path,
+    wav: &Path,
+    mut progress: impl FnMut(f32) -> Result<()>,
+) -> Result<u64> {
+    let mut ogg = ogg::PacketReader::new(File::open(path)?);
+    let first = ogg.read_packet()?.context("Пустой Ogg")?;
+    ensure!(
+        first.data.starts_with(b"OpusHead"),
+        "Аудио встречи не в формате Opus"
+    );
+    decode_ogg_opus(ogg, first, wav, &mut progress, true)
+}
+
 struct Output<F> {
     writer: hound::WavWriter<std::io::BufWriter<File>>,
     count: u64,
@@ -103,7 +119,7 @@ fn decode_native(
         let mut ogg = ogg::PacketReader::new(file);
         let first = ogg.read_packet()?.context("Пустой Ogg")?;
         if first.data.starts_with(b"OpusHead") {
-            return decode_ogg_opus(ogg, first, wav, progress);
+            return decode_ogg_opus(ogg, first, wav, progress, false);
         }
         file = File::open(path)?;
     }
@@ -229,6 +245,7 @@ fn decode_ogg_opus(
     first: ogg::Packet,
     wav: &Path,
     progress: &mut dyn FnMut(f32) -> Result<()>,
+    truncated: bool,
 ) -> Result<u64> {
     let serial = first.stream_serial();
     let (channels, mut skip, gain) = opus_header(&first.data)?;
@@ -244,14 +261,23 @@ fn decode_ogg_opus(
     let mut buffer = vec![0.0; 5760 * channels];
     let mut position = 0u64;
     let mut eos = false;
-    while let Some(packet) = reader.read_packet()? {
+    loop {
+        let packet = match reader.read_packet() {
+            Ok(Some(packet)) => packet,
+            Ok(None) => break,
+            // A torn last page: keep what was decoded so far.
+            Err(_) if truncated && position > 0 => break,
+            Err(error) => return Err(error.into()),
+        };
         ensure!(
             packet.stream_serial() == serial && !eos,
             "Составной Ogg требует ffmpeg"
         );
-        let frames = decoder
-            .decode(&packet.data, 5760, &mut buffer)
-            .map_err(anyhow::Error::msg)?;
+        let frames = match decoder.decode(&packet.data, 5760, &mut buffer) {
+            Ok(frames) => frames,
+            Err(_) if truncated && position > 0 => break,
+            Err(error) => return Err(anyhow::Error::msg(error)),
+        };
         let start = skip.min(frames);
         skip = skip.saturating_sub(frames);
         let end = if packet.last_in_stream() {
@@ -273,7 +299,7 @@ fn decode_ogg_opus(
             0.0,
         )?;
     }
-    ensure!(eos, "Незавершённый Ogg Opus");
+    ensure!(eos || truncated, "Незавершённый Ogg Opus");
     output.write(&normalizer.finish()?, 1.0)?;
     output.finish()
 }
