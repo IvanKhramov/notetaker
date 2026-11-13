@@ -65,6 +65,62 @@ fn read_system_language() -> String {
     "ru".into()
 }
 
+/// One-click meeting actions; any of them can be pinned next to the "Ещё" menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DocumentAction {
+    EditNotes,
+    EditSummary,
+    Read,
+    Regenerate,
+    Copy,
+    CopyAll,
+    Reveal,
+    SendTasks,
+    ExportSummary,
+}
+
+impl DocumentAction {
+    pub const ALL: [Self; 9] = [
+        Self::EditNotes,
+        Self::EditSummary,
+        Self::Read,
+        Self::Regenerate,
+        Self::Copy,
+        Self::CopyAll,
+        Self::Reveal,
+        Self::SendTasks,
+        Self::ExportSummary,
+    ];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::EditNotes => "Редактировать мои заметки",
+            Self::EditSummary => "Редактировать конспект",
+            Self::Read => "Читать документ",
+            Self::Regenerate => "Пересоздать конспект",
+            Self::Copy => "Копировать",
+            Self::CopyAll => "Копировать конспект и транскрипт",
+            Self::Reveal => "Показать в папке",
+            Self::SendTasks => "Отправить задачи в трекер…",
+            Self::ExportSummary => "Экспорт конспекта Markdown",
+        }
+    }
+    /// Header buttons are narrow; the full label stays in the tooltip.
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Self::EditNotes => "Заметки",
+            Self::EditSummary => "Править конспект",
+            Self::Read => "Читать",
+            Self::Regenerate => "Пересоздать",
+            Self::Copy => "Копировать",
+            Self::CopyAll => "Копировать всё",
+            Self::Reveal => "В папке",
+            Self::SendTasks => "В трекер",
+            Self::ExportSummary => "Экспорт",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
@@ -111,6 +167,8 @@ pub struct Settings {
     pub calendar_timezone: String,
     pub mcp_exclude_local: bool,
     pub check_updates: bool,
+    /// Meeting actions shown as buttons in the header, in menu order.
+    pub pinned_actions: Vec<DocumentAction>,
     // Retired preferences remain readable but are no longer written or used.
     #[serde(skip_serializing, rename = "hide_quickstart")]
     pub _hide_quickstart: bool,
@@ -178,6 +236,7 @@ impl Default for Settings {
             calendar_timezone: "Europe/Moscow".into(),
             mcp_exclude_local: true,
             check_updates: true,
+            pinned_actions: vec![DocumentAction::CopyAll],
             _hide_quickstart: false,
             _auto_download_models: true,
             _auto_diarization_attempted: false,
