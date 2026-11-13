@@ -172,7 +172,7 @@ impl HttpProvider {
         }
         let response = request.send().map_err(|_| {
             anyhow::anyhow!(
-                "LLM HTTP request failed (check connectivity, TLS, timeout and API key header)"
+                "Не удалось связаться с AI. Проверьте интернет, VPN, адрес и ключ в «Настройки → AI»."
             )
         })?;
         ensure!(!self.cancel.is_cancelled(), "Запрос отменён");
@@ -180,7 +180,7 @@ impl HttpProvider {
         // Error bodies may echo private inputs or credentials; never include them.
         ensure!(
             status.is_success(),
-            "LLM provider returned HTTP {} {}; check credentials, model, endpoint and provider availability",
+            "AI ответил ошибкой {} {}. Проверьте ключ, модель и адрес в «Настройки → AI».",
             status.as_u16(),
             status.canonical_reason().unwrap_or("error")
         );

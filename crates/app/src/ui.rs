@@ -38,6 +38,8 @@ pub struct NotetakerApp {
     trackers: crate::trackers::Panel,
     cache: CommonMarkCache,
     image_viewer: Option<String>,
+    /// Asks before a regenerated summary replaces one the user edited by hand.
+    confirm_regenerate: bool,
     enhanced_preview: bool,
     show_record: bool,
     show_settings: bool,
@@ -75,6 +77,7 @@ impl NotetakerApp {
             trackers: Default::default(),
             cache: CommonMarkCache::default(),
             image_viewer: None,
+            confirm_regenerate: false,
             enhanced_preview: true,
             indicator: IndicatorPosition::load(),
             show_record: false,
@@ -444,9 +447,14 @@ impl NotetakerApp {
                     } else {
                         ui.spinner();
                     }
+                    let elapsed = timestamp(self.state.recording.elapsed().as_millis() as u64);
                     ui.label(
-                        RichText::new(timestamp(self.state.recording.elapsed().as_millis() as u64))
-                            .color(p.muted),
+                        RichText::new(if phase == Phase::Recording {
+                            format!("Запись {elapsed}")
+                        } else {
+                            elapsed
+                        })
+                        .color(p.muted),
                     );
                 }
                 // Allocate actions first. The input takes the remaining width,
@@ -463,6 +471,9 @@ impl NotetakerApp {
                                 egui::Button::new(RichText::new("Новая запись").color(p.on_accent))
                                     .fill(p.accent)
                                     .stroke(egui::Stroke::NONE),
+                            )
+                            .on_disabled_hover_text(
+                                "Запись станет доступна, когда загрузятся модели распознавания",
                             )
                             .clicked()
                     {
@@ -505,11 +516,19 @@ impl NotetakerApp {
                             .frame(egui::Frame::NONE)
                             .align(egui::Align2::LEFT_CENTER)
                             .hint_text(if phase == Phase::Finalizing {
-                                "Сохраняем…"
+                                // The final pass takes minutes after a long meeting.
+                                match self.state.recording.progress {
+                                    Some((completed, total)) => {
+                                        format!("Распознаю запись: {completed} из {total}…")
+                                    }
+                                    None => "Завершаю запись…".to_owned(),
+                                }
+                            } else if busy {
+                                "Идёт запись. Чат доступен после неё.".to_owned()
                             } else if note || (self.chat_page && self.state.chat.scope.is_some()) {
-                                "Спросить про эту встречу…"
+                                "Спросить про эту встречу…".to_owned()
                             } else {
-                                "Спросить по всем встречам…"
+                                "Спросить по всем встречам…".to_owned()
                             }),
                     );
                     ask |= response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -1054,9 +1073,9 @@ impl NotetakerApp {
             let unavailable = if self.state.recording.busy() {
                 Some("Доступно после завершения записи")
             } else if !document.data.meeting.system_audio_path().is_file() {
-                Some("Нет сохранённого аудио: audio/system.opus")
+                Some("Аудио этой встречи не сохранено, пересчитать собеседников нельзя")
             } else if document.speaker_ui.recalculating {
-                Some("Пересчитываю спикеров…")
+                Some("Пересчитываю собеседников…")
             } else if document.saving
                 || speaker_busy
                 || document.attachments_pending > 0
@@ -1191,8 +1210,41 @@ impl NotetakerApp {
         }
         self.state.attach(images);
         if enhance {
-            self.enhanced_preview = true;
-            self.state.enhance();
+            let edited = self
+                .state
+                .documents
+                .get(&path)
+                .is_some_and(|document| !crate::worker::summary_can_overwrite(&document.data));
+            if edited {
+                self.confirm_regenerate = true;
+            } else {
+                self.enhanced_preview = true;
+                self.state.enhance();
+            }
+        }
+        if self.confirm_regenerate {
+            let mut regenerate = false;
+            let mut keep = false;
+            let closed = theme::window(ui.ctx(), "Пересоздать конспект?")
+                .default_width(420.0)
+                .resizable(false)
+                .show(ui.ctx(), |ui| {
+                    ui.label("Конспект правили вручную. Новый текст заменит его, правки пропадут.");
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        regenerate =
+                            theme::button(ui, "Пересоздать", ButtonStyle::Primary).clicked();
+                        keep = theme::button(ui, "Оставить как есть", ButtonStyle::Secondary)
+                            .clicked();
+                    });
+                });
+            if regenerate {
+                self.enhanced_preview = true;
+                self.state.enhance();
+            }
+            if regenerate || keep || closed {
+                self.confirm_regenerate = false;
+            }
         }
         if let Some(command) = export {
             self.state.send(command);
@@ -2508,7 +2560,11 @@ fn transcript_view(
                 ui.add_space(8.0);
             }
             if document.data.transcript.segments.is_empty() {
-                ui.weak("Текст появится здесь");
+                ui.weak(if live {
+                    "Текст появится здесь"
+                } else {
+                    "У этой встречи нет транскрипта"
+                });
             }
         });
     if scrolled {

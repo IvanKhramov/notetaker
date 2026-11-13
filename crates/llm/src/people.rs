@@ -153,7 +153,7 @@ mod tests {
         let config = Config::parse("[defaults]\nlocal='cloud'\nhybrid='cloud'\n[[providers]]\nid='cloud'\nkind='openai'\nbase_url='https://example.invalid/v1'\nmodel='test'").unwrap();
         let brief =
             person_brief(&library, person, 10, Some(&config), Cancellation::default()).unwrap();
-        assert!(brief.warning.unwrap().contains("loopback"));
+        assert!(brief.warning.unwrap().contains("нужен локальный AI"));
         assert!(brief.text.contains("SECRET"));
         let digest = library
             .digest(

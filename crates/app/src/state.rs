@@ -930,6 +930,15 @@ impl AppState {
         let Some(path) = self.selected.clone() else {
             return;
         };
+        if !self.llm_configured {
+            // Without this the request goes to a default local endpoint and fails with a
+            // connection error that says nothing about setup.
+            self.error = Some(
+                "AI не подключён. Откройте «Настройки → AI» и подключите Claude, ChatGPT или свой шлюз."
+                    .into(),
+            );
+            return;
+        }
         self.start_summary(path, false);
     }
     fn start_summary(&mut self, path: PathBuf, automatic: bool) {
@@ -3103,8 +3112,16 @@ mod tests {
         assert!(!doc.summary_stale());
     }
     #[test]
+    fn manual_summary_without_ai_explains_setup_instead_of_sending() {
+        let (mut state, commands, _root, _path) = fixture();
+        state.enhance();
+        assert!(state.error.as_deref().unwrap().contains("Настройки → AI"));
+        assert!(commands.try_recv().is_err());
+    }
+    #[test]
     fn generation_cancel_uses_the_resolved_summary_provider_snapshot() {
         let (mut state, commands, _root, path) = fixture();
+        state.llm_configured = true;
         state.documents.get_mut(&path).unwrap().data.meta.mode = notetaker_core::Mode::Hybrid;
         state.llm.providers.push(crate::config::ProviderSettings {
             id: "cli".into(),

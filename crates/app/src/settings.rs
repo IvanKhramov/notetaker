@@ -299,7 +299,11 @@ impl Panel {
                 });
                 hint(
                     ui,
-                    "Ctrl+= / Ctrl+- / Ctrl+0: изменить или сбросить масштаб.",
+                    if cfg!(target_os = "macos") {
+                        "Cmd+= / Cmd+- / Cmd+0: изменить или сбросить масштаб."
+                    } else {
+                        "Ctrl+= / Ctrl+- / Ctrl+0: изменить или сбросить масштаб."
+                    },
                 );
                 edits.text(ui, "Ваше имя", &mut settings.user_name);
                 edits.text(ui, "Другие варианты имени", &mut settings.user_aliases);

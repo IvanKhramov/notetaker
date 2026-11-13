@@ -306,6 +306,9 @@ impl<'a> Dialog<'a> {
                 .max_height(ui.available_height().max(80.0))
                 .show(ui, contents);
         });
+        // Esc closes the dialog unless a menu or combo box is open and takes it first.
+        close |= !egui::Popup::is_any_open(ctx)
+            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
         if close && let Some(open) = self.open {
             *open = false;
         }
