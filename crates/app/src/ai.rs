@@ -237,7 +237,7 @@ impl Connections {
                             },
                         );
                     }
-                    if ui.link("Войти в подписку").clicked() {
+                    if crate::theme::action_link(ui, "Войти в подписку").clicked() {
                         operation = Some(Operation::Login);
                     }
                 } else {
