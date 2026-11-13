@@ -803,6 +803,70 @@ fn import_uses_file_metadata_final_system_channel_and_retention() {
 }
 
 #[test]
+fn interrupted_recording_is_recognized_again_from_torn_audio() {
+    let directory = tempfile::tempdir().unwrap();
+    let library = Library::open(directory.path()).unwrap();
+    // What a crash leaves behind: no ended_at, opus tracks cut mid-page, a work folder.
+    let meeting = library
+        .create_meeting(MeetingMeta::new("Прерванная", Utc::now()))
+        .unwrap();
+    std::fs::create_dir_all(meeting.path().join("audio/.work")).unwrap();
+    std::fs::write(meeting.path().join("audio/.work/mic.wav"), b"partial").unwrap();
+    for path in [meeting.mic_audio_path(), meeting.system_audio_path()] {
+        let mut track = notetaker_capture::TrackWriter::create(&path).unwrap();
+        track.write_samples(&vec![0.1; 32000]).unwrap();
+        track.finish().unwrap();
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len(file.metadata().unwrap().len() - 7).unwrap();
+    }
+    assert!(meeting.read_meta().unwrap().ended_at.is_none());
+
+    let stats = Arc::new(Mutex::new(Stats::default()));
+    let session = RecordingSession::retranscribe_with_asr(
+        meeting.clone(),
+        Fake {
+            stats: Arc::clone(&stats),
+            crashes: vec![],
+            gate: None,
+        },
+        RecordingConfig {
+            retention: Some(Duration::from_secs(3600)),
+            ..RecordingConfig::default()
+        },
+    )
+    .unwrap();
+    for event in session.events() {
+        match event {
+            PipelineEvent::Finished { .. } => break,
+            PipelineEvent::Error(error) => panic!("{error}"),
+            _ => {}
+        }
+    }
+    session.wait().unwrap();
+
+    let transcript = meeting.read_transcript().unwrap();
+    for channel in [
+        notetaker_core::Channel::Mic,
+        notetaker_core::Channel::System,
+    ] {
+        assert!(
+            transcript
+                .segments
+                .iter()
+                .any(|s| s.channel == channel && s.source == Source::Final)
+        );
+    }
+    let calls = &stats.lock().unwrap().calls;
+    assert_eq!(calls.len(), 2);
+    // Nearly two seconds survive the torn last page.
+    assert!(calls.iter().all(|call| call.final_pass && call.len > 24000));
+    let meta = meeting.read_meta().unwrap();
+    assert!(meta.ended_at.unwrap() > meta.started_at);
+    assert!(meta.audio_expires_at.is_some());
+    assert!(!meeting.path().join("audio/.work").exists());
+}
+
+#[test]
 fn failed_import_does_not_publish_a_final_transcript_and_keeps_audio() {
     let directory = tempfile::tempdir().unwrap();
     let input = directory.path().join("input.wav");

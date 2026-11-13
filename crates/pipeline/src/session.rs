@@ -159,6 +159,34 @@ impl RecordingSession {
         })
     }
 
+    /// Runs the final pass again from the saved audio of an existing meeting.
+    pub fn retranscribe_with_asr(
+        meeting: Meeting,
+        asr: impl Asr,
+        config: RecordingConfig,
+    ) -> Result<Self> {
+        let (events_tx, events) = mpsc::channel();
+        let stop = StopHandle(Arc::new(AtomicBool::new(false)));
+        let worker_stop = stop.clone();
+        let worker_meeting = meeting.clone();
+        let handle = thread::Builder::new()
+            .name("retranscribe".into())
+            .spawn(move || {
+                let result =
+                    crate::recover::run(&worker_meeting, asr, config, worker_stop, &events_tx);
+                if let Err(error) = &result {
+                    let _ = events_tx.send(PipelineEvent::Error(format!("{error:#}")));
+                }
+                result
+            })?;
+        Ok(Self {
+            meeting,
+            stop,
+            events,
+            handle: Some(handle),
+        })
+    }
+
     pub fn start(
         library: Library,
         meta: MeetingMeta,

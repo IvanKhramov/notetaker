@@ -797,6 +797,7 @@ impl NotetakerApp {
             return;
         };
         let mut enhance = false;
+        let mut retranscribe = false;
         let mut export = None;
         let mut series_action = None;
         let mut action = None;
@@ -1017,6 +1018,17 @@ impl NotetakerApp {
                 }
             });
         }
+        if document.data.unfinished && !locked {
+            ui.horizontal_wrapped(|ui| {
+                ui.weak("Запись прервалась, текст распознан не до конца.");
+                retranscribe = ui
+                    .add_enabled(can_enhance, egui::Button::new("Распознать из аудио"))
+                    .on_hover_text(
+                        "Аудио сохранилось. Распознавание пройдёт заново по всей записи.",
+                    )
+                    .clicked();
+            });
+        }
         if document.summary_stale() && document.generation.is_none() {
             ui.horizontal(|ui| {
                 ui.weak("Заметки изменились после конспекта");
@@ -1221,6 +1233,9 @@ impl NotetakerApp {
                 self.enhanced_preview = true;
                 self.state.enhance();
             }
+        }
+        if retranscribe {
+            self.state.retranscribe(&path);
         }
         if self.confirm_regenerate {
             let mut regenerate = false;
