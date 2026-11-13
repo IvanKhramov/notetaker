@@ -409,9 +409,29 @@ pub enum Event {
     SettingsSaved(Result<(Settings, LlmSettings), String>, bool),
 }
 
+static WAKER: std::sync::OnceLock<eframe::egui::Context> = std::sync::OnceLock::new();
+/// Lets worker results repaint the window at once instead of on the next poll tick.
+pub fn set_waker(ctx: &eframe::egui::Context) {
+    let _ = WAKER.set(ctx.clone());
+}
+/// The worker's event channel; every event wakes the UI.
+#[derive(Clone)]
+struct Events(Sender<Event>);
+impl Events {
+    /// Fails only when the UI side of the channel is gone.
+    fn send(&self, event: Event) -> Result<(), ()> {
+        let result = self.0.send(event).map_err(|_| ());
+        if let Some(ctx) = WAKER.get() {
+            ctx.request_repaint();
+        }
+        result
+    }
+}
+
 pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
     let (commands, rx) = mpsc::channel();
     let (events, messages) = mpsc::channel();
+    let events = Events(events);
     thread::spawn(move || {
         let mut warnings = Vec::new();
         let mut rejected = |error: anyhow::Error, path: anyhow::Result<std::path::PathBuf>| {
@@ -1017,6 +1037,22 @@ fn list_mode(
         note = result.note;
         Some(result.hits)
     };
+    if note.is_none() {
+        let unreadable = library.unreadable_meetings()?;
+        if !unreadable.is_empty() {
+            // Otherwise such a meeting silently disappears from the list.
+            note = Some(format!(
+                "Не прочитано встреч: {}. Повреждён meta.yaml в папках: {}",
+                unreadable.len(),
+                unreadable
+                    .iter()
+                    .filter_map(|path| path.file_name())
+                    .map(|name| name.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
     for meeting in library.list_meetings()? {
         let meta = meeting.read_meta()?;
         if !filter.matches(&meta) {
@@ -1185,7 +1221,7 @@ fn record(
     request: RecordRequest,
     import_file: Option<PathBuf>,
     existing: Option<Meeting>,
-    events: &Sender<Event>,
+    events: &Events,
 ) {
     let mut path = None;
     let mut meeting_for_reload = None;
@@ -1390,7 +1426,7 @@ pub fn asr_binary() -> Result<PathBuf> {
     );
     Ok(path)
 }
-fn ensure_embed_worker(events: &Sender<Event>) -> Result<()> {
+fn ensure_embed_worker(events: &Events) -> Result<()> {
     if background_process(&notetaker_core::embedding::worker_path())
         .arg("--help")
         .stdin(Stdio::null())
@@ -1459,7 +1495,7 @@ fn ensure_embed_worker(events: &Sender<Event>) -> Result<()> {
     }
 }
 
-fn download(model: &str, events: &Sender<Event>) -> Result<()> {
+fn download(model: &str, events: &Events) -> Result<()> {
     let binary = if model == "semantic" {
         ensure_embed_worker(events)?;
         notetaker_core::embedding::worker_path()

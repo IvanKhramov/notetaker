@@ -136,6 +136,22 @@ fn trashed_meeting_leaves_the_list_and_keeps_its_files() {
 }
 
 #[test]
+fn meeting_with_broken_metadata_is_reported_not_just_skipped() {
+    let (_dir, library) = fixture();
+    let good = library.create_meeting(meta("Good")).unwrap();
+    let broken = library.create_meeting(meta("Broken")).unwrap();
+    assert!(library.unreadable_meetings().unwrap().is_empty());
+    std::fs::write(broken.path().join("meta.yaml"), "title: [unclosed").unwrap();
+    let listed = library.list_meetings().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].path(), good.path());
+    assert_eq!(
+        library.unreadable_meetings().unwrap(),
+        vec![broken.path().to_owned()]
+    );
+}
+
+#[test]
 fn slug_transliterates_and_resolves_collisions() {
     let (_directory, library) = fixture();
     let prefix = meta("")

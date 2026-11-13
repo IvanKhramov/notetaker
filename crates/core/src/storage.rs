@@ -68,6 +68,25 @@ impl Library {
         &self.root
     }
 
+    /// Meeting folders whose `meta.yaml` exists but cannot be read, for example after
+    /// a sync conflict. `list_meetings` skips them, so the caller reports them.
+    pub fn unreadable_meetings(&self) -> Result<Vec<PathBuf>> {
+        let mut unreadable = Vec::new();
+        for entry in fs::read_dir(&self.root)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if name == ".notetaker" || name == ".trash" || !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let meeting = Meeting { path: entry.path() };
+            if meeting.path.join("meta.yaml").is_file() && meeting.read_meta().is_err() {
+                unreadable.push(meeting.path);
+            }
+        }
+        unreadable.sort();
+        Ok(unreadable)
+    }
+
     /// Moves a meeting out of the library into `<library>/.trash`. Nothing is erased:
     /// the folder stays there, with its audio, until someone removes it by hand.
     pub fn trash_meeting(&self, meeting: &Meeting) -> Result<PathBuf> {

@@ -1677,6 +1677,7 @@ impl eframe::App for NotetakerApp {
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // eframe calls this even when the root window is hidden in the tray.
+        crate::worker::set_waker(ctx);
         let previous = self.state.recording.path.clone();
         self.state.poll();
         if self.state.recording.path != previous && self.state.recording.busy() {
