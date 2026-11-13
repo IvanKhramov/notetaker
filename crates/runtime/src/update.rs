@@ -6,6 +6,11 @@ use std::{fs::File, io::Read, path::Path};
 
 pub const REPOSITORY: &str = "https://github.com/IvanKhramov/notetaker";
 
+/// Hex Ed25519 public key whose owner signs the installer checksum of every release.
+/// The checksum sits next to the installer, so alone it proves integrity, not origin.
+/// `None` until the key exists: see docs/release-signing.md.
+pub const SIGNING_KEY: Option<&str> = None;
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct Asset {
     pub name: String,
@@ -71,6 +76,21 @@ impl Release {
         }
         Ok((archive, checksum))
     }
+    /// The detached signature of a checksum file from this release.
+    pub fn signature(&self, checksum: &Asset) -> Result<&Asset> {
+        let name = format!("{}.sig", checksum.name);
+        let signature = self
+            .assets
+            .iter()
+            .find(|a| a.name == name)
+            .context("У релиза нет подписи установщика")?;
+        ensure!(
+            signature.browser_download_url
+                == format!("{REPOSITORY}/releases/download/{}/{name}", self.tag_name),
+            "Недопустимый URL файла релиза"
+        );
+        Ok(signature)
+    }
     pub fn notes_url(&self) -> String {
         // Do not open arbitrary URLs supplied in a JSON response.
         let expected = format!("{REPOSITORY}/releases/tag/{}", self.tag_name);
@@ -80,6 +100,25 @@ impl Release {
             format!("{REPOSITORY}/releases")
         }
     }
+}
+
+fn unhex(text: &str) -> Result<Vec<u8>> {
+    let text = text.trim();
+    ensure!(
+        text.len().is_multiple_of(2) && text.bytes().all(|b| b.is_ascii_hexdigit()),
+        "Некорректная подпись релиза"
+    );
+    Ok((0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).expect("hex digits"))
+        .collect())
+}
+
+/// Checks a hex Ed25519 signature of `message` against a hex public key.
+pub fn verify_signature(key: &str, message: &[u8], signature: &str) -> Result<()> {
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, unhex(key)?)
+        .verify(message, &unhex(signature)?)
+        .map_err(|_| anyhow::anyhow!("Подпись релиза не совпадает"))
 }
 
 pub fn verify_sha256(path: &Path, checksum: &str, name: &str) -> Result<()> {
@@ -164,6 +203,36 @@ mod tests {
             browser_download_url: String::new(),
         });
         assert!(r.dmg().is_ok());
+    }
+    #[test]
+    fn signature_binds_the_checksum_to_the_key() {
+        use ring::signature::KeyPair;
+        let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let random = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&random).unwrap();
+        let pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        let key = hex(pair.public_key().as_ref());
+        let message = b"ba78  notetaker-v0.8.0-windows-x64-setup.exe\n";
+        let signature = hex(pair.sign(message).as_ref());
+        assert!(verify_signature(&key, message, &format!("{signature}\n")).is_ok());
+        assert!(verify_signature(&key, b"other", &signature).is_err());
+        assert!(verify_signature(&key, message, "zz").is_err());
+        assert!(verify_signature(&key, message, "").is_err());
+
+        let mut r = release("v0.8.0");
+        let checksum = Asset {
+            name: "notetaker-v0.8.0-windows-x64-setup.exe.sha256".into(),
+            browser_download_url: String::new(),
+        };
+        assert!(r.signature(&checksum).is_err());
+        r.assets.push(Asset {
+            name: format!("{}.sig", checksum.name),
+            browser_download_url: format!(
+                "{REPOSITORY}/releases/download/v0.8.0/{}.sig",
+                checksum.name
+            ),
+        });
+        assert!(r.signature(&checksum).is_ok());
     }
     #[test]
     fn verifies_hash_and_filename() {

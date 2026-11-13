@@ -3082,6 +3082,7 @@ dependencies = [
  "anyhow",
  "directories",
  "libc",
+ "ring",
  "semver",
  "serde",
  "sha2 0.10.9",

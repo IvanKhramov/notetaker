@@ -141,6 +141,51 @@ jobs:
           RELEASE_CHECKSUM: ${{ steps.package.outputs.checksum }}
         run: gh release upload "$RELEASE_TAG" "$RELEASE_DMG" "$RELEASE_CHECKSUM" --clobber
 
+  # Signs the installer checksum with a key that never leaves this job. It uses no
+  # third-party actions: see docs/release-signing.md.
+  sign:
+    if: github.event_name == 'push'
+    needs: macos
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Sign the installer checksum
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          expected=$(gh api -H 'Accept: application/vnd.github.raw' \
+            "repos/$GITHUB_REPOSITORY/contents/crates/runtime/src/update.rs?ref=$GITHUB_SHA" \
+            | sed -n 's/^pub const SIGNING_KEY: Option<&str> = Some("\([0-9a-f]\{64\}\)");$/\1/p')
+          if [ -z "$expected" ]; then
+            echo "Release signing is not enabled in this build; nothing to sign."
+            exit 0
+          fi
+          if [ -z "$UPDATE_SIGNING_KEY" ]; then
+            echo "This build requires signed updates, but UPDATE_SIGNING_KEY is not set." >&2
+            exit 1
+          fi
+          umask 077
+          work=$(mktemp -d)
+          trap 'rm -f "$work/key"' EXIT
+          printf '%s\n' "$UPDATE_SIGNING_KEY" > "$work/key"
+          actual=$(openssl pkey -in "$work/key" -pubout -outform DER | tail -c 32 | xxd -p -c 64)
+          if [ "$actual" != "$expected" ]; then
+            echo "UPDATE_SIGNING_KEY does not match the key built into the app." >&2
+            exit 1
+          fi
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern '*-windows-x64-setup.exe.sha256' --dir "$work/assets"
+          for checksum in "$work"/assets/*.sha256; do
+            openssl pkeyutl -sign -inkey "$work/key" -rawin -in "$checksum" \
+              | xxd -p -c 256 > "$checksum.sig"
+            gh release upload "$RELEASE_TAG" "$checksum.sig" --repo "$GITHUB_REPOSITORY" --clobber
+          done
+
   winget:
     if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
