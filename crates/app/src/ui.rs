@@ -877,7 +877,12 @@ impl NotetakerApp {
                 self.enhanced_preview = action == Some(DocumentAction::Read);
             }
             Some(DocumentAction::Regenerate) => enhance = true,
-            Some(DocumentAction::Copy) => ui.ctx().copy_text(summary.clone()),
+            Some(DocumentAction::Copy) => {
+                ui.ctx().copy_text(summary.clone());
+                self.state
+                    .notices
+                    .push((ToastLevel::Success, "Конспект скопирован".into()));
+            }
             Some(DocumentAction::CopyAll) => {
                 let transcript = document
                     .data
@@ -888,6 +893,10 @@ impl NotetakerApp {
                     "{}\n\n## Транскрипт\n\n{}",
                     summary.trim_end(),
                     transcript.trim_end()
+                ));
+                self.state.notices.push((
+                    ToastLevel::Success,
+                    "Конспект и транскрипт скопированы".into(),
                 ));
             }
             Some(DocumentAction::Reveal) => export = Some(Command::Reveal(path.clone())),
