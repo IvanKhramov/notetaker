@@ -243,6 +243,7 @@ impl Drop for Updates {
 fn client() -> Result<reqwest::blocking::Client> {
     Ok(reqwest::blocking::Client::builder()
         .user_agent(concat!("notetaker/", env!("CARGO_PKG_VERSION")))
+        .https_only(true)
         .timeout(Duration::from_secs(180))
         .connect_timeout(Duration::from_secs(10))
         .build()?)

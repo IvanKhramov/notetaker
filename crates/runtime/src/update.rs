@@ -29,6 +29,19 @@ impl Release {
                 .cmp_precedence(&semver::Version::parse(current)?)
                 .is_gt())
     }
+    /// The macOS disk image; a release published before it was uploaded has none.
+    pub fn dmg(&self) -> Result<&Asset> {
+        let version = self
+            .tag_name
+            .strip_prefix('v')
+            .context("Некорректный тег релиза")?;
+        semver::Version::parse(version)?;
+        let name = format!("notetaker-{version}-macos-arm64.dmg");
+        self.assets
+            .iter()
+            .find(|a| a.name == name)
+            .context("Нет образа для macOS")
+    }
     pub fn assets(&self) -> Result<(&Asset, &Asset)> {
         let version = self
             .tag_name
@@ -141,6 +154,16 @@ mod tests {
         assert!(r.assets().is_err());
         r.assets.pop();
         assert!(r.assets().is_err());
+    }
+    #[test]
+    fn macos_release_needs_its_disk_image() {
+        let mut r = release("v0.8.0");
+        assert!(r.dmg().is_err());
+        r.assets.push(Asset {
+            name: "notetaker-0.8.0-macos-arm64.dmg".into(),
+            browser_download_url: String::new(),
+        });
+        assert!(r.dmg().is_ok());
     }
     #[test]
     fn verifies_hash_and_filename() {

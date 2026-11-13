@@ -16,16 +16,53 @@ permissions:
   contents: write
 
 jobs:
+  # A tag builds a release only from a commit on main whose CI is green.
+  gate:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      checks: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Require the tagged commit on main
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - name: Wait for green CI on the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for attempt in $(seq 80); do
+            state=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?per_page=100" \
+              --jq '[.check_runs[] | select(.name | startswith("check (")) | .conclusion // "pending"]
+                | if length >= 3 and all(. == "success") then "green"
+                  elif any(. == "failure" or . == "cancelled" or . == "timed_out") then "red"
+                  else "pending" end')
+            echo "CI: $state"
+            case "$state" in
+              green) exit 0 ;;
+              red) echo "CI failed on $GITHUB_SHA" >&2; exit 1 ;;
+            esac
+            sleep 30
+          done
+          echo "CI did not finish in time" >&2
+          exit 1
+
   windows:
     if: github.event_name == 'push'
+    needs: gate
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install the pinned Rust toolchain
+        # Version, components and targets come from rust-toolchain.toml.
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           prefix-key: v2
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/sherpa-onnx-libs
           key: sherpa-onnx-libs-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
@@ -80,14 +117,14 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: '14.4'
       SHERPA_TARGET_ARCH: arm64
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install the pinned Rust toolchain
+        # Version, components and targets come from rust-toolchain.toml.
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           prefix-key: v2-macos-arm64
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/sherpa-onnx-libs
           key: sherpa-onnx-libs-macos-arm64-${{ hashFiles('Cargo.lock') }}
@@ -111,7 +148,7 @@ jobs:
       group: winget-${{ github.event.release.tag_name || inputs.version }}
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Generate manifests from published release
         id: manifests
         shell: pwsh

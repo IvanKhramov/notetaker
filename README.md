@@ -80,11 +80,12 @@ Backend, приватность и измерения: [поиск](docs/search.
 
 ## Install
 
-Download `notetaker-0.13.0-windows-x64.zip` from this repository's **Releases**
-page and extract it into a folder. Keep all files together and run
-`notetaker-app.exe`. The binaries are unsigned: Windows SmartScreen may warn;
+Download the installer `notetaker-v<version>-windows-x64-setup.exe` from this
+repository's **Releases** page and run it ([details](docs/install.md)). A portable
+`notetaker-<version>-windows-x64.zip` is published too: extract it into a folder,
+keep all files together and run `notetaker-app.exe`. The binaries are unsigned: Windows SmartScreen may warn;
 choose **More info → Run anyway** if you trust the download. A SHA-256 checksum
-is available beside the ZIP (`Get-FileHash <zip> -Algorithm SHA256`).
+is available beside each file (`Get-FileHash <file> -Algorithm SHA256`).
 Windows 11 is recommended for capture of an individual application; older
 Windows 10 builds fall back to all system audio (see the diagnostics guide).
 
@@ -226,11 +227,12 @@ Download buttons run `notetaker-asr download` off the UI thread and show downloa
 and installation stages for the model and Silero VAD. Missing workers/models
 produce an actionable error with a link to Settings. App settings use
 `ProjectDirs("", "", "notetaker").config_dir()/app.toml`; LLM settings use the
-separate `config.toml` described in [LLM setup](docs/llm.md). Enter API key
-environment variable names, never key values. Local meetings permit only
+separate `config.toml` described in [LLM setup](docs/llm.md). API keys entered in
+the app go to the OS credential store, never to these files; an environment
+variable name can be used instead. Local meetings permit only
 loopback LLM providers; Hybrid allows remote providers. Model downloads are an
 explicit network operation in either mode. Audio retention applies to new
-recordings; expired audio is swept after a recording finishes.
+recordings; expired audio is swept at startup and after a recording finishes.
 
 Windows has a tray menu, configurable global start/stop shortcut (Ctrl+Alt+R),
 and a small always-on-top recording window with timer and Stop. The shortcut
@@ -244,13 +246,12 @@ and [global-hotkey requirements](https://docs.rs/global-hotkey/0.9.0/global_hotk
 both integrations live on eframe's native event-loop thread and wake egui through
 `Context::request_repaint` when native events arrive.
 
-The UI uses egui's embedded Ubuntu Light (Ubuntu Font Licence) and Hack
-(MIT / Bitstream Vera) fonts. Both include Cyrillic; a headless test checks the
-Russian alphabet including Ё/ё in proportional and monospace families. No extra
-font asset is bundled. Their licenses ship with
-[epaint_default_fonts](https://github.com/emilk/egui/tree/0.37.0/crates/epaint_default_fonts/fonts).
-Markdown uses `egui_commonmark` without image loaders, network fetching, or
-syntax-highlighting dependencies.
+The UI text is set in the bundled Inter (SIL Open Font License, see
+`crates/app/assets/OFL.txt`); monospace falls back to egui's embedded Hack
+(MIT / Bitstream Vera). Both include Cyrillic; a headless test checks the
+Russian alphabet including Ё/ё in proportional and monospace families.
+Markdown uses `egui_commonmark` without network fetching or syntax-highlighting
+dependencies; images are loaded only from the meeting's own attachments.
 
 Windows manual acceptance: record a Zoom/Teams/browser session, type and switch
 notes during capture, stop from the indicator/tray/shortcut, check final-pass
@@ -287,9 +288,7 @@ score 1.5 and a temporary BPE vocabulary derived from tokens, following the
 [upstream 2.0.0 example](https://github.com/k2-fsa/sherpa-onnx/blob/v2.0.0/nodejs-addon-examples/test_asr_non_streaming_nemo_parakeet_tdt_v2_hotwords.js).
 This costs more CPU; only model-encodable spellings can be biased.
 
-Use **Импорт записи** in the sidebar, paste a path or drop a file into the dialog,
-then choose model/mode. Progress and the automatic-summary setting are reused.
-CLI reads the same app defaults:
+Recordings are imported from the CLI, which reads the same app defaults:
 
 ```sh
 notetaker import meeting.mp4

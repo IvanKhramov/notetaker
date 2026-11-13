@@ -1,4 +1,5 @@
 [toolchain]
-channel = "stable"
+# Pinned so a new stable cannot break CI or change release builds unnoticed.
+channel = "1.100.0"
 components = ["rustfmt", "clippy"]
 targets = ["x86_64-pc-windows-msvc"]
