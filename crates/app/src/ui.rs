@@ -28,6 +28,9 @@ struct Toast {
     level: ToastLevel,
 }
 
+/// Below this logical width the sidebar hides behind a "Меню" button.
+const NARROW_WIDTH: f32 = 760.0;
+
 pub struct NotetakerApp {
     state: AppState,
     people: crate::people::Panel,
@@ -53,6 +56,8 @@ pub struct NotetakerApp {
     chat_page: bool,
     ask_text: String,
     focus_search: bool,
+    /// Narrow windows only: the navigation is shown on demand.
+    sidebar_open: bool,
     maintenance: crate::maintenance::Maintenance,
     #[cfg(any(windows, target_os = "macos"))]
     desktop: Option<crate::desktop::Desktop>,
@@ -87,6 +92,7 @@ impl NotetakerApp {
             chat_page: false,
             ask_text: String::new(),
             focus_search: false,
+            sidebar_open: false,
             maintenance: Default::default(),
             #[cfg(any(windows, target_os = "macos"))]
             desktop: None,
@@ -107,7 +113,7 @@ impl NotetakerApp {
                 .speech_ready(&self.state.record_model)
             && !self.state.quickstart.probe_busy
     }
-    fn sidebar(&mut self, ui: &mut egui::Ui) {
+    fn search_field(&mut self, ui: &mut egui::Ui) {
         let search = ui.add(
             egui::TextEdit::singleline(&mut self.state.query)
                 .id_salt("library_search")
@@ -128,7 +134,24 @@ impl NotetakerApp {
             self.people.close();
             self.state.tasks_open = false;
         }
-        ui.add_space(20.0);
+    }
+    /// Which screen the navigation points at; a change closes the narrow-window sidebar.
+    fn nav_key(&self) -> (bool, bool, bool, bool, bool, Option<String>) {
+        (
+            self.home,
+            self.chat_page,
+            self.state.tasks_open,
+            self.show_settings,
+            self.people.active(),
+            self.state.folder_filter.clone(),
+        )
+    }
+    fn sidebar(&mut self, ui: &mut egui::Ui, narrow: bool) {
+        // In a narrow window the search lives in the top bar, so typing never hides it.
+        if !narrow {
+            self.search_field(ui);
+            ui.add_space(20.0);
+        }
         if theme::nav_row(
             ui,
             "Встречи",
@@ -1596,19 +1619,51 @@ impl eframe::App for NotetakerApp {
             self.state.tasks_open = false;
             self.focus_search = true;
         }
-        egui::Panel::left("sidebar")
-            .resizable(false)
-            .exact_size(if ctx.content_rect().width() < 800.0 {
-                190.0
-            } else {
-                236.0
-            })
-            .frame(
-                egui::Frame::new()
-                    .fill(p.sidebar)
-                    .inner_margin(egui::Margin::symmetric(16, 24)),
-            )
-            .show(ui, |ui| self.sidebar(ui));
+        // Beside a call window the content needs the width; the navigation opens on demand.
+        let narrow = ctx.content_rect().width() < NARROW_WIDTH;
+        if !narrow {
+            self.sidebar_open = false;
+        }
+        if narrow {
+            egui::Panel::top("narrow_bar")
+                .frame(
+                    egui::Frame::new()
+                        .fill(p.bg)
+                        .inner_margin(egui::Margin::symmetric(16, 10)),
+                )
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let label = if self.sidebar_open {
+                            "Скрыть меню"
+                        } else {
+                            "Меню"
+                        };
+                        if theme::button(ui, label, ButtonStyle::Secondary).clicked() {
+                            self.sidebar_open = !self.sidebar_open;
+                        }
+                        self.search_field(ui);
+                    });
+                });
+        }
+        if !narrow || self.sidebar_open {
+            let before = self.nav_key();
+            egui::Panel::left("sidebar")
+                .resizable(false)
+                .exact_size(if ctx.content_rect().width() < 800.0 {
+                    190.0
+                } else {
+                    236.0
+                })
+                .frame(
+                    egui::Frame::new()
+                        .fill(p.sidebar)
+                        .inner_margin(egui::Margin::symmetric(16, 24)),
+                )
+                .show(ui, |ui| self.sidebar(ui, narrow));
+            if narrow && self.nav_key() != before {
+                self.sidebar_open = false;
+            }
+        }
         egui::Panel::bottom("bottom_bar")
             .frame(
                 egui::Frame::new()
