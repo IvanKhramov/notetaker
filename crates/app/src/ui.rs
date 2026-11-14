@@ -3342,3 +3342,55 @@ impl Toast {
         }
     }
 }
+
+#[cfg(test)]
+mod toast_lifetime_tests {
+    use super::*;
+    fn toast(now: Instant, level: ToastLevel) -> Toast {
+        Toast {
+            at: now,
+            text: "notice".into(),
+            path: None,
+            retry_settings: false,
+            level,
+            focused_for: Duration::ZERO,
+            last_tick: now,
+            was_focused: false,
+        }
+    }
+    #[test]
+    fn warning_waits_for_six_seconds_of_focus_and_error_never_times_out() {
+        let start = Instant::now();
+        let mut warning = toast(start, ToastLevel::Warning);
+        warning.tick(start + Duration::from_secs(60), false);
+        assert!(!warning.expired(start + Duration::from_secs(60)));
+        warning.tick(start + Duration::from_secs(120), true);
+        assert_eq!(warning.focused_for, Duration::ZERO);
+        for step in 1..=11 {
+            warning.tick(
+                start + Duration::from_secs(120) + Duration::from_millis(step * 500),
+                true,
+            );
+        }
+        assert!(!warning.expired(start + Duration::from_secs(126)));
+        warning.tick(start + Duration::from_secs(126), true);
+        assert!(warning.expired(start + Duration::from_secs(126)));
+        let error = toast(start, ToastLevel::Error);
+        assert!(!error.expired(start + Duration::from_secs(3600)));
+    }
+    #[test]
+    fn a_gap_without_frames_does_not_count_as_focused_time() {
+        let start = Instant::now();
+        let mut warning = toast(start, ToastLevel::Warning);
+        warning.tick(start, true);
+        warning.tick(start + Duration::from_secs(60), true);
+        assert_eq!(warning.focused_for, Duration::ZERO);
+    }
+    #[test]
+    fn success_keeps_its_original_six_second_timeout() {
+        let start = Instant::now();
+        let success = toast(start, ToastLevel::Success);
+        assert!(!success.expired(start + Duration::from_secs(5)));
+        assert!(success.expired(start + Duration::from_secs(6)));
+    }
+}

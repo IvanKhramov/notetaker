@@ -2154,3 +2154,84 @@ pub fn settings_row_desc<R>(
     })
     .inner
 }
+
+#[cfg(test)]
+mod checkbox_tests {
+    use super::*;
+    #[test]
+    fn keyboard_checkbox_reports_changes_and_respects_disabled_state() {
+        for enabled in [true, false] {
+            let ctx = egui::Context::default();
+            install(&ctx);
+            let mut value = false;
+            ctx.run_ui(Default::default(), |ui| {
+                ui.add_enabled(enabled, Checkbox::new(&mut value, "Общая"))
+                    .request_focus();
+            })
+            .drop_without_applying_deltas();
+            let mut changed = false;
+            ctx.run_ui(
+                egui::RawInput {
+                    events: vec![egui::Event::Key {
+                        key: egui::Key::Space,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    }],
+                    ..Default::default()
+                },
+                |ui| {
+                    changed = ui
+                        .add_enabled(enabled, Checkbox::new(&mut value, "Общая"))
+                        .changed();
+                },
+            )
+            .drop_without_applying_deltas();
+            assert_eq!(value, enabled);
+            assert_eq!(changed, enabled);
+        }
+    }
+}
+
+#[cfg(test)]
+mod sticky_footer_tests {
+    use super::*;
+    #[test]
+    fn long_form_keeps_footer_inside_a_small_viewport() {
+        let ctx = egui::Context::default();
+        install(&ctx);
+        for _ in 0..3 {
+            let mut rect = egui::Rect::NOTHING;
+            ctx.run_pass(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(640.0, 427.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    modal(ctx, "Запись").show_footer(
+                        ctx,
+                        |ui| {
+                            for _ in 0..30 {
+                                ui.label("Строка формы");
+                            }
+                        },
+                        |ui| {
+                            footer(ui, |ui| {
+                                rect = button(ui, "Начать запись", ButtonStyle::Primary).rect;
+                            });
+                        },
+                    );
+                },
+            )
+            .drop_without_applying_deltas();
+            assert!(
+                rect.top() >= 0.0 && rect.bottom() <= 427.0,
+                "Footer clipped: {rect:?}"
+            );
+        }
+    }
+}
