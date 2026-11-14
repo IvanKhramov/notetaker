@@ -311,9 +311,7 @@ impl Library {
             ));
         }
         if carry.previous.meta.mode == Mode::Local {
-            let mut meta = meeting.read_meta()?;
-            meta.mode = Mode::Local;
-            meeting.write_meta(&meta)?;
+            meeting.update_meta(|meta| meta.mode = Mode::Local)?;
         }
         meeting.save_notes(
             &format!("{}\n\n{}", carry.markdown(), notes.value),

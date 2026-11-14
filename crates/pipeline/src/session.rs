@@ -499,7 +499,10 @@ fn record(
                     .context("retention timestamp out of range")
             })
             .transpose()?;
-        meeting.write_meta(&meta)?;
+        meeting.update_meta(|current| {
+            current.ended_at = meta.ended_at;
+            current.audio_expires_at = meta.audio_expires_at;
+        })?;
         jobs_tx
             .send(Job::Final(wavs.clone()))
             .context("ASR thread stopped")?;
@@ -608,9 +611,7 @@ fn capture_issue(
         from_ms,
         reason,
     };
-    let mut meta = meeting.read_meta()?;
-    meta.capture_issues.push(issue.clone());
-    meeting.write_meta(&meta)?;
+    meeting.update_meta(|meta| meta.capture_issues.push(issue.clone()))?;
     let _ = events.send(PipelineEvent::CaptureIssue(issue));
     Ok(())
 }

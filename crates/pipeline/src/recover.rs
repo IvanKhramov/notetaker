@@ -102,7 +102,10 @@ pub(crate) fn run(
                     .context("Слишком большой срок хранения")
             })
             .transpose()?;
-        meeting.write_meta(&meta)?;
+        meeting.update_meta(|current| {
+            current.ended_at = meta.ended_at;
+            current.audio_expires_at = meta.audio_expires_at;
+        })?;
     }
     // Leftovers of the interrupted recording; the transcript no longer needs them.
     let _ = fs::remove_dir_all(meeting.path().join("audio/.work"));

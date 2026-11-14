@@ -97,10 +97,10 @@ fn enhance_meeting_with_policy(
     let revision = meeting.save_enhanced(&result, enhanced_revision)?;
     let stamp = notetaker_core::SummaryStamp::new(&notes, &transcript, template_id, &result);
     let metadata = (|| -> Result<()> {
-        let mut meta = meeting.read_meta()?;
-        meta.template = Some(template_id.into());
-        meta.summary = Some(stamp.clone());
-        meeting.write_meta(&meta)?;
+        meeting.update_meta(|meta| {
+            meta.template = Some(template_id.into());
+            meta.summary = Some(stamp.clone());
+        })?;
         Ok(())
     })();
     if let Err(error) = metadata {
