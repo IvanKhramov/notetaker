@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
@@ -20,11 +20,13 @@ const SERIAL: u32 = 1;
 /// Call `finish` explicitly to write EOS, codec tail and the trimmed granule.
 /// Files are created exclusively to avoid overwriting an earlier probe.
 pub struct TrackWriter {
-    writer: PacketWriter<'static, BufWriter<File>>,
+    writer: PacketWriter<'static, File>,
     encoder: OpusEncoder,
     pending: VecDeque<f32>,
     samples: u64,
     encoded: u64,
+    sync_file: File,
+    synced: u64,
 }
 
 impl TrackWriter {
@@ -33,7 +35,8 @@ impl TrackWriter {
         let mut encoder = OpusEncoder::new(SAMPLE_RATE as i32, 1, Application::Voip)
             .map_err(anyhow::Error::msg)?;
         encoder.bitrate_bps = 24_000;
-        let mut writer = PacketWriter::new(BufWriter::new(file));
+        let sync_file = file.try_clone()?;
+        let mut writer = PacketWriter::new(file);
         let mut head = b"OpusHead".to_vec();
         head.extend([1, 1]); // version, mono
         head.extend(((PRE_SKIP * 3) as u16).to_le_bytes());
@@ -52,6 +55,8 @@ impl TrackWriter {
             pending: VecDeque::new(),
             samples: 0,
             encoded: 0,
+            sync_file,
+            synced: 0,
         })
     }
 
@@ -117,6 +122,7 @@ impl TrackWriter {
             self.encode_packet(last)?;
         }
         self.writer.into_inner().flush()?;
+        self.sync_file.sync_data()?;
         Ok(())
     }
 
@@ -139,6 +145,10 @@ impl TrackWriter {
             (PacketWriteEndInfo::EndPage, self.encoded * 3)
         };
         self.writer.write_packet(packet, SERIAL, end, granule)?;
+        if self.encoded - self.synced >= u64::from(SAMPLE_RATE) * 5 {
+            self.sync_file.sync_data()?;
+            self.synced = self.encoded;
+        }
         Ok(())
     }
 }
@@ -149,6 +159,22 @@ mod tests {
     use crate::{Channel, LevelMeter, sample_offset};
     use ogg::reading::PacketReader;
     use opus_rs::OpusDecoder;
+
+    #[test]
+    fn recording_syncs_at_five_second_intervals() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut writer = TrackWriter::create(dir.path().join("track.opus")).unwrap();
+        let second = vec![0.0; SAMPLE_RATE as usize];
+        for _ in 0..4 {
+            writer.write_samples(&second).unwrap();
+        }
+        assert_eq!(writer.synced, 0);
+        writer.write_samples(&second).unwrap();
+        assert_eq!(writer.synced, u64::from(SAMPLE_RATE) * 5);
+        writer.write_samples(&second).unwrap();
+        assert_eq!(writer.synced, u64::from(SAMPLE_RATE) * 5);
+        writer.finish().unwrap();
+    }
 
     #[test]
     fn opus_roundtrip_headers_duration_levels_and_timeline_gaps() {

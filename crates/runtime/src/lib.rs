@@ -14,3 +14,5 @@ pub mod unix;
 pub use unix as platform;
 #[cfg(windows)]
 pub use windows as platform;
+
+pub mod recording;

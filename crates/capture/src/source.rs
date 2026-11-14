@@ -101,20 +101,66 @@ pub(crate) fn send(
     }
 }
 
-/// Retry each interruption on the default device, but stop if that attempt
-/// cannot reach a healthy drain. A later device change gets its own retry.
+/// Recovery policy has no platform or clock dependencies.
+#[cfg(any(windows, target_os = "macos", test))]
+#[derive(Default)]
+struct Recovery {
+    lost: bool,
+    failures: u32,
+}
+#[cfg(any(windows, target_os = "macos", test))]
+impl Recovery {
+    fn failed(&mut self) -> (bool, Duration) {
+        let notify = !self.lost;
+        self.lost = true;
+        let delay = Duration::from_secs(1 << self.failures.min(5));
+        self.failures = self.failures.saturating_add(1);
+        (notify, delay)
+    }
+    fn healthy(&mut self) -> bool {
+        let restored = self.lost;
+        self.lost = false;
+        self.failures = 0;
+        restored
+    }
+}
+
+/// Reopen the microphone on the default endpoint with cancellable backoff.
+/// System capture retains its bounded recovery policy.
 #[cfg(any(windows, target_os = "macos", test))]
 pub(crate) fn recover_default(
-    mut run: impl FnMut(bool, &mut bool) -> Result<()>,
-    mut interrupted: impl FnMut(&anyhow::Error),
+    stop: &AtomicBool,
+    retry: bool,
+    mut run: impl FnMut(bool, &mut dyn FnMut()) -> Result<()>,
+    mut notice: impl FnMut(bool),
 ) -> Result<()> {
+    let mut recovery = Recovery::default();
     let mut use_default = false;
     loop {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         let mut healthy = false;
-        match run(use_default, &mut healthy) {
-            Err(error) if !use_default || healthy => {
-                interrupted(&error);
+        let result = run(use_default, &mut || {
+            healthy = true;
+            if recovery.healthy() {
+                notice(true);
+            }
+        });
+        match result {
+            Err(_) if retry || !use_default || healthy => {
+                let (notify, delay) = recovery.failed();
+                if notify {
+                    notice(false);
+                }
                 use_default = true;
+                let started = std::time::Instant::now();
+                while started.elapsed() < delay {
+                    if stop.load(Ordering::Relaxed) {
+                        return Ok(());
+                    }
+                    thread::sleep(Duration::from_millis(20));
+                }
             }
             result => return result,
         }
@@ -124,48 +170,66 @@ pub(crate) fn recover_default(
 #[cfg(test)]
 mod recovery_tests {
     use super::*;
-
     #[test]
-    fn each_device_change_reopens_but_failed_default_is_not_retried_forever() {
-        let mut attempts = Vec::new();
-        let mut issues = 0;
-        let result = recover_default(
+    fn reopened_stream_reports_restoration_once() {
+        let mut attempt = 0;
+        let mut notices = Vec::new();
+        recover_default(
+            &AtomicBool::new(false),
+            true,
             |default, healthy| {
-                attempts.push(default);
-                *healthy = attempts.len() < 3;
-                Err(anyhow!(if *healthy {
-                    "device changed"
-                } else {
-                    "no default device"
-                }))
+                attempt += 1;
+                if attempt == 1 {
+                    assert!(!default);
+                    return Err(anyhow!("unplugged"));
+                }
+                assert!(default);
+                healthy();
+                healthy();
+                Ok(())
             },
-            |_| issues += 1,
-        );
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("no default device")
-        );
-        assert_eq!(attempts, [false, true, true]);
-        assert_eq!(issues, 2);
+            |restored| notices.push(restored),
+        )
+        .unwrap();
+        assert_eq!(attempt, 2);
+        assert_eq!(notices, [false, true]);
     }
 
     #[test]
-    fn initial_open_failure_can_recover_on_default() {
-        let mut attempts = 0;
+    fn loss_is_reported_once_backoff_is_bounded_and_restoration_resets_it() {
+        let mut state = Recovery::default();
+        assert!(!state.healthy());
+        assert_eq!(state.failed(), (true, Duration::from_secs(1)));
+        assert_eq!(state.failed(), (false, Duration::from_secs(2)));
+        for _ in 0..100 {
+            assert!(state.failed().1 <= Duration::from_secs(32));
+        }
+        assert!(state.healthy());
+        assert!(!state.healthy());
+        assert_eq!(state.failed(), (true, Duration::from_secs(1)));
+    }
+    #[test]
+    fn cancellation_prevents_opening_device() {
         recover_default(
-            |default, _| {
-                attempts += 1;
-                if default {
-                    Ok(())
-                } else {
-                    Err(anyhow!("selected microphone removed"))
-                }
-            },
-            |_| {},
+            &AtomicBool::new(true),
+            true,
+            |_, _| panic!("opened after stop"),
+            |_| panic!("notice after stop"),
         )
         .unwrap();
-        assert_eq!(attempts, 2);
+    }
+    #[test]
+    fn successful_stream_does_not_retry() {
+        recover_default(
+            &AtomicBool::new(false),
+            true,
+            |default, healthy| {
+                assert!(!default);
+                healthy();
+                Ok(())
+            },
+            |_| panic!("unexpected notice"),
+        )
+        .unwrap();
     }
 }

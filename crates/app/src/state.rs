@@ -141,6 +141,7 @@ impl Recording {
             // the final reload. Keep editing locked until that reload arrives.
             PipelineEvent::Finished { .. }
             | PipelineEvent::LiveSegments(_)
+            | PipelineEvent::CaptureEvent(CaptureEvent::Recovery { .. })
             | PipelineEvent::CaptureEvent(CaptureEvent::Stopped { .. }) => {}
         }
     }

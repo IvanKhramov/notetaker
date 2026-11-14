@@ -48,6 +48,10 @@ pub struct AudioFrame {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CaptureEvent {
+    Recovery {
+        channel: Channel,
+        restored: bool,
+    },
     Fallback {
         at: Duration,
         reason: FallbackReason,
