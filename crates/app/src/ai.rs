@@ -17,6 +17,7 @@ pub enum Operation {
     Default,
     Save,
     Login,
+    Install,
 }
 pub struct Action {
     pub index: usize,
@@ -40,6 +41,8 @@ struct Card {
     status: String,
     busy: bool,
     installed: bool,
+    /// The vendor installer is running for this card.
+    installing: bool,
     edited: Option<Instant>,
     key_editing: bool,
     save_error: bool,
@@ -91,6 +94,7 @@ impl Default for Connections {
             key_editing: false,
             save_error: false,
             installed: cli.is_none_or(|kind| notetaker_llm::find_cli(kind).is_some()),
+            installing: false,
             key: String::new(),
             models: Vec::new(),
             status: "Не подключено".into(),
@@ -179,6 +183,7 @@ impl Connections {
     pub fn apply(&mut self, response: &Response) {
         let card = &mut self.cards[response.index];
         card.busy = false;
+        card.installing = false;
         card.installed = card
             .cli
             .is_none_or(|kind| notetaker_llm::find_cli(kind).is_some());
@@ -188,6 +193,10 @@ impl Connections {
         match &response.result {
             Err(error) => card.status = format!("Ошибка: {error}"),
             Ok(models) => {
+                if response.operation == Operation::Install {
+                    card.status = "Установлено. Теперь войдите в подписку".into();
+                    return;
+                }
                 if response.operation == Operation::Login {
                     card.status = "Не подключено. После входа нажмите Проверить".into();
                     return;
@@ -237,7 +246,7 @@ impl Connections {
             }
             ui.add_enabled_ui(!card.busy, |ui| {
                 if let Some(kind) = card.cli {
-                    operation = cli_setup(ui, kind, card.installed);
+                    operation = cli_setup(ui, kind, card.installed, card.installing, &card.status);
                 } else {
                     if *selected != 2 {
                         ui.add(
@@ -274,6 +283,7 @@ impl Connections {
             }
             if let Some(operation) = operation {
                 card.busy = true;
+                card.installing = operation == Operation::Install;
                 card.edited = None;
                 actions.push(Action {
                     index: *selected,
@@ -311,7 +321,7 @@ impl Connections {
                 let mut key_blur = false;
                 ui.add_enabled_ui(!card.busy, |ui| {
                     if let Some(kind) = card.cli {
-                        if let Some(requested) = cli_setup(ui, kind, card.installed) { operation = Some(requested); }
+                        if let Some(requested) = cli_setup(ui, kind, card.installed, card.installing, &card.status) { operation = Some(requested); }
                         if card.installed && kind == ProviderKind::ClaudeCli {
                             crate::theme::form_field(ui, "Модель", None, |ui| {
                                 crate::theme::select("model").selected_text(if card.provider.model.is_empty() { "Авто" } else { &card.provider.model }).show_ui(ui, |ui| {
@@ -367,6 +377,7 @@ impl Connections {
                 if card.busy { ui.spinner(); }
                 if let Some(operation) = operation {
                     card.busy = true;
+                    card.installing = operation == Operation::Install;
                     if matches!(operation, Operation::Save | Operation::Default) { card.edited = None; }
                     actions.push(Action { index, operation, provider: card.provider.clone(), key: if card.key_editing { String::new() } else { card.key.clone() } });
                 }
@@ -409,57 +420,85 @@ fn note(ui: &mut egui::Ui, text: &str) {
     ui.add(egui::Label::new(egui::RichText::new(text).size(12.0).color(p.muted)).wrap());
 }
 /// What a subscription needs before it can be used: its CLI, then a login.
-fn cli_setup(ui: &mut egui::Ui, kind: ProviderKind, installed: bool) -> Option<Operation> {
+fn cli_setup(
+    ui: &mut egui::Ui,
+    kind: ProviderKind,
+    installed: bool,
+    installing: bool,
+    status: &str,
+) -> Option<Operation> {
     use crate::theme::{ButtonStyle, Palette, icons};
     let claude = kind == ProviderKind::ClaudeCli;
+    let p = Palette::of(ui);
     let mut operation = None;
     if !installed {
-        let (name, url, command) = if claude {
+        let (name, vendor, url) = if claude {
             (
                 "Claude Code",
-                "https://code.claude.com/docs",
-                "npm i -g @anthropic-ai/claude-code",
+                "Anthropic",
+                "https://code.claude.com/docs/en/setup",
             )
         } else {
             (
                 "Codex CLI",
+                "OpenAI",
                 "https://developers.openai.com/codex/cli",
-                "npm i -g @openai/codex",
             )
         };
         crate::theme::callout(ui, icons::INFO, |ui| {
             ui.add(
                 egui::Label::new(format!(
-                    "Вход по подписке работает через {name}. На этом компьютере он не найден. Установите его и нажмите «Проверить снова»."
+                    "Вход по подписке работает через {name}. На этом компьютере он не найден."
                 ))
                 .wrap(),
             );
-            ui.horizontal(|ui| {
-                ui.code(command);
-                if crate::theme::icon_button(ui, icons::COPY, "Скопировать команду").clicked()
-                {
-                    ui.ctx().copy_text(command.into());
-                }
-            });
+            if installing {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(format!("Устанавливаю {name}. Это займёт пару минут."));
+                });
+                return;
+            }
+            // The card status is hidden while the CLI is missing, so a failed install shows here.
+            if let Some(error) = status.strip_prefix("Ошибка: ")
+                && !error.starts_with("CLI не установлен")
+            {
+                ui.add(egui::Label::new(egui::RichText::new(error).color(p.red)).wrap());
+            }
             ui.horizontal_wrapped(|ui| {
                 if ui
                     .add(
                         crate::theme::styled_button(
-                            Palette::of(ui),
-                            "Открыть инструкцию",
-                            ButtonStyle::Secondary,
+                            p,
+                            &format!("Установить {name}"),
+                            ButtonStyle::Primary,
                         )
-                        .icon(icons::EXTERNAL_LINK),
+                        .icon(icons::DOWNLOAD),
                     )
                     .clicked()
                 {
-                    ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                    operation = Some(Operation::Install);
                 }
                 if crate::theme::button(ui, "Проверить снова", ButtonStyle::Ghost).clicked()
                 {
                     operation = Some(Operation::Check);
                 }
+                if ui
+                    .add(
+                        crate::theme::styled_button(p, "Инструкция", ButtonStyle::Ghost)
+                            .icon(icons::EXTERNAL_LINK),
+                    )
+                    .clicked()
+                {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                }
             });
+            note(
+                ui,
+                &format!(
+                    "Запустится официальный установщик {vendor}. Он ставит программу в профиль пользователя, права администратора не нужны."
+                ),
+            );
         });
     } else {
         note(
@@ -472,12 +511,8 @@ fn cli_setup(ui: &mut egui::Ui, kind: ProviderKind, installed: bool) -> Option<O
         );
         if ui
             .add(
-                crate::theme::styled_button(
-                    Palette::of(ui),
-                    "Войти в подписку",
-                    ButtonStyle::Secondary,
-                )
-                .icon(icons::EXTERNAL_LINK),
+                crate::theme::styled_button(p, "Войти в подписку", ButtonStyle::Secondary)
+                    .icon(icons::EXTERNAL_LINK),
             )
             .clicked()
         {
@@ -501,6 +536,10 @@ pub fn execute(mut action: Action) -> Response {
                 action.provider.key_source = "credential".into();
                 action.provider.api_key_env = None;
             }
+            return Ok(Vec::new());
+        }
+        if action.operation == Operation::Install {
+            notetaker_llm::install_cli(config.kind)?;
             return Ok(Vec::new());
         }
         if action.operation == Operation::Login {

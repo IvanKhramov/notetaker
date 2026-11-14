@@ -81,6 +81,10 @@ fn find_in_path(kind: ProviderKind, path: Option<&std::ffi::OsStr>) -> Option<Pa
         if let Some(appdata) = std::env::var_os("APPDATA") {
             dirs.push(PathBuf::from(appdata).join("npm"));
         }
+        // The standalone Codex installer puts the launcher here.
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            dirs.push(PathBuf::from(local).join(r"Programs\OpenAI\Codex\bin"));
+        }
         dirs
     };
     for dir in dirs {
@@ -379,6 +383,102 @@ fn login_command(binary: &Path, kind: ProviderKind) -> Command {
     command
 }
 
+/// The vendor's own installer script. Both install into the user's profile and
+/// need no administrator rights.
+fn installer_url(kind: ProviderKind) -> &'static str {
+    match (kind == ProviderKind::ClaudeCli, cfg!(windows)) {
+        (true, true) => "https://claude.ai/install.ps1",
+        (true, false) => "https://claude.ai/install.sh",
+        (false, true) => "https://chatgpt.com/codex/install.ps1",
+        (false, false) => "https://chatgpt.com/codex/install.sh",
+    }
+}
+
+fn install_command(kind: ProviderKind) -> Command {
+    let url = installer_url(kind);
+    #[cfg(windows)]
+    let mut command = {
+        use std::os::windows::process::CommandExt;
+        let mut command = Command::new("powershell.exe");
+        command
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+            ])
+            .arg(format!("irm {url} | iex"))
+            .creation_flags(0x08000000); // CREATE_NO_WINDOW
+        command
+    };
+    #[cfg(not(windows))]
+    let mut command = {
+        // Download first: a failed download must not run a partial script.
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(r#"set -e; script=$(mktemp); trap 'rm -f "$script"' EXIT; curl -fsSL "$1" -o "$script"; "$2" "$script""#)
+            .arg("sh")
+            .arg(url)
+            .arg(if kind == ProviderKind::ClaudeCli { "bash" } else { "sh" });
+        command
+    };
+    // The Codex installer asks questions unless told not to.
+    command.env("CODEX_NON_INTERACTIVE", "1");
+    command
+}
+
+/// Runs an installer without a terminal and returns the end of its output on failure.
+fn run_installer(mut command: Command, timeout: Duration) -> Result<()> {
+    let output = tempfile::tempfile().context("Не удалось создать временный файл")?;
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(output.try_clone()?)
+        .stderr(output.try_clone()?)
+        .spawn()
+        .context("Не удалось запустить установщик")?;
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if started.elapsed() > timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!("Установка не завершилась за {} мин", timeout.as_secs() / 60);
+        }
+        thread::sleep(Duration::from_millis(200));
+    };
+    if status.success() {
+        return Ok(());
+    }
+    use std::io::{Read, Seek};
+    let mut output = output;
+    let mut text = Vec::new();
+    output.rewind()?;
+    output.read_to_end(&mut text)?;
+    let text = String::from_utf8_lossy(&text);
+    let tail: Vec<_> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .rev()
+        .take(4)
+        .collect();
+    let tail: Vec<_> = tail.into_iter().rev().collect();
+    anyhow::bail!("Установщик завершился с ошибкой. {}", tail.join(" "))
+}
+
+/// Installs the CLI with its vendor's installer and confirms it can be found.
+pub fn install_cli(kind: ProviderKind) -> Result<()> {
+    run_installer(install_command(kind), Duration::from_secs(600))?;
+    ensure!(
+        find_cli(kind).is_some(),
+        "Установка завершилась, но программа не найдена. Перезапустите notetaker и нажмите «Проверить снова»."
+    );
+    Ok(())
+}
+
 pub fn open_login(kind: ProviderKind) -> Result<()> {
     let binary = find_cli(kind).context("CLI не установлен")?;
     #[cfg(windows)]
@@ -624,6 +724,40 @@ fn cli_provider_uses_the_shared_map_reduce_for_long_transcripts() {
 #[cfg(test)]
 mod login_tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn installer_runs_the_vendor_script_and_reports_its_last_lines() {
+        for (kind, url, shell) in [
+            (
+                ProviderKind::ClaudeCli,
+                "https://claude.ai/install.sh",
+                "bash",
+            ),
+            (
+                ProviderKind::CodexCli,
+                "https://chatgpt.com/codex/install.sh",
+                "sh",
+            ),
+        ] {
+            let command = install_command(kind);
+            let args: Vec<_> = command.get_args().collect();
+            assert_eq!(command.get_program(), "/bin/sh");
+            assert_eq!(&args[2..], ["sh", url, shell]);
+        }
+        let mut ok = Command::new("/bin/sh");
+        ok.args(["-c", "echo done"]);
+        run_installer(ok, Duration::from_secs(10)).unwrap();
+        let mut failing = Command::new("/bin/sh");
+        failing.args(["-c", "echo first; echo; echo 'network is down' >&2; exit 3"]);
+        let error = run_installer(failing, Duration::from_secs(10))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("first network is down"), "{error}");
+        let mut slow = Command::new("/bin/sh");
+        slow.args(["-c", "sleep 30"]);
+        assert!(run_installer(slow, Duration::from_millis(300)).is_err());
+    }
 
     #[test]
     fn login_launches_the_binary_directly_with_separate_arguments() {
