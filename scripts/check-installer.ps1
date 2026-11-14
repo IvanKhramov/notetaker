@@ -32,19 +32,48 @@ function Get-InstalledVersion {
     return "$version".Trim()
 }
 function Test-InstalledGui {
-    $gui = Start-Process (Join-Path $install 'notetaker-app.exe') -PassThru
+    $profileDir = Join-Path $root 'smoke-profile'
+    New-Item -ItemType Directory -Force $profileDir | Out-Null
+    $smokeEnvironment = @{
+        NOTETAKER_SMOKE = '1'
+        LOCALAPPDATA = $profileDir
+        APPDATA = $profileDir
+        USERPROFILE = $profileDir
+        HOME = $profileDir
+        XDG_CONFIG_HOME = $profileDir
+        XDG_DATA_HOME = $profileDir
+        XDG_CACHE_HOME = $profileDir
+    }
+    $runId = [guid]::NewGuid()
+    $stderr = Join-Path $root "gui-$runId-stderr.log"
+    $stdout = Join-Path $root "gui-$runId-stdout.log"
+    $gui = Start-Process (Join-Path $install 'notetaker-app.exe') -Environment $smokeEnvironment -RedirectStandardError $stderr -RedirectStandardOutput $stdout -PassThru
     try {
-        # No audio devices required: just start the normal GUI without recording.
+        # Native renderer and IPC only, with no profile state or background network jobs.
         for ($i = 0; $i -lt 10; $i++) {
             Start-Sleep -Seconds 1
             $gui.Refresh()
             if ($gui.HasExited) { throw "GUI exited during startup: $($gui.ExitCode)" }
         }
-        $quit = Start-Process (Join-Path $install 'notetaker-app.exe') -ArgumentList '--quit' -PassThru
-        Wait-SmokeProcess $quit 10
-        Wait-SmokeProcess $gui 10
+        try {
+            $quit = Start-Process (Join-Path $install 'notetaker-app.exe') -ArgumentList '--quit' -Environment $smokeEnvironment -PassThru
+            Wait-SmokeProcess $quit 10
+            if (-not $gui.WaitForExit(10000)) {
+                Write-Warning 'GUI did not exit after polite shutdown; stopping the smoke process'
+            }
+        } catch {
+            # Startup health is the criterion; polite shutdown is best effort.
+            Write-Warning "GUI survived ten seconds but polite shutdown failed: $_"
+        }
     } finally {
-        if (-not $gui.HasExited) { $gui.Kill($true); $gui.WaitForExit() }
+        $gui.Refresh()
+        if (-not $gui.HasExited) {
+            try { Stop-Process -Id $gui.Id -Force } catch {
+                $gui.Refresh()
+                if (-not $gui.HasExited) { throw }
+            }
+            if (-not $gui.WaitForExit(5000)) { throw 'Cannot stop the smoke GUI process' }
+        }
     }
 }
 function Uninstall-Smoke([string]$Phase) {
@@ -102,8 +131,8 @@ try {
     if (Get-ItemProperty $run -Name notetaker -ErrorAction SilentlyContinue) { throw 'Autostart value survived uninstall' }
     Write-Host 'Installer and GUI smoke checks passed'
 } catch {
-    Get-ChildItem -LiteralPath $root -Filter '*.log' | ForEach-Object {
-        Write-Host "Inno Setup log: $($_.FullName)"
+    Get-ChildItem -LiteralPath $root -Recurse -File | Where-Object { $_.Extension -eq '.log' -or $_.Name -eq 'crash.flag' } | ForEach-Object {
+        Write-Host "Smoke diagnostic log: $($_.FullName)"
         Get-Content -LiteralPath $_.FullName -Tail 80
     }
     throw

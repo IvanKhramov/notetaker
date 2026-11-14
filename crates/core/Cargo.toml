@@ -25,3 +25,6 @@ thiserror = "2"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 uuid = { version = "1", features = ["v7", "serde"] }
 notetaker-asr-proto = { path = "../asr-proto" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

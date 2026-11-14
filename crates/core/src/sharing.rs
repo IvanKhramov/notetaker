@@ -1,7 +1,7 @@
 //! Shared files are revision checked; disposable and biometric state stays local.
 use crate::{
     Library, Meeting, Result, Revision, Versioned,
-    storage::{checked_write, load_text, meeting_lock},
+    storage::{PreparedWrite, load_text, meeting_lock},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -120,10 +120,11 @@ impl Library {
         shared_name(name)?;
         let path = self.root().join(".notetaker").join(name);
         fs::create_dir_all(path.parent().expect("state parent"))?;
+        let prepared = PreparedWrite::new(&path, text.as_bytes())?;
         let lock = meeting_lock(&path);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         let _file_guard = crate::storage::lock_meeting_files(path.parent().expect("state parent"))?;
-        checked_write(&path, text.as_bytes(), expected)
+        prepared.checked_persist(&path, text.as_bytes(), expected)
     }
 }
 fn move_legacy_file(from: &Path, to: &Path) -> Result<()> {

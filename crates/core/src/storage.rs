@@ -44,6 +44,24 @@ pub(crate) fn meeting_lock(path: &Path) -> Arc<Mutex<()>> {
     lock
 }
 
+fn lock_unsupported(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::Unsupported {
+        return true;
+    }
+    #[cfg(windows)]
+    if error.raw_os_error() == Some(1) {
+        // ERROR_INVALID_FUNCTION
+        return true;
+    }
+    #[cfg(unix)]
+    if error.raw_os_error().is_some_and(|code| {
+        [libc::ENOTSUP, libc::EOPNOTSUPP, libc::ENOSYS, libc::ENOLCK].contains(&code)
+    }) {
+        return true;
+    }
+    false
+}
+
 // Keep this inode permanently: removing/replacing it would split lock holders.
 // Only known content names/extensions are indexed, exported or reconciled.
 pub(crate) fn lock_meeting_files(path: &Path) -> Result<Option<fs::File>> {
@@ -74,9 +92,7 @@ fn lock_meeting_files_for(path: &Path, timeout: std::time::Duration) -> Result<O
                 )
                 .into());
             }
-            Err(fs::TryLockError::Error(error))
-                if error.kind() == std::io::ErrorKind::Unsupported =>
-            {
+            Err(fs::TryLockError::Error(error)) if lock_unsupported(&error) => {
                 tracing::warn!(path = %path.display(), %error,
                     "file locking unsupported; using in-process meeting lock only");
                 // CLI has no tracing subscriber; the GUI captures stderr in its log.
@@ -287,9 +303,35 @@ impl Meeting {
     }
 
     pub fn update_meta(&self, update: impl FnOnce(&mut MeetingMeta)) -> Result<()> {
+        self.update_meta_with_timeout(std::time::Duration::from_secs(5), update)
+    }
+
+    /// Longer bounded contention budget for recording finalization.
+    pub fn update_meta_with_timeout(
+        &self,
+        timeout: std::time::Duration,
+        update: impl FnOnce(&mut MeetingMeta),
+    ) -> Result<()> {
+        let started = std::time::Instant::now();
         let lock = meeting_lock(&self.path);
-        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let _file_guard = crate::storage::lock_meeting_files(&self.path)?;
+        let _guard = loop {
+            match lock.try_lock() {
+                Ok(guard) => break guard,
+                Err(std::sync::TryLockError::Poisoned(error)) => break error.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) if started.elapsed() < timeout => {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "meeting metadata mutex timed out",
+                    )
+                    .into());
+                }
+            }
+        };
+        let _file_guard =
+            lock_meeting_files_for(&self.path, timeout.saturating_sub(started.elapsed()))?;
         let loaded = load_text(&self.source_path("meta.yaml")?)?;
         let mut meta: MeetingMeta = serde_yaml::from_str(&loaded.value)?;
         update(&mut meta);
@@ -315,10 +357,11 @@ impl Meeting {
         read_optional(&self.source_path("notes.md")?)
     }
     pub fn write_notes(&self, notes: &str) -> Result<()> {
+        let prepared = PreparedWrite::new(&self.path.join("notes.md"), notes.as_bytes())?;
         let lock = meeting_lock(&self.path);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         let _file_guard = crate::storage::lock_meeting_files(&self.path)?;
-        atomic_write(&self.path.join("notes.md"), notes.as_bytes())?;
+        prepared.persist(&self.path.join("notes.md"))?;
         self.clean_attachments_after_save();
         Ok(())
     }
@@ -326,10 +369,11 @@ impl Meeting {
         read_optional(&self.source_path("enhanced.md")?)
     }
     pub fn write_enhanced(&self, enhanced: &str) -> Result<()> {
+        let prepared = PreparedWrite::new(&self.path.join("enhanced.md"), enhanced.as_bytes())?;
         let lock = meeting_lock(&self.path);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         let _file_guard = crate::storage::lock_meeting_files(&self.path)?;
-        atomic_write(&self.path.join("enhanced.md"), enhanced.as_bytes())?;
+        prepared.persist(&self.path.join("enhanced.md"))?;
         self.clean_attachments_after_save();
         Ok(())
     }
@@ -343,16 +387,15 @@ impl Meeting {
     }
 
     pub fn write_transcript(&self, transcript: &Transcript) -> Result<()> {
-        let lock = meeting_lock(&self.path);
-        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let _file_guard = crate::storage::lock_meeting_files(&self.path)?;
         if transcript.version != crate::SCHEMA_VERSION {
             return Err(crate::Error::UnsupportedVersion(transcript.version));
         }
-        atomic_write(
-            &self.path.join("transcript.json"),
-            &serde_json::to_vec_pretty(transcript)?,
-        )
+        let path = self.path.join("transcript.json");
+        let prepared = PreparedWrite::new(&path, &serde_json::to_vec_pretty(transcript)?)?;
+        let lock = meeting_lock(&self.path);
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _file_guard = lock_meeting_files(&self.path)?;
+        prepared.persist(&path)
     }
 
     pub fn load_notes(&self) -> Result<Versioned<String>> {
@@ -389,31 +432,29 @@ impl Meeting {
         )
     }
     fn save_checked(&self, name: &str, bytes: &[u8], expected: Revision) -> Result<Revision> {
+        let prepared = PreparedWrite::new(&self.path.join(name), bytes)?;
         let lock = meeting_lock(&self.path);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         let _file_guard = crate::storage::lock_meeting_files(&self.path)?;
-        let revision = checked_write(&self.path.join(name), bytes, expected)?;
+        let revision = prepared.checked_persist(&self.path.join(name), bytes, expected)?;
         if matches!(name, "notes.md" | "enhanced.md") {
             self.clean_attachments_after_save();
         }
         Ok(revision)
     }
-    /// Serialize read-modify-write across cooperating processes. External
-    /// edits made during the closure are detected by the content revision too.
+    /// Serialize local transcript edits; concurrent process edits are revision-checked.
+    /// Stage large transcript writes without holding the meeting file lock.
     pub fn update_transcript(&self, update: impl FnOnce(&mut Transcript)) -> Result<()> {
-        let lock = meeting_lock(&self.path);
-        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let _file_guard = crate::storage::lock_meeting_files(&self.path)?;
-        let mut loaded = self.load_transcript()?;
+        let transcript_lock = meeting_lock(&self.path.join("transcript.json"));
+        let _transcript_guard = transcript_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut loaded = {
+            let lock = meeting_lock(&self.path);
+            let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+            let _file_guard = lock_meeting_files(&self.path)?;
+            self.load_transcript()?
+        };
         update(&mut loaded.value);
-        if loaded.value.version != crate::SCHEMA_VERSION {
-            return Err(crate::Error::UnsupportedVersion(loaded.value.version));
-        }
-        checked_write(
-            &self.path.join("transcript.json"),
-            &serde_json::to_vec_pretty(&loaded.value)?,
-            loaded.revision,
-        )?;
+        self.save_transcript(&loaded.value, loaded.revision)?;
         Ok(())
     }
 
@@ -433,26 +474,62 @@ fn read_optional(path: &Path) -> Result<String> {
     }
 }
 
-pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
-    let mut temporary = NamedTempFile::new_in(path.parent().expect("meeting file has a parent"))?;
-    temporary.write_all(bytes)?;
-    temporary.as_file().sync_all()?;
-    // Sync clients and antivirus briefly hold the target open on Windows; the
-    // rename then fails with PermissionDenied and succeeds a moment later.
-    let mut attempt = 0;
-    loop {
-        match temporary.persist(path) {
-            Ok(_) => return Ok(()),
-            Err(error)
-                if error.error.kind() == std::io::ErrorKind::PermissionDenied && attempt < 4 =>
-            {
-                attempt += 1;
-                temporary = error.file;
-                std::thread::sleep(std::time::Duration::from_millis(100));
+pub(crate) struct PreparedWrite(NamedTempFile);
+impl PreparedWrite {
+    pub(crate) fn new(path: &Path, bytes: &[u8]) -> Result<Self> {
+        let mut temporary =
+            NamedTempFile::new_in(path.parent().expect("meeting file has a parent"))?;
+        temporary.write_all(bytes)?;
+        temporary.as_file().sync_all()?;
+        Ok(Self(temporary))
+    }
+    pub(crate) fn checked_persist(
+        self,
+        path: &Path,
+        bytes: &[u8],
+        expected: Revision,
+    ) -> Result<Revision> {
+        if Revision::of(read_bytes(path)?.as_deref()) != expected {
+            // Preserve conflict handling, but never flush the large file under the lock.
+            let local = path.with_file_name(format!(
+                "{}.conflict-{}-{}.{}",
+                path.file_stem().unwrap().to_string_lossy(),
+                DateTime::<Utc>::from(std::time::SystemTime::now()).format("%Y%m%dT%H%M%S%.3fZ"),
+                uuid::Uuid::now_v7(),
+                path.extension().unwrap().to_string_lossy()
+            ));
+            self.persist(&local)?;
+            return Err(crate::Error::Conflict {
+                path: path.to_owned(),
+                local,
+            });
+        }
+        self.persist(path)?;
+        Ok(Revision::of(Some(bytes)))
+    }
+    pub(crate) fn persist(self, path: &Path) -> Result<()> {
+        let mut temporary = self.0;
+        // Sync clients and antivirus briefly hold the target open on Windows; the
+        // rename then fails with PermissionDenied and succeeds a moment later.
+        let mut attempt = 0;
+        loop {
+            match temporary.persist(path) {
+                Ok(_) => return Ok(()),
+                Err(error)
+                    if error.error.kind() == std::io::ErrorKind::PermissionDenied
+                        && attempt < 4 =>
+                {
+                    attempt += 1;
+                    temporary = error.file;
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                Err(error) => return Err(error.error.into()),
             }
-            Err(error) => return Err(error.error.into()),
         }
     }
+}
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    PreparedWrite::new(path, bytes)?.persist(path)
 }
 
 fn slug(title: &str) -> String {
@@ -484,30 +561,7 @@ pub(crate) fn load_text(path: &Path) -> Result<Versioned<String>> {
 }
 
 pub(crate) fn checked_write(path: &Path, bytes: &[u8], expected: Revision) -> Result<Revision> {
-    let current = Revision::of(read_bytes(path)?.as_deref());
-    if current != expected {
-        // UUID disambiguates concurrent saves within the same millisecond.
-        let stem = path
-            .file_stem()
-            .expect("meeting file has a stem")
-            .to_string_lossy();
-        let ext = path
-            .extension()
-            .expect("meeting file has an extension")
-            .to_string_lossy();
-        let local = path.with_file_name(format!(
-            "{stem}.conflict-{}-{}.{ext}",
-            DateTime::<Utc>::from(std::time::SystemTime::now()).format("%Y%m%dT%H%M%S%.3fZ"),
-            uuid::Uuid::now_v7()
-        ));
-        atomic_write(&local, bytes)?;
-        return Err(crate::Error::Conflict {
-            path: path.to_owned(),
-            local,
-        });
-    }
-    atomic_write(path, bytes)?;
-    Ok(Revision::of(Some(bytes)))
+    PreparedWrite::new(path, bytes)?.checked_persist(path, bytes, expected)
 }
 
 fn read_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
@@ -573,5 +627,43 @@ mod lock_tests {
         assert!(
             matches!(error, crate::Error::Io(ref e) if e.kind() == std::io::ErrorKind::TimedOut)
         );
+    }
+}
+
+#[cfg(test)]
+mod unsupported_lock_tests {
+    use super::lock_unsupported;
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn unsupported_kind_is_recognized_but_contention_is_not() {
+        assert!(lock_unsupported(&Error::from(ErrorKind::Unsupported)));
+        for kind in [
+            ErrorKind::WouldBlock,
+            ErrorKind::PermissionDenied,
+            ErrorKind::TimedOut,
+        ] {
+            assert!(!lock_unsupported(&Error::from(kind)));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_invalid_function_means_unsupported_locking() {
+        assert!(lock_unsupported(&Error::from_raw_os_error(1)));
+        for code in [5, 32, 33] {
+            assert!(!lock_unsupported(&Error::from_raw_os_error(code)));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_unsupported_and_nfs_lock_errors_are_recognized() {
+        for code in [libc::ENOTSUP, libc::EOPNOTSUPP, libc::ENOSYS, libc::ENOLCK] {
+            assert!(lock_unsupported(&Error::from_raw_os_error(code)));
+        }
+        for code in [libc::EACCES, libc::EAGAIN, libc::EINTR] {
+            assert!(!lock_unsupported(&Error::from_raw_os_error(code)));
+        }
     }
 }

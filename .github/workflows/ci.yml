@@ -41,6 +41,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libwayland-dev
+      - name: Check release changelog
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash scripts/check-changelog.sh
       - name: Check formatting
         if: runner.os == 'Linux'
         run: cargo fmt --all --check
