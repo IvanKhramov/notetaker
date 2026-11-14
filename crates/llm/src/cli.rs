@@ -726,6 +726,7 @@ mod login_tests {
     use super::*;
 
     #[test]
+    #[cfg(unix)]
     fn installer_runs_the_vendor_script_and_reports_its_last_lines() {
         for (kind, url, shell) in [
             (
