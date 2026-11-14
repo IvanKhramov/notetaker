@@ -322,3 +322,67 @@ fn reveal(path: &Path) -> anyhow::Result<()> {
         open(path.parent().unwrap_or(path))
     }
 }
+
+#[cfg(any(windows, test))]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum HelperStartup {
+    Pending,
+    Ready,
+    Failed,
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn helper_startup(
+    ready: bool,
+    running: bool,
+    elapsed: std::time::Duration,
+) -> HelperStartup {
+    // A ready file from an exited helper is not a live handoff acknowledgement.
+    if !running {
+        HelperStartup::Failed
+    } else if ready {
+        HelperStartup::Ready
+    } else if elapsed > std::time::Duration::from_secs(15) {
+        HelperStartup::Failed
+    } else {
+        HelperStartup::Pending
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HelperStartup, helper_startup};
+    use std::time::Duration;
+
+    #[test]
+    fn ready_helper_wins_over_startup_timeout() {
+        assert_eq!(
+            helper_startup(true, true, Duration::from_secs(30)),
+            HelperStartup::Ready
+        );
+    }
+
+    #[test]
+    fn startup_timeout_only_applies_to_unready_running_helpers() {
+        assert_eq!(
+            helper_startup(false, true, Duration::from_secs(15)),
+            HelperStartup::Pending
+        );
+        assert_eq!(
+            helper_startup(false, true, Duration::from_secs(16)),
+            HelperStartup::Failed
+        );
+    }
+
+    #[test]
+    fn exited_helper_is_rejected_even_with_a_ready_file() {
+        assert_eq!(
+            helper_startup(true, false, Duration::from_secs(1)),
+            HelperStartup::Failed
+        );
+        assert_eq!(
+            helper_startup(false, false, Duration::ZERO),
+            HelperStartup::Failed
+        );
+    }
+}
