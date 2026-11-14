@@ -137,7 +137,7 @@ impl Maintenance {
     }
     pub fn dialogs(&mut self, ctx: &egui::Context, busy: bool) {
         if self.crashed {
-            let close = crate::theme::window(ctx, "Прошлый запуск завершился ошибкой")
+            let close = crate::theme::modal(ctx, "Прошлый запуск завершился ошибкой")
                 .resizable(false)
                 .show(ctx, |ui| {
                     ui.label("Диагностика сохранена в папке логов.");
@@ -155,7 +155,7 @@ impl Maintenance {
             }
         }
         if let Some(message) = self.message.clone() {
-            let close = crate::theme::window(ctx, "Диагностика")
+            let close = crate::theme::modal(ctx, "Диагностика")
                 .default_width(460.0)
                 .show(ctx, |ui| {
                     ui.label(message);

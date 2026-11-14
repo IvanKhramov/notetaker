@@ -72,7 +72,17 @@ pub fn rename_menu(
         || label(transcript, id).to_owned(),
         |name| format!("{name}?"),
     );
-    if ui.link(RichText::new(title).color(color(id))).clicked() {
+    if ui
+        .add(
+            egui::Button::new(
+                RichText::new(title)
+                    .font(crate::theme::medium(13.0))
+                    .color(crate::theme::Palette::of(ui).text),
+            )
+            .frame(false),
+        )
+        .clicked()
+    {
         crate::people::request(
             ui,
             crate::people::Request {
@@ -83,13 +93,8 @@ pub fn rename_menu(
         );
     }
     // Quiet, frameless: a framed 32px button outweighed the speaker name.
-    let more = crate::theme::styled_button(
-        crate::theme::Palette::of(ui),
-        "…",
-        crate::theme::ButtonStyle::Ghost,
-    )
-    .small();
-    egui::containers::menu::MenuButton::from_button(more).ui(ui, |ui| {
+    let more = crate::theme::icon_button(ui, crate::theme::icons::ELLIPSIS, "Действия собеседника");
+    egui::Popup::menu(&more).show(|ui| {
         let name_key = ui.make_persistent_id(("speaker-name", meta.id, id));
         let all_key = name_key.with("everywhere");
         let mut name = ui
@@ -206,15 +211,13 @@ pub fn count_control(
                     });
                 // Draw the chevron: the embedded text font has no ▾ glyph.
                 let c = response.rect.right_center() - egui::vec2(11.0, 0.0);
-                ui.painter().add(egui::Shape::convex_polygon(
-                    vec![
-                        c + egui::vec2(-3.0, -1.5),
-                        c + egui::vec2(3.0, -1.5),
-                        c + egui::vec2(0.0, 2.0),
-                    ],
-                    ui.visuals().weak_text_color(),
-                    egui::Stroke::NONE,
-                ));
+                crate::theme::paint_icon(
+                    ui,
+                    c,
+                    crate::theme::icons::CHEVRON_DOWN,
+                    16.0,
+                    Palette::of(ui).muted,
+                );
                 response
             })
             .inner;

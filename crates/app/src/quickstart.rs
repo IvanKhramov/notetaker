@@ -272,9 +272,12 @@ impl Panel {
             .show(ctx, |ui| {
                 ui.set_width((ctx.content_rect().width() - 64.0).min(520.0));
                 ui.horizontal(|ui| {
-                    ui.weak(format!("{} / 3", self.step + 1));
+                    for step in 0..3 {
+                        let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                        ui.painter().circle_filled(rect.center(), 3.0, if step == self.step { Palette::of(ui).text } else { Palette::of(ui).border_strong });
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if theme::button(ui, "×", theme::ButtonStyle::Ghost).on_hover_text("Закрыть").clicked() { open = false; }
+                        if theme::icon_button(ui, theme::icons::X, "Закрыть").clicked() { open = false; }
                     });
                 });
                 ui.add_space(8.0);
@@ -317,7 +320,7 @@ impl Panel {
                         _ => {
                             ui.heading("Подключить помощников?");
                             ui.label("Необязательно. Всё можно настроить позже.");
-                            egui::CollapsingHeader::new("Календарь").show(ui, |ui| {
+                            crate::theme::disclosure("Календарь").show(ui, |ui| {
                                 ui.label("Встречи из календаря появятся на главном экране.");
                                 if state.settings.calendars.is_empty() {
                                     ui.add_enabled_ui(cfg!(any(windows, target_os = "macos")), |ui| {
@@ -329,7 +332,7 @@ impl Panel {
                                 } else { ui.label("Календарь подключён"); }
                                 if theme::action_link(ui, "Пропустить календарь").clicked() { self.calendar_url.clear(); }
                             });
-                            egui::CollapsingHeader::new("AI для конспектов").show(ui, |ui| {
+                            crate::theme::disclosure("AI для конспектов").show(ui, |ui| {
                                 ui.label("Текст встречи будет отправлен выбранному AI. Аудио останется на компьютере.");
                                 for action in state.connections.onboarding_ui(ui, state.ready, &mut self.selected_ai) {
                                     state.send(Command::Ai(action));
@@ -348,7 +351,7 @@ impl Panel {
                 }
                 ui.add_space(16.0);
                 if let Some(error) = &state.settings_autosave.error { ui.colored_label(Palette::of(ui).red, error); }
-                ui.horizontal_wrapped(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let check_audio = self.step == 0 && self.probe_status.is_none();
                     let label = if self.step == 2 { "Начать работу" } else if check_audio { "Проверить звук" } else { "Продолжить" };
                     if ui.add_enabled(!state.quickstart.probe_busy, theme::styled_button(Palette::of(ui), label, theme::ButtonStyle::Primary)).clicked() {

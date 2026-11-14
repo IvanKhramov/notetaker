@@ -364,7 +364,7 @@ impl Panel {
                     .cloned()
                     .collect(),
             };
-            ui.collapsing("С прошлой встречи", |ui| {
+            crate::theme::disclosure("С прошлой встречи").show(ui, |ui| {
                 ui.label(carry.markdown());
                 if meta.mode == Mode::Hybrid && previous.meta.mode == Mode::Local {
                     ui.weak("Источник Local: при вставке встреча станет Local");
@@ -502,7 +502,7 @@ impl Panel {
         ));
         let mut changed = None;
         ui.add_enabled_ui(self.receiver.is_none(), |ui| {
-            ui.collapsing("Изменить человека", |ui| {
+            crate::theme::disclosure("Изменить человека").show(ui, |ui| {
                 ui.text_edit_singleline(&mut self.rename);
                 let mut edits = self
                     .snapshot
@@ -525,12 +525,14 @@ impl Panel {
                     changed = Some(edits.clone());
                 }
                 egui::ComboBox::from_id_salt("merge-person")
+                    .icon(crate::theme::select_icon)
                     .selected_text("Объединить с...")
                     .show_ui(ui, |ui| {
                         if let Some(snapshot) = &self.snapshot {
                             for other in &snapshot.people {
                                 if other.id != page.person.id {
-                                    ui.selectable_value(
+                                    crate::theme::select_value(
+                                        ui,
                                         &mut self.merge_into,
                                         other.id.clone(),
                                         format!(
@@ -731,6 +733,7 @@ impl Panel {
             });
         }
         egui::ComboBox::from_id_salt("digest-person")
+            .icon(crate::theme::select_icon)
             .selected_text(
                 self.snapshot
                     .as_ref()
@@ -738,10 +741,11 @@ impl Panel {
                     .map_or("Все люди", |p| p.name.as_str()),
             )
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.filter_person, String::new(), "Все люди");
+                crate::theme::select_value(ui, &mut self.filter_person, String::new(), "Все люди");
                 if let Some(snapshot) = &self.snapshot {
                     for person in snapshot.people.iter().filter(|p| !p.hidden) {
-                        ui.selectable_value(
+                        crate::theme::select_value(
+                            ui,
                             &mut self.filter_person,
                             person.id.clone(),
                             &person.name,
@@ -750,6 +754,7 @@ impl Panel {
                 }
             });
         egui::ComboBox::from_id_salt("digest-series")
+            .icon(crate::theme::select_icon)
             .selected_text(
                 self.snapshot
                     .as_ref()
@@ -757,10 +762,11 @@ impl Panel {
                     .map_or("Все серии", |s| s.title.as_str()),
             )
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.filter_series, String::new(), "Все серии");
+                crate::theme::select_value(ui, &mut self.filter_series, String::new(), "Все серии");
                 if let Some(snapshot) = &self.snapshot {
                     for series in &snapshot.series {
-                        ui.selectable_value(
+                        crate::theme::select_value(
+                            ui,
                             &mut self.filter_series,
                             series.id.clone(),
                             &series.title,

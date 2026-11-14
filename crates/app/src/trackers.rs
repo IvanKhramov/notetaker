@@ -101,7 +101,7 @@ impl Panel {
             }
         }
         let mut open = self.open;
-        crate::theme::window(ctx, "Отправить в трекер: предварительный просмотр")
+        crate::theme::modal(ctx, "Отправить в трекер: предварительный просмотр")
             .open(&mut open)
             .default_width(680.0)
             .show(ctx, |ui| {
@@ -113,7 +113,7 @@ impl Panel {
                         crate::theme::card(crate::theme::Palette::of(ui), false).show(ui, |ui| {
                             ui.strong(&p.task.text);
                             ui.label(&p.endpoint);
-                            ui.collapsing("Данные для отправки", |ui| {
+                            crate::theme::disclosure("Данные для отправки").show(ui, |ui| {
                                 ui.monospace(
                                     serde_json::to_string_pretty(&p.body).unwrap_or_default(),
                                 );

@@ -112,7 +112,7 @@ impl Updates {
     }
     pub fn ui(&mut self, ctx: &egui::Context, _busy: bool) {
         if let Some(message) = self.message.clone() {
-            let close = crate::theme::window(ctx, "Обновление").show(ctx, |ui| {
+            let close = crate::theme::modal(ctx, "Обновление").show(ctx, |ui| {
                 ui.label(message);
                 if ui.button("Закрыть").clicked() {
                     self.message = None;

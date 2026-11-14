@@ -4,6 +4,7 @@ from pathlib import Path
 import os
 import re
 import subprocess
+import shutil
 
 root = Path(__file__).resolve().parent.parent
 harness = root / "target/preview-harness"
@@ -21,7 +22,7 @@ manifest = re.sub(r'path = "\.\./([^"]+)"', lambda m: f'path = "{root / "crates"
 (harness / "Cargo.lock").write_text((root / "Cargo.lock").read_text())
 modules = []
 for path in sorted((root / "crates/app/src").glob("*.rs")):
-    if path.stem in {"main", "desktop", "macos", "updates", "updates_macos"}:
+    if path.stem in {"main", "desktop", "macos", "updates", "updates_macos", "icons"}:
         continue
     text = path.read_text()
     if path.stem == "state":
@@ -29,22 +30,30 @@ for path in sorted((root / "crates/app/src").glob("*.rs")):
         text = text.replace("    fn new(data: DocumentData)", "    pub(crate) fn new(data: DocumentData)")
     if path.stem == "quickstart":
         text = text.replace("    step: usize,", "    pub(crate) step: usize,\n    pub(crate) expanded: bool,")
-        text = text.replace('egui::CollapsingHeader::new("Календарь")', 'egui::CollapsingHeader::new("Календарь").default_open(self.expanded)')
-        text = text.replace('egui::CollapsingHeader::new("AI для конспектов")', 'egui::CollapsingHeader::new("AI для конспектов").default_open(self.expanded)')
+        text = text.replace('crate::theme::disclosure("Календарь")', 'crate::theme::disclosure("Календарь").default_open(self.expanded)')
+        text = text.replace('crate::theme::disclosure("AI для конспектов")', 'crate::theme::disclosure("AI для конспектов").default_open(self.expanded)')
     if path.stem == "ui":
         text = text.replace("    pub fn new() -> Self", "    pub fn new(state: AppState) -> Self")
         text = text.replace("state: AppState::new(),", "state,")
+        expected = 'egui::Popup::menu(&menu_response).show(|ui| {'
+        assert text.count(expected) == 1, "meeting menu fixture hook changed"
+        text = text.replace(expected, 'egui::Popup::menu(&menu_response).open(ui.ctx().data(|data| data.get_temp::<bool>(egui::Id::unique("fixture-meeting-menu")).unwrap_or(false)) || egui::Popup::is_id_open(ui.ctx(), egui::Popup::menu(&menu_response).get_id())).show(|ui| {')
         text += '''
 impl NotetakerApp {
     pub fn fixture(state: AppState, screen: usize) -> Self {
         let mut app = Self::new(state);
-        app.home = screen != 4 && screen != 5 && screen != 12;
+        app.home = ![4,5,12,14,15].contains(&screen);
         if screen < 3 { app.quickstart.open = true; app.quickstart.step = screen; }
         if screen == 13 { app.quickstart.open = true; app.quickstart.step = 2; app.quickstart.expanded = true; }
         if (6..12).contains(&screen) {
             app.show_settings = true;
             app.settings_panel.section = crate::settings::Section::ALL[screen - 6];
         }
+        if screen == 14 { app.confirm_delete = true; }
+        if screen == 16 { app.state.notices.push((ToastLevel::Success, "Конспект скопирован".into())); }
+        if screen == 17 { app.state.rows.clear(); }
+        if screen == 18 { app.show_settings = true; }
+        if screen == 19 { app.state.recording.phase = Phase::Recording; }
         if screen == 5 { app.state.tab = Tab::Transcript; }
         app
     }
@@ -63,6 +72,7 @@ struct Preview { app: ui::NotetakerApp, frames: usize, output: std::path::PathBu
 impl eframe::App for Preview {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         // Use the real UI, but never call its logic/worker polling.
+        ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("fixture-meeting-menu"), self.screen == 15));
         self.app.ui(ui, frame);
         if self.screen == 12 {
             egui::Window::new("Запись").anchor(egui::Align2::RIGHT_BOTTOM, [-20.0, -100.0]).title_bar(false)
@@ -97,6 +107,7 @@ fn main() -> eframe::Result {
         state.ready = true;
         state.settings.user_name = "Иван".into();
         state.settings.ui_zoom = zoom;
+        state.settings.theme = if dark { theme::Theme::Dark } else { theme::Theme::Light };
         state.settings.library = std::env::current_dir().unwrap().join("target/preview-harness/fixture/library");
         state.settings.models_folder = Some(state.settings.library.with_file_name("models"));
         state.settings_draft = state.settings.clone();
@@ -139,13 +150,15 @@ for key in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOM
     env[key] = str(directory)
 env["LIBGL_ALWAYS_SOFTWARE"] = "1"
 env["LD_LIBRARY_PATH"] = str(harness / "libs/usr/lib/x86_64-linux-gnu") + ":" + env.get("LD_LIBRARY_PATH", "")
+if shutil.disk_usage(root).free < 2 * 1024**3:
+    raise SystemExit("Less than 2 GiB free; stop before building previews")
 subprocess.run(["cargo", "build", "--manifest-path", str(harness / "Cargo.toml")], cwd=root, env=env, check=True)
-names = ["welcome", "name", "connections", "home", "note", "transcript", "general", "recording", "calendars", "ai", "search", "storage", "recording-pill", "connections-expanded"]
+names = ["welcome", "name", "connections", "home", "note", "transcript", "general", "recording", "calendars", "ai", "search", "storage", "recording-pill", "connections-expanded", "delete-confirm", "meeting-menu", "toast", "empty-library", "narrow-settings", "recording-bar"]
 for width, height, zoom in [(1280, 800, 1.0), (960, 640, 1.0), (960, 640, 1.5)]:
     for index, name in enumerate(names):
         for theme in ("light", "dark"):
             target = output / f"{name}-{theme}-{width}x{height}-{int(zoom*100)}.png"
-            subprocess.run(["xvfb-run", "-a", str(root / "target/debug/onboarding-preview"), str(index), theme, str(target), str(width), str(height), str(zoom)], cwd=root, env=env, check=True, timeout=30)
+            subprocess.run(["xvfb-run", "-a", str(root / "target/debug/onboarding-preview"), str(index), theme, str(target), str(760 if name == "narrow-settings" else width), str(height), str(zoom)], cwd=root, env=env, check=True, timeout=30)
             print(target, flush=True)
 
 # A local, self-contained gallery. The inline viewer uses these same PNG files.

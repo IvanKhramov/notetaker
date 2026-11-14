@@ -185,10 +185,7 @@ impl Panel {
         let mut edit_folder = None;
         ui.horizontal(|ui| {
             theme::section_caption(ui, "Папки");
-            if ui
-                .small_button("+")
-                .on_hover_text("Создать или настроить папку")
-                .clicked()
+            if theme::icon_button(ui, theme::icons::PLUS, "Создать или настроить папку").clicked()
             {
                 self.settings_open = true;
                 if let Some(s) = &self.snapshot {
@@ -356,6 +353,7 @@ impl Panel {
                 ui.visuals_mut().widgets.inactive.bg_stroke = egui::Stroke::NONE;
                 ui.visuals_mut().widgets.inactive.corner_radius = 12.into();
                 egui::ComboBox::from_id_salt("meeting_folder")
+                    .icon(crate::theme::select_icon)
                     .selected_text(
                         egui::RichText::new(meta.folder.as_deref().unwrap_or("Без папки"))
                             .size(theme::SMALL)
@@ -483,6 +481,7 @@ impl Panel {
                     .map(|s| s.folders.value.keys().cloned().collect::<Vec<_>>())
                     .unwrap_or_default();
                 egui::ComboBox::from_id_salt("edit_folder")
+                    .icon(crate::theme::select_icon)
                     .selected_text(if self.folder_name.is_empty() {
                         "Новая папка"
                     } else {
@@ -516,15 +515,26 @@ impl Panel {
                     self.edit.template = (!template.is_empty()).then_some(template);
                 }
                 egui::ComboBox::from_id_salt("folder_mode")
+                    .icon(crate::theme::select_icon)
                     .selected_text(match self.edit.mode {
                         None => "Общий режим",
-                        Some(Mode::Local) => "Local",
-                        Some(Mode::Hybrid) => "Hybrid",
+                        Some(Mode::Local) => "Локально",
+                        Some(Mode::Hybrid) => "Гибрид",
                     })
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.edit.mode, None, "Общий режим");
-                        ui.selectable_value(&mut self.edit.mode, Some(Mode::Local), "Local");
-                        ui.selectable_value(&mut self.edit.mode, Some(Mode::Hybrid), "Hybrid");
+                        crate::theme::select_value(ui, &mut self.edit.mode, None, "Общий режим");
+                        crate::theme::select_value(
+                            ui,
+                            &mut self.edit.mode,
+                            Some(Mode::Local),
+                            "Локально",
+                        );
+                        crate::theme::select_value(
+                            ui,
+                            &mut self.edit.mode,
+                            Some(Mode::Hybrid),
+                            "Гибрид",
+                        );
                     });
                 let mut hint = self.edit.speaker_hint.unwrap_or(0);
                 ui.horizontal(|ui| {
@@ -674,14 +684,14 @@ impl Panel {
     }
     pub fn windows(&mut self, ctx: &egui::Context, can_share: bool) {
         let mut settings_open = self.settings_open;
-        crate::theme::window(ctx, "Папки и общая библиотека")
+        crate::theme::modal(ctx, "Папки и общая библиотека")
             .open(&mut settings_open)
             .default_width(620.0)
             .show(ctx, |ui| self.folder_settings(ctx, ui, can_share));
         self.settings_open = settings_open;
         if let Some((m, copy)) = self.compare.clone() {
             let mut open = true;
-            crate::theme::window(ctx, "Сравнение копии синхронизации")
+            crate::theme::modal(ctx, "Сравнение копии синхронизации")
                 .open(&mut open)
                 .default_width(850.0)
                 .show(ctx, |ui| {
@@ -749,6 +759,7 @@ fn tracker_settings(
     }
     let Some(c) = config else { return };
     egui::ComboBox::from_id_salt("tracker_kind")
+        .icon(crate::theme::select_icon)
         .selected_text(format!("{:?}", c.kind))
         .show_ui(ui, |ui| {
             for kind in [
@@ -757,7 +768,7 @@ fn tracker_settings(
                 TrackerKind::Jira,
                 TrackerKind::YouTrack,
             ] {
-                ui.selectable_value(&mut c.kind, kind, format!("{kind:?}"));
+                crate::theme::select_value(ui, &mut c.kind, kind, format!("{kind:?}"));
             }
         });
     for (label, value) in [
@@ -821,6 +832,7 @@ fn choose(
 ) -> bool {
     let before = selected.clone();
     egui::ComboBox::from_id_salt(label)
+        .icon(crate::theme::select_icon)
         .selected_text(format!(
             "{label}: {}",
             choices
@@ -830,7 +842,8 @@ fn choose(
         ))
         .show_ui(ui, |ui| {
             for choice in choices {
-                ui.selectable_value(
+                crate::theme::select_value(
+                    ui,
                     selected,
                     choice.id.to_string(),
                     format!("{} ({})", choice.title, choice.id),

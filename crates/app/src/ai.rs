@@ -215,10 +215,11 @@ impl Connections {
     ) -> Vec<Action> {
         let mut actions = Vec::new();
         egui::ComboBox::from_id_salt("onboarding_ai")
+            .icon(crate::theme::select_icon)
             .selected_text(self.cards.get(*selected).map_or("Выберите AI", |c| c.title))
             .show_ui(ui, |ui| {
                 for (index, card) in self.cards.iter().enumerate() {
-                    ui.selectable_value(selected, index, card.title);
+                    crate::theme::select_value(ui, selected, index, card.title);
                 }
             });
         if let Some(card) = self.cards.get_mut(*selected) {
@@ -293,7 +294,7 @@ impl Connections {
             if selected.is_some_and(|selected| selected != index) {
                 continue;
             }
-            ui.push_id(index, |ui| { egui::CollapsingHeader::new(card.title)
+            ui.push_id(index, |ui| { crate::theme::disclosure(card.title)
                 .default_open(default == card.provider.id || selected.is_some()).show(ui, |ui| {
                 if card.status.starts_with("Ошибка:") {
                     ui.colored_label(crate::theme::Palette::of(ui).red, &card.status);
@@ -316,9 +317,9 @@ impl Connections {
                             }
                         }
                         if kind == ProviderKind::ClaudeCli {
-                            egui::ComboBox::from_id_salt("model").selected_text(if card.provider.model.is_empty() { "Авто" } else { &card.provider.model }).show_ui(ui, |ui| {
+                            egui::ComboBox::from_id_salt("model").icon(crate::theme::select_icon).selected_text(if card.provider.model.is_empty() { "Авто" } else { &card.provider.model }).show_ui(ui, |ui| {
                                 for (value, label) in [("", "Авто"), ("sonnet", "Sonnet"), ("opus", "Opus"), ("haiku", "Haiku")] {
-                                    ui.selectable_value(&mut card.provider.model, value.into(), label);
+                                    crate::theme::select_value(ui, &mut card.provider.model, value.into(), label);
                                 }
                             });
                             ui.small("В окне Claude выполните /login. Токенами входа управляет Claude Code.");
@@ -333,9 +334,9 @@ impl Connections {
                                 let response = ui.text_edit_singleline(&mut card.provider.base_url);
                                 typing |= response.changed(); blur |= response.lost_focus();
                             });
-                            egui::ComboBox::from_id_salt("kind").selected_text(if card.provider.kind == "anthropic" { "Anthropic" } else { "OpenAI-совместимый" }).show_ui(ui, |ui| {
-                                ui.selectable_value(&mut card.provider.kind, "openai".into(), "OpenAI-совместимый");
-                                ui.selectable_value(&mut card.provider.kind, "anthropic".into(), "Anthropic");
+                            egui::ComboBox::from_id_salt("kind").icon(crate::theme::select_icon).selected_text(if card.provider.kind == "anthropic" { "Anthropic" } else { "OpenAI-совместимый" }).show_ui(ui, |ui| {
+                                crate::theme::select_value(ui, &mut card.provider.kind, "openai".into(), "OpenAI-совместимый");
+                                crate::theme::select_value(ui, &mut card.provider.kind, "anthropic".into(), "Anthropic");
                             });
                         }
                         ui.label("API-ключ (пусто - использовать сохранённый)");
@@ -351,8 +352,8 @@ impl Connections {
                             typing |= response.changed(); blur |= response.lost_focus();
                         }); }
                         if !card.models.is_empty() {
-                            egui::ComboBox::from_id_salt("model").selected_text(&card.provider.model).show_ui(ui, |ui| {
-                                for model in &card.models { ui.selectable_value(&mut card.provider.model, model.clone(), model); }
+                            egui::ComboBox::from_id_salt("model").icon(crate::theme::select_icon).selected_text(&card.provider.model).show_ui(ui, |ui| {
+                                for model in &card.models { crate::theme::select_value(ui, &mut card.provider.model, model.clone(), model); }
                             });
                         }
                         if selected.is_none() && ui.button("Загрузить список моделей").clicked() { operation = Some(Operation::Models); }

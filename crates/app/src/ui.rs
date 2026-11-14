@@ -124,16 +124,43 @@ impl NotetakerApp {
             && !self.state.quickstart.probe_busy
     }
     fn search_field(&mut self, ui: &mut egui::Ui) {
-        let search = ui.add(
-            egui::TextEdit::singleline(&mut self.state.query)
-                .id_salt("library_search")
-                .hint_text(if cfg!(target_os = "macos") {
-                    "Поиск…  Cmd+K"
-                } else {
-                    "Поиск…  Ctrl+K"
+        let p = Palette::of(ui);
+        let search = egui::Frame::new()
+            .fill(p.bg)
+            .stroke(egui::Stroke::new(1.0, p.border_strong))
+            .corner_radius(6)
+            .inner_margin(egui::Margin::symmetric(8, 0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(16.0, 32.0), egui::Sense::hover());
+                    theme::paint_icon(ui, rect.center(), theme::icons::SEARCH, 16.0, p.muted);
+                    let hint_width = if cfg!(target_os = "macos") {
+                        28.0
+                    } else {
+                        40.0
+                    };
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut self.state.query)
+                            .id_salt("library_search")
+                            .frame(egui::Frame::NONE)
+                            .hint_text("Поиск…")
+                            .desired_width((ui.available_width() - hint_width - 8.0).max(24.0)),
+                    );
+                    ui.label(
+                        RichText::new(if cfg!(target_os = "macos") {
+                            "⌘K"
+                        } else {
+                            "Ctrl K"
+                        })
+                        .size(12.0)
+                        .color(p.tertiary),
+                    );
+                    response
                 })
-                .desired_width(f32::INFINITY),
-        );
+                .inner
+            })
+            .inner;
         if std::mem::take(&mut self.focus_search) {
             search.request_focus();
         }
@@ -157,6 +184,28 @@ impl NotetakerApp {
         )
     }
     fn sidebar(&mut self, ui: &mut egui::Ui, narrow: bool) {
+        if self.show_settings {
+            ui.horizontal(|ui| {
+                if theme::icon_button(ui, theme::icons::CHEVRON_LEFT, "Назад").clicked() {
+                    self.settings_panel.blur(&mut self.state);
+                    self.show_settings = false;
+                }
+                ui.label(RichText::new("Настройки").font(theme::semibold(16.0)));
+            });
+            ui.add_space(24.0);
+            for section in crate::settings::Section::ALL {
+                let label = if section == crate::settings::Section::Storage {
+                    "Хранилище"
+                } else {
+                    section.label()
+                };
+                if theme::nav_row(ui, label, self.settings_panel.section == section).clicked() {
+                    self.settings_panel.blur(&mut self.state);
+                    self.settings_panel.section = section;
+                }
+            }
+            return;
+        }
         // In a narrow window the search lives in the top bar, so typing never hides it.
         if !narrow {
             self.search_field(ui);
@@ -377,7 +426,7 @@ impl NotetakerApp {
                         previous = Some(date);
                     }
                     let (rect, response) = ui.allocate_exact_size(
-                        egui::vec2(ui.available_width(), 56.0),
+                        egui::vec2(ui.available_width(), 40.0),
                         egui::Sense::click_and_drag(),
                     );
                     if response.hovered() || self.organization.selected(row.meeting.path()) {
@@ -406,7 +455,23 @@ impl NotetakerApp {
                             .max_rect(title_rect)
                             .layout(egui::Layout::left_to_right(egui::Align::Center)),
                         |ui| {
-                            ui.add(egui::Label::new(&row.meta.title).truncate());
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if let Some(folder) = &row.meta.folder {
+                                        theme::chip(ui, folder);
+                                    }
+                                    ui.add_sized(
+                                        [ui.available_width(), 32.0],
+                                        egui::Label::new(
+                                            RichText::new(&row.meta.title)
+                                                .font(theme::medium(14.0)),
+                                        )
+                                        .halign(egui::Align::Min)
+                                        .truncate(),
+                                    );
+                                },
+                            );
                         },
                     );
                     for (n, attendee) in attendees.iter().take(3).enumerate() {
@@ -434,10 +499,17 @@ impl NotetakerApp {
                     if self.organization.row(ui, &response, &row.meeting) {
                         select = Some((row.meeting.clone(), row.anchor.clone()));
                     }
-                    ui.separator();
                 }
                 if count == 0 && !self.state.listing {
                     ui.add_space(48.0);
+                    ui.label(
+                        RichText::new(theme::icons::MIC)
+                            .font(egui::FontId::new(
+                                32.0,
+                                egui::FontFamily::Name("icons".into()),
+                            ))
+                            .color(p.muted),
+                    );
                     ui.label(if self.state.query.is_empty() {
                         "Здесь будут ваши встречи"
                     } else {
@@ -448,6 +520,21 @@ impl NotetakerApp {
                     } else {
                         "Попробуйте другие слова или другую папку."
                     });
+                }
+                if count == 0
+                    && self.state.query.is_empty()
+                    && !self.state.listing
+                    && ui
+                        .add_enabled(
+                            self.can_record(),
+                            theme::styled_button(p, "Новая запись", ButtonStyle::Primary),
+                        )
+                        .clicked()
+                {
+                    self.state.prefill_call_title();
+                    self.show_record = true;
+                    self.state.inventory_pending = true;
+                    self.state.send(Command::Inventory);
                 }
                 if self.state.listing {
                     ui.spinner();
@@ -478,18 +565,24 @@ impl NotetakerApp {
                 let busy = self.state.recording.busy();
                 if busy {
                     if phase == Phase::Recording {
+                        let (dot, _) =
+                            ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                        ui.painter().circle_filled(dot.center(), 3.0, p.red);
                         theme::waveform(ui, self.state.recording.level());
                     } else {
                         ui.spinner();
                     }
                     let elapsed = timestamp(self.state.recording.elapsed().as_millis() as u64);
-                    ui.label(
-                        RichText::new(if phase == Phase::Recording {
-                            format!("Запись {elapsed}")
-                        } else {
-                            elapsed
-                        })
-                        .color(p.muted),
+                    ui.add_sized(
+                        [100.0, 28.0],
+                        egui::Label::new(
+                            RichText::new(if phase == Phase::Recording {
+                                format!("Запись {elapsed}")
+                            } else {
+                                elapsed
+                            })
+                            .color(p.muted),
+                        ),
                     );
                 }
                 // Allocate actions first. The input takes the remaining width,
@@ -503,9 +596,8 @@ impl NotetakerApp {
                         && ui
                             .add_enabled(
                                 self.can_record(),
-                                egui::Button::new(RichText::new("Новая запись").color(p.on_accent))
-                                    .fill(p.accent)
-                                    .stroke(egui::Stroke::NONE),
+                                theme::styled_button(p, "Новая запись", ButtonStyle::Primary)
+                                    .min_size(egui::vec2(0.0, 36.0)),
                             )
                             .on_disabled_hover_text(
                                 "Запись станет доступна, когда загрузятся модели распознавания",
@@ -516,21 +608,6 @@ impl NotetakerApp {
                         self.show_record = true;
                         self.state.inventory_pending = true;
                         self.state.send(Command::Inventory);
-                    }
-                    if note
-                        && ui
-                            .button(if self.state.tab == Tab::Transcript {
-                                "Заметка"
-                            } else {
-                                "Транскрипт"
-                            })
-                            .clicked()
-                    {
-                        self.state.tab = if self.state.tab == Tab::Transcript {
-                            Tab::Enhanced
-                        } else {
-                            Tab::Transcript
-                        };
                     }
                     if !self.ask_text.trim().is_empty() {
                         ask |= ui
@@ -633,15 +710,21 @@ impl NotetakerApp {
         people.sort();
         people.dedup();
         egui::ComboBox::from_id_salt("task_person")
+            .icon(crate::theme::select_icon)
             .selected_text(if self.tasks_person.is_empty() {
                 "Все ответственные"
             } else {
                 &self.tasks_person
             })
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.tasks_person, String::new(), "Все ответственные");
+                crate::theme::select_value(
+                    ui,
+                    &mut self.tasks_person,
+                    String::new(),
+                    "Все ответственные",
+                );
                 for person in people {
-                    ui.selectable_value(&mut self.tasks_person, person.clone(), person);
+                    crate::theme::select_value(ui, &mut self.tasks_person, person.clone(), person);
                 }
             });
         if self.tasks_mine
@@ -850,16 +933,13 @@ impl NotetakerApp {
             _ => true,
         };
         ui.horizontal(|ui| {
-            if theme::button(ui, "‹ Встречи", ButtonStyle::Ghost).clicked() {
+            if theme::icon_button(ui, theme::icons::CHEVRON_LEFT, "Встречи").clicked() {
                 self.home = true;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                egui::containers::menu::MenuButton::from_button(theme::styled_button(
-                    Palette::of(ui),
-                    "Ещё",
-                    ButtonStyle::Ghost,
-                ))
-                .ui(ui, |ui| {
+                let menu_response =
+                    theme::icon_button(ui, theme::icons::ELLIPSIS, "Действия встречи");
+                egui::Popup::menu(&menu_response).show(|ui| {
                     ui.set_width(280.0);
                     let mut row = |ui: &mut egui::Ui, item: DocumentAction| {
                         if ui
@@ -879,10 +959,16 @@ impl NotetakerApp {
                     ui.separator();
                     theme::setting_row(ui, "Шаблон", |ui| {
                         egui::ComboBox::from_id_salt("template")
+                            .icon(crate::theme::select_icon)
                             .selected_text(&document.template)
                             .show_ui(ui, |ui| {
                                 for name in &self.state.templates {
-                                    ui.selectable_value(&mut document.template, name.clone(), name);
+                                    crate::theme::select_value(
+                                        ui,
+                                        &mut document.template,
+                                        name.clone(),
+                                        name,
+                                    );
                                 }
                             });
                     });
@@ -1024,11 +1110,45 @@ impl NotetakerApp {
                     .len()
             });
         ui.horizontal_wrapped(|ui| {
-            theme::chip(ui, &start.format("%d.%m.%Y · %H:%M").to_string());
-            theme::chip(ui, &format!("Участники: {participants}"));
+            ui.label(
+                RichText::new(theme::icons::CALENDAR)
+                    .font(egui::FontId::new(
+                        16.0,
+                        egui::FontFamily::Name("icons".into()),
+                    ))
+                    .color(Palette::of(ui).muted),
+            );
+            ui.label(
+                RichText::new(start.format("%d.%m.%Y · %H:%M").to_string())
+                    .small()
+                    .color(Palette::of(ui).muted),
+            );
+            ui.label(
+                RichText::new(theme::icons::USERS)
+                    .font(egui::FontId::new(
+                        16.0,
+                        egui::FontFamily::Name("icons".into()),
+                    ))
+                    .color(Palette::of(ui).muted),
+            );
+            ui.label(
+                RichText::new(format!("Участники: {participants}"))
+                    .small()
+                    .color(Palette::of(ui).muted),
+            );
             // Folder assignment keeps its existing atomic save and sync-conflict handling.
             self.organization.meeting(ui, &mut self.state);
         });
+        ui.add_space(16.0);
+        theme::segmented(
+            ui,
+            &mut self.state.tab,
+            &[
+                (Tab::Enhanced, "Конспект"),
+                (Tab::Transcript, "Транскрипт"),
+                (Tab::Notes, "Заметки"),
+            ],
+        );
         if let Some(item) = pin_toggle {
             let mut list = pinned;
             if let Some(index) = list.iter().position(|a| *a == item) {
@@ -1049,7 +1169,7 @@ impl NotetakerApp {
             return;
         };
         if !document.data.meta.capture_issues.is_empty() {
-            ui.collapsing("Неполный захват звука", |ui| {
+            crate::theme::disclosure("Неполный захват звука").show(ui, |ui| {
                 for issue in &document.data.meta.capture_issues {
                     ui.small(format!(
                         "{} с {}: {}",
@@ -1282,7 +1402,7 @@ impl NotetakerApp {
         if let Some(title) = &mut self.rename {
             let mut save = false;
             let mut cancel = false;
-            let closed = theme::window(ui.ctx(), "Переименовать встречу")
+            let closed = theme::modal(ui.ctx(), "Переименовать встречу")
                 .default_width(420.0)
                 .resizable(false)
                 .show(ui.ctx(), |ui| {
@@ -1321,7 +1441,7 @@ impl NotetakerApp {
         if self.confirm_delete {
             let mut delete = false;
             let mut keep = false;
-            let closed = theme::window(ui.ctx(), "Удалить встречу?")
+            let closed = theme::modal(ui.ctx(), "Удалить встречу?")
                 .default_width(420.0)
                 .resizable(false)
                 .show(ui.ctx(), |ui| {
@@ -1329,8 +1449,8 @@ impl NotetakerApp {
                         "Встреча исчезнет из списка и поиска. Её файлы, включая аудио, переедут в папку .trash внутри библиотеки: оттуда их можно вернуть или стереть вручную.",
                     );
                     ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        delete = theme::button(ui, "Удалить", ButtonStyle::Primary).clicked();
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        delete = theme::button(ui, "Удалить", ButtonStyle::Danger).clicked();
                         keep = theme::button(ui, "Отмена", ButtonStyle::Secondary).clicked();
                     });
                 });
@@ -1344,13 +1464,13 @@ impl NotetakerApp {
         if self.confirm_regenerate {
             let mut regenerate = false;
             let mut keep = false;
-            let closed = theme::window(ui.ctx(), "Пересоздать конспект?")
+            let closed = theme::modal(ui.ctx(), "Пересоздать конспект?")
                 .default_width(420.0)
                 .resizable(false)
                 .show(ui.ctx(), |ui| {
                     ui.label("Конспект правили вручную. Новый текст заменит его, правки пропадут.");
                     ui.add_space(8.0);
-                    ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         regenerate =
                             theme::button(ui, "Пересоздать", ButtonStyle::Primary).clicked();
                         keep = theme::button(ui, "Оставить как есть", ButtonStyle::Secondary)
@@ -1406,14 +1526,31 @@ impl NotetakerApp {
             return;
         }
         egui::Area::new(egui::Id::unique("notifications"))
-            .anchor(egui::Align2::RIGHT_BOTTOM, [-18.0, -18.0])
+            .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -88.0])
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 ui.set_width(340.0);
                 let mut reveal = None;
                 for toast in &self.toasts {
-                    theme::bar(Palette::of(ui)).show(ui, |ui| {
-                        ui.colored_label(toast.level.color(Palette::of(ui)), &toast.text);
+                    theme::bar(Palette::of(ui)).corner_radius(8).show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let glyph = match toast.level {
+                                ToastLevel::Success => theme::icons::CHECK,
+                                ToastLevel::Info => theme::icons::INFO,
+                                ToastLevel::Warning | ToastLevel::Error => {
+                                    theme::icons::TRIANGLE_ALERT
+                                }
+                            };
+                            ui.label(
+                                RichText::new(glyph)
+                                    .font(egui::FontId::new(
+                                        16.0,
+                                        egui::FontFamily::Name("icons".into()),
+                                    ))
+                                    .color(toast.level.color(Palette::of(ui))),
+                            );
+                            ui.label(RichText::new(&toast.text).size(14.0));
+                        });
                         if let Some(path) = &toast.path
                             && ui.button("Показать в папке").clicked()
                         {
@@ -1444,15 +1581,15 @@ impl NotetakerApp {
     }
     fn recording_dialog(&mut self, ctx: &egui::Context) {
         let mut open = self.show_record;
-        theme::window(ctx, "Новая запись").open(&mut open).show(ctx, |ui| {
+        theme::modal(ctx, "Новая запись").open(&mut open).show(ctx, |ui| {
             ui.label("Название"); ui.text_edit_singleline(&mut self.state.title);
 
             self.state.record_mode_edited |= mode_selector(ui, &mut self.state.record_mode);
-            egui::ComboBox::from_id_salt("audio_session").selected_text(self.state.inventory.sessions.iter().find(|s| Some(s.pid) == self.state.process_id)
+            egui::ComboBox::from_id_salt("audio_session").icon(crate::theme::select_icon).selected_text(self.state.inventory.sessions.iter().find(|s| Some(s.pid) == self.state.process_id)
                 .map_or_else(|| "Весь системный звук".to_owned(), |s| format!("{} (PID {})", s.exe.as_deref().unwrap_or(&s.name), s.pid))).show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.state.process_id, None, "Весь системный звук");
+                crate::theme::select_value(ui, &mut self.state.process_id, None, "Весь системный звук");
                 for session in &self.state.inventory.sessions {
-                    if session.pid != 0 { ui.selectable_value(&mut self.state.process_id, Some(session.pid), format!("{} (PID {}){}", session.exe.as_deref().unwrap_or(&session.name), session.pid, if session.active { " · активна" } else { "" })); }
+                    if session.pid != 0 { crate::theme::select_value(ui, &mut self.state.process_id, Some(session.pid), format!("{} (PID {}){}", session.exe.as_deref().unwrap_or(&session.name), session.pid, if session.active { " · активна" } else { "" })); }
                 }
             });
             if ui.add_enabled(!self.state.inventory_pending, egui::Button::new("Обновить аудиосессии")).clicked() {
@@ -1478,9 +1615,9 @@ impl NotetakerApp {
         self.quickstart.blur(&mut self.state);
         self.state.exit();
     }
-    fn settings_dialog(&mut self, ctx: &egui::Context) {
+    fn settings_dialog(&mut self, ui: &mut egui::Ui) {
         if self.settings_panel.show(
-            ctx,
+            ui,
             &mut self.show_settings,
             &mut self.state,
             &mut self.maintenance,
@@ -1817,7 +1954,7 @@ impl eframe::App for NotetakerApp {
                         } else {
                             "Меню"
                         };
-                        if theme::button(ui, label, ButtonStyle::Secondary).clicked() {
+                        if theme::icon_button(ui, theme::icons::PANEL_LEFT, label).clicked() {
                             self.sidebar_open = !self.sidebar_open;
                         }
                         self.search_field(ui);
@@ -1831,7 +1968,7 @@ impl eframe::App for NotetakerApp {
                 .exact_size(if ctx.content_rect().width() < 800.0 {
                     190.0
                 } else {
-                    236.0
+                    240.0
                 })
                 .frame(
                     egui::Frame::new()
@@ -1843,6 +1980,11 @@ impl eframe::App for NotetakerApp {
                 self.sidebar_open = false;
             }
         }
+        if self.show_settings {
+            self.settings_dialog(ui);
+            self.notifications(&ctx);
+            return;
+        }
         egui::Panel::bottom("bottom_bar")
             .frame(
                 egui::Frame::new()
@@ -1850,7 +1992,7 @@ impl eframe::App for NotetakerApp {
                     .inner_margin(egui::Margin::symmetric(24, 16)),
             )
             .show(ui, |ui| {
-                let width = ui.available_width().min(660.0);
+                let width = ui.available_width().min(720.0);
                 ui.horizontal(|ui| {
                     ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
                     ui.allocate_ui_with_layout(
@@ -1902,7 +2044,7 @@ impl eframe::App for NotetakerApp {
             });
         if let Some(uri) = self.image_viewer.clone() {
             let mut open = true;
-            theme::window(&ctx, "Изображение")
+            theme::modal(&ctx, "Изображение")
                 .open(&mut open)
                 .resizable(true)
                 .default_size([800.0, 600.0])
@@ -1920,9 +2062,6 @@ impl eframe::App for NotetakerApp {
         self.notifications(&ctx);
         if self.show_record {
             self.recording_dialog(&ctx);
-        }
-        if self.show_settings {
-            self.settings_dialog(&ctx);
         }
         self.indicator(&ctx);
         self.call_notification(&ctx);
@@ -1949,7 +2088,7 @@ fn recording_pill(ui: &mut egui::Ui, elapsed: Duration, level: f32) -> (bool, bo
     }
     let mut stop = false;
     theme::bar(p)
-        .corner_radius(26)
+        .corner_radius(12)
         .inner_margin(10)
         .show(ui, |ui| {
             ui.set_min_width(218.0);
@@ -2046,7 +2185,7 @@ fn enhanced_document(
                 ui.visuals_mut().widgets.active.fg_stroke.color = ink;
                 if let Some((level, title)) = note_heading(line) {
                     if index > 0 {
-                        ui.add_space(14.0);
+                        ui.add_space(20.0);
                     }
                     ui.label(
                         RichText::new(title)
@@ -2121,18 +2260,24 @@ fn mode_selector(ui: &mut egui::Ui, mode: &mut Mode) -> bool {
     let mut selected = false;
     ui.horizontal_wrapped(|ui| {
         ui.label("Режим:");
-        selected |= ui.selectable_value(mode, Mode::Local, "Local").clicked();
-        selected |= ui.selectable_value(mode, Mode::Hybrid, "Hybrid").clicked();
+        selected |= crate::theme::select_value(ui, mode, Mode::Local, "Локально").clicked();
+        selected |= crate::theme::select_value(ui, mode, Mode::Hybrid, "Гибрид").clicked();
     });
     ui.small(mode_label(*mode));
     selected
 }
 pub(crate) fn model_selector(ui: &mut egui::Ui, id: &str, model: &mut String) {
     egui::ComboBox::from_id_salt(id)
+        .icon(crate::theme::select_icon)
         .selected_text(crate::config::model_label(model))
         .show_ui(ui, |ui| {
             for name in MODELS {
-                ui.selectable_value(model, name.into(), crate::config::model_label(name));
+                crate::theme::select_value(
+                    ui,
+                    model,
+                    name.into(),
+                    crate::config::model_label(name),
+                );
             }
         });
 }
@@ -2569,112 +2714,100 @@ fn transcript_view(
                 let width = (ui.available_width() * 0.90).max(1.0);
                 let response = ui
                     .push_id(segment.id, |ui| {
-                        ui.with_layout(
-                            if me {
-                                egui::Layout::top_down(egui::Align::RIGHT)
-                            } else {
-                                egui::Layout::top_down(egui::Align::LEFT)
-                            },
-                            |ui| {
-                                ui.horizontal(|ui| {
-                                    if live || !editable {
-                                        let name = document
-                                            .data
-                                            .transcript
-                                            .speaker_name(&segment.speaker.0);
-                                        if ui
-                                            .link(
-                                                egui::RichText::new(name).color(
-                                                    crate::speakers::color(&segment.speaker.0),
-                                                ),
-                                            )
-                                            .clicked()
-                                        {
-                                            crate::people::request(
-                                                ui,
-                                                crate::people::Request {
-                                                    name: name.into(),
-                                                    email: String::new(),
-                                                    voice: document
-                                                        .data
-                                                        .transcript
-                                                        .speaker_voice_ids
-                                                        .get(&segment.speaker.0)
-                                                        .cloned(),
-                                                },
-                                            );
-                                        }
-                                    } else {
-                                        ui.add_enabled_ui(editable, |ui| {
-                                            if let Some(rename) = crate::speakers::rename_menu(
-                                                ui,
-                                                &document.data.transcript,
-                                                &document.data.meta,
-                                                &segment.speaker.0,
-                                                voices,
-                                                global_allowed,
-                                            ) {
-                                                action = Some(rename);
-                                            }
-                                        });
-                                    }
-                                    let label = format!(
-                                        "{}{}",
-                                        timestamp(segment.start_ms),
-                                        if segment.edited {
-                                            " · исправлено"
-                                        } else {
-                                            ""
-                                        }
-                                    );
+                        ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                            ui.horizontal(|ui| {
+                                if live || !editable {
+                                    let name =
+                                        document.data.transcript.speaker_name(&segment.speaker.0);
                                     if ui
-                                        .add_enabled(
-                                            !live && editable,
-                                            egui::Button::selectable(
-                                                document.speaker_ui.selected.contains(&segment.id),
-                                                RichText::new(label)
-                                                    .size(theme::SMALL)
-                                                    .color(p.muted),
-                                            ),
+                                        .link(
+                                            egui::RichText::new(name)
+                                                .color(crate::speakers::color(&segment.speaker.0)),
                                         )
                                         .clicked()
                                     {
-                                        selected = Some(index);
+                                        crate::people::request(
+                                            ui,
+                                            crate::people::Request {
+                                                name: name.into(),
+                                                email: String::new(),
+                                                voice: document
+                                                    .data
+                                                    .transcript
+                                                    .speaker_voice_ids
+                                                    .get(&segment.speaker.0)
+                                                    .cloned(),
+                                            },
+                                        );
                                     }
-                                });
-                                egui::Frame::new()
-                                    .fill(if document.speaker_ui.selected.contains(&segment.id) {
-                                        ui.visuals().selection.bg_fill
-                                    } else if me {
-                                        p.me
-                                    } else {
-                                        p.soft
-                                    })
-                                    .corner_radius(10)
-                                    .inner_margin(10)
-                                    .show(ui, |ui| {
-                                        ui.set_max_width(width);
-                                        if live {
-                                            ui.add(egui::Label::new(&segment.text).wrap());
-                                        } else {
-                                            let mut text = segment.text.clone();
-                                            let response = ui.add_enabled(
-                                                editable,
-                                                egui::TextEdit::multiline(&mut text)
-                                                    .frame(egui::Frame::NONE)
-                                                    .desired_width(width)
-                                                    .desired_rows(1),
-                                            );
-                                            if response.changed() {
-                                                edits.push((segment.id, text));
-                                            }
-                                            if response.clicked() {
-                                                selected = Some(index);
-                                            }
+                                } else {
+                                    ui.add_enabled_ui(editable, |ui| {
+                                        if let Some(rename) = crate::speakers::rename_menu(
+                                            ui,
+                                            &document.data.transcript,
+                                            &document.data.meta,
+                                            &segment.speaker.0,
+                                            voices,
+                                            global_allowed,
+                                        ) {
+                                            action = Some(rename);
                                         }
                                     });
-                            },
-                        );
+                                }
+                                let label = format!(
+                                    "{}{}",
+                                    timestamp(segment.start_ms),
+                                    if segment.edited {
+                                        " · исправлено"
+                                    } else {
+                                        ""
+                                    }
+                                );
+                                if ui
+                                    .add_enabled(
+                                        !live && editable,
+                                        egui::Button::selectable(
+                                            document.speaker_ui.selected.contains(&segment.id),
+                                            RichText::new(label).size(theme::SMALL).color(p.muted),
+                                        ),
+                                    )
+                                    .clicked()
+                                {
+                                    selected = Some(index);
+                                }
+                            });
+                            egui::Frame::new()
+                                .fill(if document.speaker_ui.selected.contains(&segment.id) {
+                                    ui.visuals().selection.bg_fill
+                                } else if me {
+                                    p.me
+                                } else {
+                                    egui::Color32::TRANSPARENT
+                                })
+                                .corner_radius(6)
+                                .inner_margin(10)
+                                .show(ui, |ui| {
+                                    ui.set_max_width(width);
+                                    if live {
+                                        ui.add(egui::Label::new(&segment.text).wrap());
+                                    } else {
+                                        let mut text = segment.text.clone();
+                                        let response = ui.add_enabled(
+                                            editable,
+                                            egui::TextEdit::multiline(&mut text)
+                                                .frame(egui::Frame::NONE)
+                                                .desired_width(width)
+                                                .desired_rows(1),
+                                        );
+                                        if response.changed() {
+                                            edits.push((segment.id, text));
+                                        }
+                                        if response.clicked() {
+                                            selected = Some(index);
+                                        }
+                                    }
+                                });
+                        });
                     })
                     .response;
                 if document.speaker_ui.scroll_to == Some(segment.id) {
