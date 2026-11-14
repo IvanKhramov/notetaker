@@ -2,7 +2,6 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use notetaker_asr_proto::AsrClient;
 use notetaker_core::Library;
 
 #[derive(Parser)]
