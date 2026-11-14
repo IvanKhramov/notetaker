@@ -355,7 +355,16 @@ impl<'a> Dialog<'a> {
                 .show(ui, contents);
         };
         if self.anchored {
-            self.window.resizable(false).movable(false).show(ctx, body);
+            let p = Palette::for_dark(ctx.global_style().visuals.dark_mode);
+            self.window
+                .resizable(false)
+                .movable(false)
+                .frame(
+                    egui::Frame::window(&ctx.global_style())
+                        .corner_radius(RADIUS_SURFACE)
+                        .shadow(surface_shadow(p)),
+                )
+                .show(ctx, body);
         } else {
             let dark = ctx.global_style().visuals.dark_mode;
             let modal_id = egui::Id::unique(("modal", &self.title));
@@ -428,7 +437,7 @@ pub fn update_prompt(
                 ui.label(message);
                 ui.add_space(8.0);
             }
-            ui.horizontal(|ui| {
+            footer(ui, |ui| {
                 if ui
                     .add_enabled(
                         can_install,
@@ -497,7 +506,11 @@ impl egui::Widget for Button<'_> {
                 .layout_no_wrap(self.text.to_owned(), medium(BUTTON), Color32::PLACEHOLDER);
         let leading = if self.icon.is_some() { 22.0 } else { 0.0 };
         let trailing = if self.trailing.is_some() { 24.0 } else { 0.0 };
-        let size = egui::vec2(text.size().x + 24.0 + leading + trailing, 32.0).max(self.min_size);
+        let size = egui::vec2(
+            text.size().x + 24.0 + leading + trailing,
+            self.min_size.y.max(COMPACT_HEIGHT),
+        )
+        .max(self.min_size);
         let (rect, response) = ui.allocate_at_least(size, egui::Sense::click());
         let (base, hover, ink, border) = match self.variant {
             ButtonStyle::Primary => (p.accent, p.accent_hover, p.on_accent, Stroke::NONE),
@@ -644,6 +657,7 @@ pub fn page_heading(ui: &mut egui::Ui, text: &str) {
 pub fn card(p: Palette, selected: bool) -> egui::Frame {
     egui::Frame::new()
         .fill(if selected { p.selected } else { p.card })
+        .corner_radius(RADIUS_SURFACE)
         .inner_margin(egui::Margin::symmetric(0, 8))
 }
 
@@ -1614,4 +1628,44 @@ pub fn row_background(ui: &egui::Ui, response: &egui::Response, selected: bool) 
             mix(Color32::TRANSPARENT, p.hover, t)
         },
     );
+}
+
+/// A bounded footer row keeps right-aligned actions from consuming the modal's height.
+pub fn footer<R>(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), contents)
+            .inner
+    })
+    .inner
+}
+
+#[cfg(test)]
+mod footer_tests {
+    use super::*;
+    #[test]
+    fn modal_footer_uses_one_row_in_a_tall_viewport() {
+        let ctx = egui::Context::default();
+        install(&ctx);
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 800.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                let before = ui.cursor().top();
+                footer(ui, |ui| {
+                    button(ui, "Удалить", ButtonStyle::DangerFilled);
+                    button(ui, "Отмена", ButtonStyle::Secondary);
+                });
+                assert!(
+                    ui.cursor().top() - before <= 48.0,
+                    "Footer expanded into the modal body"
+                );
+            },
+        )
+        .drop_without_applying_deltas();
+    }
 }

@@ -355,7 +355,7 @@ impl Panel {
                 }
                 ui.add_space(16.0);
                 if let Some(error) = &state.settings_autosave.error { ui.colored_label(Palette::of(ui).red, error); }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                theme::footer(ui, |ui| {
                     let check_audio = self.step == 0 && self.probe_status.is_none();
                     let label = if self.step == 2 { "Начать работу" } else if check_audio { "Проверить звук" } else { "Продолжить" };
                     if ui.add_enabled(!state.quickstart.probe_busy, theme::styled_button(Palette::of(ui), label, theme::ButtonStyle::Primary)).clicked() {

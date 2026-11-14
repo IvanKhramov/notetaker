@@ -48,6 +48,9 @@ impl SpeakerUi {
 }
 
 fn label<'a>(text: &'a Transcript, id: &'a str) -> &'a str {
+    if id == "me" || text.self_speaker.as_deref() == Some(id) {
+        return "Я";
+    }
     match text.speaker_name(id) {
         "me" => "Я",
         "them" => "Собеседники",

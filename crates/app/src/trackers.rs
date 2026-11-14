@@ -133,62 +133,64 @@ impl Panel {
                         "Подтверждаю отправку Локально-данных в трекер",
                     );
                 }
-                if ui
-                    .add_enabled(
-                        self.receiver.is_none()
-                            && !self.previews.is_empty()
-                            && (!local || self.local_consent)
-                            && !state.unsaved()
-                            && !state.recording.busy()
-                            && state.enhancing.is_none(),
-                        crate::theme::styled_button(
-                            crate::theme::Palette::of(ui),
-                            "Отправить",
-                            crate::theme::ButtonStyle::Secondary,
-                        ),
-                    )
-                    .clicked()
-                {
-                    let previews = self.previews.clone();
-                    let consent = self.local_consent;
-                    let root = state.settings.library.clone();
-                    self.launch(ctx, move || {
-                        let l = Library::open(root)?;
-                        let mut sent = Vec::new();
-                        for p in previews {
-                            // Earlier items in this batch only append issue links. Reload
-                            // revisions, but reject changes to any originally previewed task.
-                            l.reindex_incremental()?;
-                            let current = l
-                                .list_tasks(None, None, false)?
-                                .into_iter()
-                                .find(|t| {
-                                    t.meeting_id == p.task.meeting_id && t.line == p.task.line
-                                })
-                                .ok_or_else(|| anyhow::anyhow!("Задача больше не найдена"))?;
-                            anyhow::ensure!(
-                                current.completed == p.task.completed
-                                    && current.text == p.task.text
-                                    && current.owner == p.task.owner
-                                    && current.due_text == p.task.due_text,
-                                "Задача изменилась; обновите просмотр"
-                            );
-                            if current.issue_url.is_some() {
-                                continue;
+                crate::theme::footer(ui, |ui| {
+                    if ui
+                        .add_enabled(
+                            self.receiver.is_none()
+                                && !self.previews.is_empty()
+                                && (!local || self.local_consent)
+                                && !state.unsaved()
+                                && !state.recording.busy()
+                                && state.enhancing.is_none(),
+                            crate::theme::styled_button(
+                                crate::theme::Palette::of(ui),
+                                "Отправить",
+                                crate::theme::ButtonStyle::Primary,
+                            ),
+                        )
+                        .clicked()
+                    {
+                        let previews = self.previews.clone();
+                        let consent = self.local_consent;
+                        let root = state.settings.library.clone();
+                        self.launch(ctx, move || {
+                            let l = Library::open(root)?;
+                            let mut sent = Vec::new();
+                            for p in previews {
+                                // Earlier items in this batch only append issue links. Reload
+                                // revisions, but reject changes to any originally previewed task.
+                                l.reindex_incremental()?;
+                                let current = l
+                                    .list_tasks(None, None, false)?
+                                    .into_iter()
+                                    .find(|t| {
+                                        t.meeting_id == p.task.meeting_id && t.line == p.task.line
+                                    })
+                                    .ok_or_else(|| anyhow::anyhow!("Задача больше не найдена"))?;
+                                anyhow::ensure!(
+                                    current.completed == p.task.completed
+                                        && current.text == p.task.text
+                                        && current.owner == p.task.owner
+                                        && current.due_text == p.task.due_text,
+                                    "Задача изменилась; обновите просмотр"
+                                );
+                                if current.issue_url.is_some() {
+                                    continue;
+                                }
+                                let mut outgoing = p.clone();
+                                outgoing.task = current;
+                                let url = trackers::send(
+                                    &l,
+                                    &outgoing,
+                                    consent,
+                                    &notetaker_llm::OsCredentialStore,
+                                )?;
+                                sent.push((outgoing.task.path, url));
                             }
-                            let mut outgoing = p.clone();
-                            outgoing.task = current;
-                            let url = trackers::send(
-                                &l,
-                                &outgoing,
-                                consent,
-                                &notetaker_llm::OsCredentialStore,
-                            )?;
-                            sent.push((outgoing.task.path, url));
-                        }
-                        Ok(Response::Sent(sent))
-                    });
-                }
+                            Ok(Response::Sent(sent))
+                        });
+                    }
+                });
                 ui.label(&self.message);
             });
         self.open = open;

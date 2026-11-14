@@ -368,6 +368,20 @@ impl NotetakerApp {
                     theme::section_caption(ui, "Скоро");
                     ui.add_space(8.0);
                     for event in events.into_iter().take(30) {
+                        let rect = egui::Rect::from_min_size(
+                            ui.next_widget_position(),
+                            egui::vec2(ui.available_width(), 40.0),
+                        );
+                        let response = ui.interact(
+                            rect,
+                            ui.scope_id().with((
+                                "upcoming",
+                                event.start.timestamp(),
+                                &event.link.title,
+                            )),
+                            egui::Sense::hover(),
+                        );
+                        theme::row_background(ui, &response, false);
                         ui.horizontal(|ui| {
                             ui.add_sized(
                                 [54.0, 40.0],
@@ -390,8 +404,14 @@ impl NotetakerApp {
                                 egui::vec2((ui.available_width() - reserve).max(40.0), 40.0),
                                 egui::Layout::left_to_right(egui::Align::Center),
                                 |ui| {
-                                    ui.add(egui::Label::new(&event.link.title).truncate())
-                                        .on_hover_text(&event.link.title);
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(&event.link.title)
+                                                .font(theme::medium(14.0)),
+                                        )
+                                        .truncate(),
+                                    )
+                                    .on_hover_text(&event.link.title);
                                 },
                             );
                             if let Some(url) = &event.link.call_url {
@@ -415,7 +435,6 @@ impl NotetakerApp {
                                 start_event = Some(event.clone());
                             }
                         });
-                        ui.separator();
                     }
                     ui.add_space(24.0);
                 }
@@ -1079,7 +1098,8 @@ impl NotetakerApp {
                                 item.short_label(),
                                 ButtonStyle::Ghost,
                             )
-                            .icon(theme::icon_for_label(item.label())),
+                            .icon(theme::icon_for_label(item.label()))
+                            .min_size(egui::vec2(0.0, theme::COMPACT_HEIGHT)),
                         )
                         .on_hover_text(item.label())
                         .clicked()
@@ -1507,7 +1527,7 @@ impl NotetakerApp {
                     }
                     save = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     ui.add_space(8.0);
-                    ui.horizontal(|ui| {
+                    theme::footer(ui, |ui| {
                         save |= ui
                             .add_enabled(
                                 !title.trim().is_empty(),
@@ -1540,7 +1560,7 @@ impl NotetakerApp {
                         "Встреча исчезнет из списка и поиска. Её файлы, включая аудио, переедут в папку .trash внутри библиотеки: оттуда их можно вернуть или стереть вручную.",
                     );
                     ui.add_space(8.0);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    theme::footer(ui, |ui| {
                         delete = theme::button(ui, "Удалить", ButtonStyle::DangerFilled).clicked();
                         keep = theme::button(ui, "Отмена", ButtonStyle::Secondary).clicked();
                     });
@@ -1561,7 +1581,7 @@ impl NotetakerApp {
                 .show(ui.ctx(), |ui| {
                     ui.label("Конспект правили вручную. Новый текст заменит его, правки пропадут.");
                     ui.add_space(8.0);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    theme::footer(ui, |ui| {
                         regenerate =
                             theme::button(ui, "Пересоздать", ButtonStyle::Primary).clicked();
                         keep = theme::button(ui, "Оставить как есть", ButtonStyle::Secondary)
@@ -1707,7 +1727,7 @@ impl NotetakerApp {
             #[cfg(not(any(windows, target_os = "macos")))]
             ui.label("Захват звука пока реализован только на Windows. Библиотека, поиск, правки и конспекты работают на этой ОС.");
             crate::quickstart::model_status(ui, &mut self.state);
-            ui.horizontal(|ui| {
+            theme::footer(ui, |ui| {
                 if ui.add_enabled(cfg!(any(windows, target_os = "macos")) && self.can_record(), theme::styled_button(Palette::of(ui),"Начать запись",ButtonStyle::Primary).icon(theme::icons::MIC)).clicked() { self.state.toggle_recording(); self.show_record = false; }
 
             });
