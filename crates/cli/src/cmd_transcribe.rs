@@ -13,7 +13,7 @@ pub struct Args {
 pub fn run(args: Args) -> Result<()> {
     let file = args.file.canonicalize().context("cannot open input WAV")?;
     let binary = worker_binary()?;
-    let mut client = AsrClient::spawn(&binary).with_context(|| {
+    let mut client = spawn_worker(&binary).with_context(|| {
         format!(
             "launch {}; build/install notetaker-asr alongside notetaker",
             binary.display()
@@ -30,6 +30,19 @@ pub fn run(args: Args) -> Result<()> {
     }
     client.shutdown()?;
     Ok(())
+}
+
+/// Starts the ASR worker with the models folder chosen in the app settings.
+pub(crate) fn spawn_worker(binary: &std::path::Path) -> Result<AsrClient> {
+    let mut command = std::process::Command::new(binary);
+    command.env(
+        "NOTETAKER_MODELS_DIR",
+        notetaker_core::app_config::AppSettings::load()?.models_path(),
+    );
+    Ok(AsrClient::spawn_command(
+        command,
+        std::time::Duration::from_secs(300),
+    )?)
 }
 
 pub(crate) fn worker_binary() -> Result<PathBuf> {

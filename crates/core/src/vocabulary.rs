@@ -26,23 +26,7 @@ impl Vocabulary {
 
     /// Read only the optional vocabulary field from the app's shared config.
     pub fn load(library: &Path) -> io::Result<Self> {
-        #[derive(Default, serde::Deserialize)]
-        struct Config {
-            #[serde(default)]
-            vocabulary: String,
-        }
-        let config = directories::ProjectDirs::from("", "", "notetaker")
-            .map(|dirs| dirs.config_dir().join("app.toml"));
-        let global = match config.map(fs::read_to_string).transpose() {
-            Ok(Some(text)) => {
-                toml::from_str::<Config>(&text)
-                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
-                    .vocabulary
-            }
-            Ok(None) => String::new(),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
-            Err(error) => return Err(error),
-        };
+        let global = crate::app_config::AppSettings::load()?.vocabulary;
         Self::with_library(&global, library)
     }
 

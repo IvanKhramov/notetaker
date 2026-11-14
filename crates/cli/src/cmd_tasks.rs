@@ -1,6 +1,6 @@
-use anyhow::{Context, Result, ensure};
-use serde::Deserialize;
-use std::{fs, path::PathBuf};
+use anyhow::{Result, ensure};
+
+use std::path::PathBuf;
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -13,34 +13,14 @@ pub struct Args {
     #[arg(long)]
     open: bool,
 }
-#[derive(Default, Deserialize)]
-#[serde(default)]
-struct Preferences {
-    library: Option<PathBuf>,
-    user_name: String,
-    user_aliases: String,
-}
+type Preferences = notetaker_core::app_config::AppSettings;
 pub fn run(args: Args) -> Result<()> {
-    let path = directories::ProjectDirs::from("", "", "notetaker")
-        .context("Нет каталога настроек")?
-        .config_dir()
-        .join("app.toml");
-    let prefs: Preferences = match fs::read_to_string(path) {
-        Ok(text) => toml::from_str(&text).context("Некорректный app.toml")?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Preferences::default(),
-        Err(e) => return Err(e.into()),
-    };
+    let prefs = Preferences::load()?;
     ensure!(
         !args.mine || !prefs.user_name.trim().is_empty() || !prefs.user_aliases.trim().is_empty(),
         "Укажите «Как вас зовут» в настройках"
     );
-    let root = args.library.or(prefs.library).unwrap_or_else(|| {
-        let home = directories::UserDirs::new();
-        home.as_ref()
-            .map(|d| d.document_dir().unwrap_or(d.home_dir()).to_owned())
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("notetaker")
-    });
+    let root = args.library.unwrap_or(prefs.library);
     let library = notetaker_core::Library::open(root)?;
     library.reindex_incremental()?;
     let names: Vec<_> = std::iter::once(prefs.user_name.as_str())

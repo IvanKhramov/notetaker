@@ -105,8 +105,15 @@ jobs:
           EMBED_EXE: ${{ steps.package.outputs.embed }}
           EMBED_CHECKSUM: ${{ steps.package.outputs.embed_checksum }}
         run: |
-          gh release create $env:RELEASE_TAG $env:RELEASE_SETUP $env:SETUP_CHECKSUM $env:RELEASE_ZIP $env:RELEASE_CHECKSUM $env:EMBED_EXE $env:EMBED_CHECKSUM --verify-tag --draft --generate-notes --title "notetaker $env:RELEASE_TAG"
-          if ($LASTEXITCODE -ne 0) { throw 'GitHub Release creation failed' }
+          $release = gh release view $env:RELEASE_TAG --json isDraft 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            if (-not ($release | ConvertFrom-Json).isDraft) { throw 'Refusing to overwrite a published release' }
+          } else {
+            gh release create $env:RELEASE_TAG --verify-tag --draft --generate-notes --title "notetaker $env:RELEASE_TAG"
+            if ($LASTEXITCODE -ne 0) { throw 'GitHub Release creation failed' }
+          }
+          gh release upload $env:RELEASE_TAG $env:RELEASE_SETUP $env:SETUP_CHECKSUM $env:RELEASE_ZIP $env:RELEASE_CHECKSUM $env:EMBED_EXE $env:EMBED_CHECKSUM --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub Release upload failed' }
 
   macos:
     if: github.event_name == 'push'
@@ -139,7 +146,13 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
           RELEASE_DMG: ${{ steps.package.outputs.dmg }}
           RELEASE_CHECKSUM: ${{ steps.package.outputs.checksum }}
-        run: gh release upload "$RELEASE_TAG" "$RELEASE_DMG" "$RELEASE_CHECKSUM" --clobber
+        run: |
+          # A published release is final: a re-run must not replace its files.
+          if [ "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" != "true" ]; then
+            echo "Release $RELEASE_TAG is already published; refusing to replace its assets." >&2
+            exit 1
+          fi
+          gh release upload "$RELEASE_TAG" "$RELEASE_DMG" "$RELEASE_CHECKSUM" --clobber
 
   # Signs the installer checksum with a key that never leaves this job. It uses no
   # third-party actions: see docs/release-signing.md.
@@ -214,11 +227,13 @@ jobs:
       - name: Submit update if configured
         shell: pwsh
         env:
-          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          WINGET_CREATE_GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
           VERSION: ${{ steps.manifests.outputs.version }}
           SETUP_URL: ${{ steps.manifests.outputs.url }}
         run: |
-          if (-not $env:WINGET_TOKEN) { Write-Host 'WINGET_TOKEN not configured; manifests attached only'; exit 0 }
-          Invoke-WebRequest 'https://aka.ms/wingetcreate/latest' -OutFile wingetcreate.exe
-          ./wingetcreate.exe update IvanKhramov.Notetaker --version $env:VERSION --urls $env:SETUP_URL --submit --token $env:WINGET_TOKEN
+          if (-not $env:WINGET_CREATE_GITHUB_TOKEN) { Write-Host 'WINGET_TOKEN not configured; manifests attached only'; exit 0 }
+          Invoke-WebRequest 'https://github.com/microsoft/winget-create/releases/download/v1.28.1.0/wingetcreate.exe' -OutFile wingetcreate.exe
+          $expected = '63d980ba79e97042395bd6eb5992c2db9e01e9e7a8a22958a95c288f27310413'
+          if ((Get-FileHash wingetcreate.exe -Algorithm SHA256).Hash -ne $expected) { throw 'wingetcreate checksum mismatch' }
+          ./wingetcreate.exe update IvanKhramov.Notetaker --version $env:VERSION --urls $env:SETUP_URL --submit
           if ($LASTEXITCODE -ne 0) { throw 'WinGet submission failed; first submission must be completed manually' }

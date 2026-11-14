@@ -210,6 +210,7 @@ impl RecordingSession {
         config: RecordingConfig,
     ) -> Result<Self> {
         config.chunks.validate()?;
+        notetaker_runtime::recording::check_space(library.root())?;
         if let Some(retention) = config.retention {
             TimeDelta::from_std(retention).context("retention too large")?;
             Utc::now()
@@ -376,6 +377,15 @@ fn record(
     // Always join ASR, including disk/capture errors. Dropping jobs_tx cancels the
     // consumer rather than leaving a detached worker holding the model in RAM.
     let captured = (|| -> Result<()> {
+        let _sleep = match notetaker_runtime::recording::SleepGuard::acquire() {
+            Ok(guard) => Some(guard),
+            Err(error) => {
+                let _ = events.send(PipelineEvent::Warning(format!(
+                    "Не удалось запретить сон на время записи: {error}"
+                )));
+                None
+            }
+        };
         let mut sources = Sources(sources);
         let (tx, rx) = mpsc::sync_channel(256);
         let origin = Instant::now();
@@ -405,6 +415,8 @@ fn record(
         let mut failure: Option<anyhow::Error> = None;
         let mut levels = [0f32; 2];
         let mut levels_at = Duration::ZERO;
+        let mut space_check_at = Instant::now();
+        let mut space_warned = false;
         loop {
             if stop.0.load(Ordering::Acquire) {
                 explicit_end = Some(sample_position(origin.elapsed()));
@@ -426,6 +438,15 @@ fn record(
             }
             if stopped.iter().all(|s| *s) {
                 break;
+            }
+            if !space_warned && space_check_at.elapsed() >= Duration::from_secs(5) {
+                space_check_at = Instant::now();
+                if let Err(error) = notetaker_runtime::recording::check_space(meeting.path()) {
+                    space_warned = true;
+                    let _ = events.send(PipelineEvent::Warning(format!(
+                        "Проверьте свободное место: {error}"
+                    )));
+                }
             }
             match rx.recv_timeout(Duration::from_millis(20)) {
                 Ok(message) => {
@@ -499,7 +520,10 @@ fn record(
                     .context("retention timestamp out of range")
             })
             .transpose()?;
-        meeting.write_meta(&meta)?;
+        meeting.update_meta(|current| {
+            current.ended_at = meta.ended_at;
+            current.audio_expires_at = meta.audio_expires_at;
+        })?;
         jobs_tx
             .send(Job::Final(wavs.clone()))
             .context("ASR thread stopped")?;
@@ -575,6 +599,29 @@ fn capture(
             })?;
         }
         CaptureMessage::Event(event) => {
+            if let CaptureEvent::Recovery { channel, restored } = &event {
+                let name = if *channel == Channel::Mic {
+                    "Микрофон"
+                } else {
+                    "Системный звук"
+                };
+                let message = if *restored {
+                    format!("{name}: запись восстановлена.")
+                } else {
+                    format!("{name}: устройство недоступно. Пробуем подключиться снова.")
+                };
+                if !*restored {
+                    // Keep the gap in the meeting metadata, as an interruption always was.
+                    capture_issue(
+                        meeting,
+                        *channel,
+                        tracks[channel_index(*channel)].position() * 1000 / u64::from(SAMPLE_RATE),
+                        "устройство отключилось, запись канала прерывалась".into(),
+                        &queue.events,
+                    )?;
+                }
+                let _ = queue.events.send(PipelineEvent::Warning(message));
+            }
             if let CaptureEvent::Error { channel, message } = &event {
                 capture_issue(
                     meeting,
@@ -608,9 +655,7 @@ fn capture_issue(
         from_ms,
         reason,
     };
-    let mut meta = meeting.read_meta()?;
-    meta.capture_issues.push(issue.clone());
-    meeting.write_meta(&meta)?;
+    meeting.update_meta(|meta| meta.capture_issues.push(issue.clone()))?;
     let _ = events.send(PipelineEvent::CaptureIssue(issue));
     Ok(())
 }

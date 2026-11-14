@@ -1,11 +1,10 @@
-use std::{fs, path::PathBuf, time::Duration};
+use std::{path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 use notetaker_core::{Library, Mode, Vocabulary};
 use notetaker_llm::{Cancellation, Config, Template, create_provider, enhance_meeting_if_unedited};
 use notetaker_pipeline::{AsrConfig, PipelineEvent, RecordingConfig, RecordingSession};
-use serde::Deserialize;
 
 #[derive(ClapArgs)]
 pub struct Args {
@@ -22,52 +21,8 @@ pub struct Args {
     pub folder: Option<String>,
 }
 
-#[derive(Deserialize)]
-#[serde(default)]
-struct Preferences {
-    library: PathBuf,
-    model: String,
-    asr_acceleration: notetaker_asr_proto::Provider,
-    asr_threads: u32,
-    mode: Mode,
-    retention_days: Option<u32>,
-    auto_summary: bool,
-    diarize: bool,
-    speakers: Option<u32>,
-    voice_library: bool,
-}
-impl Default for Preferences {
-    fn default() -> Self {
-        let home = directories::UserDirs::new();
-        let documents = home
-            .as_ref()
-            .map(|dirs| dirs.document_dir().unwrap_or(dirs.home_dir()).to_owned())
-            .unwrap_or_else(|| PathBuf::from("."));
-        Self {
-            library: documents.join("notetaker"),
-            model: "gigaam-v3".into(),
-            asr_acceleration: notetaker_asr_proto::Provider::default(),
-            asr_threads: 0,
-            mode: Mode::Local,
-            retention_days: Some(7),
-            auto_summary: true,
-            diarize: true,
-            speakers: None,
-            voice_library: false,
-        }
-    }
-}
-
 pub fn run(args: Args) -> Result<()> {
-    let path = directories::ProjectDirs::from("", "", "notetaker")
-        .context("Нет каталога настроек")?
-        .config_dir()
-        .join("app.toml");
-    let settings: Preferences = match fs::read_to_string(path) {
-        Ok(text) => toml::from_str(&text).context("Некорректный app.toml")?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Preferences::default(),
-        Err(error) => return Err(error.into()),
-    };
+    let settings = notetaker_core::app_config::AppSettings::load()?;
     let library = Library::open(args.library.unwrap_or(settings.library))?;
     let folder_defaults = args
         .folder

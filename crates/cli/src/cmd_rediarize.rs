@@ -2,7 +2,6 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use notetaker_asr_proto::AsrClient;
 use notetaker_core::Library;
 
 #[derive(Parser)]
@@ -27,8 +26,8 @@ pub fn run(args: Args) -> Result<()> {
         .find(|m| m.path() == path)
         .context("meeting directory has no valid meta.yaml")?;
     let binary = super::cmd_transcribe::worker_binary()?;
-    let mut client =
-        AsrClient::spawn(&binary).with_context(|| format!("launch {}", binary.display()))?;
+    let mut client = super::cmd_transcribe::spawn_worker(&binary)
+        .with_context(|| format!("launch {}", binary.display()))?;
     let backup = notetaker_pipeline::rediarize(&meeting, &mut client, args.speakers)?;
     eprintln!("Резервная копия: {}", backup.display());
     client.shutdown()?;

@@ -23,27 +23,11 @@ pub struct ReindexArgs {
 }
 fn library(path: Option<std::path::PathBuf>) -> Result<Library> {
     Ok(Library::open(match path {
-        Some(p) => p,
-        None => {
-            #[derive(serde::Deserialize, Default)]
-            struct Preferences {
-                library: Option<std::path::PathBuf>,
-            }
-            let path = directories::ProjectDirs::from("", "", "notetaker")
-                .map(|d| d.config_dir().join("app.toml"));
-            let prefs = path
-                .and_then(|p| std::fs::read_to_string(p).ok())
-                .map(|s| toml::from_str::<Preferences>(&s))
-                .transpose()?
-                .unwrap_or_default();
-            prefs.library.unwrap_or_else(|| {
-                directories::UserDirs::new()
-                    .map(|d| d.document_dir().unwrap_or(d.home_dir()).join("notetaker"))
-                    .unwrap_or_else(|| "notetaker".into())
-            })
-        }
+        Some(path) => path,
+        None => notetaker_core::app_config::AppSettings::load()?.library,
     })?)
 }
+
 pub fn search(args: SearchArgs) -> Result<()> {
     let library = library(args.library)?;
     let config = notetaker_llm::Config::load().ok();

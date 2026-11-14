@@ -62,7 +62,10 @@ pub(crate) fn run(
                 .context("Слишком большой срок хранения")
         })
         .transpose()?;
-    meeting.write_meta(&meta)?;
+    meeting.update_meta(|current| {
+        current.ended_at = meta.ended_at;
+        current.audio_expires_at = meta.audio_expires_at;
+    })?;
     progress(100);
     // The default request deadline is five minutes, too short for hour-long
     // files. Keep a finite total budget, allowing slower-than-realtime CPUs.

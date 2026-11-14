@@ -5,8 +5,8 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
-use directories::{ProjectDirs, UserDirs};
-use notetaker_core::Mode;
+use directories::ProjectDirs;
+
 use serde::{Deserialize, Serialize};
 
 pub const MODELS: [&str; 3] = ["gigaam-v3", "parakeet-v3", "auto"];
@@ -20,50 +20,8 @@ pub fn model_label(id: &str) -> &str {
     }
 }
 
-pub fn default_speech_model(language: &str) -> &'static str {
-    if language.to_ascii_lowercase().starts_with("ru") {
-        "gigaam-v3"
-    } else {
-        "parakeet-v3"
-    }
-}
-
-fn system_language() -> &'static str {
-    static LANGUAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    LANGUAGE.get_or_init(read_system_language)
-}
-
-fn read_system_language() -> String {
-    for key in ["LC_ALL", "LC_MESSAGES", "LANG"] {
-        if let Ok(value) = std::env::var(key)
-            && !value.is_empty()
-            && value != "C"
-            && value != "C.UTF-8"
-        {
-            return value;
-        }
-    }
-    #[cfg(target_os = "macos")]
-    if let Ok(output) = std::process::Command::new("defaults")
-        .args(["read", "-g", "AppleLocale"])
-        .output()
-    {
-        return String::from_utf8_lossy(&output.stdout).trim().into();
-    }
-    #[cfg(windows)]
-    if let Ok(output) = crate::worker::background_process(std::path::Path::new("powershell.exe"))
-        .args([
-            "-NoProfile",
-            "-Command",
-            "[System.Globalization.CultureInfo]::CurrentUICulture.Name",
-        ])
-        .output()
-    {
-        return String::from_utf8_lossy(&output.stdout).trim().into();
-    }
-    // The app's UI is Russian, unless the OS explicitly reports another language.
-    "ru".into()
-}
+#[cfg(test)]
+use notetaker_core::app_config::default_speech_model;
 
 /// One-click meeting actions; any of them can be pinned next to the "Ещё" menu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -129,128 +87,14 @@ impl DocumentAction {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Settings {
-    pub user_name: String,
-    pub digest_reminder: bool,
-    /// Aliases separated by commas, semicolons or newlines.
-    pub user_aliases: String,
-    pub theme: crate::theme::Theme,
-    pub ui_zoom: f32,
-    /// None identifies a legacy config, whose user has already set up the app.
-    pub onboarding_complete: Option<bool>,
-    pub models_folder: Option<PathBuf>,
-    pub library: PathBuf,
-    pub model: String,
-    pub asr_acceleration: notetaker_asr_proto::Provider,
-    /// Zero means min(physical cores, 8).
-    pub asr_threads: u32,
-    pub mode: Mode,
-    /// None means forever, zero means after the successful final pass.
-    #[serde(default)]
-    pub retention_days: Option<u32>,
-    pub hotkey: String,
-    pub recap_hotkey: String,
-    pub bookmark_hotkey: String,
-    pub live_summary: bool,
-    pub live_summary_minutes: u32,
-    pub recap_minutes: u32,
-    pub detect_calls: bool,
-    pub detect_browsers: bool,
-    pub detect_any_microphone: bool,
-    /// Executable names, one per line.
-    pub call_apps: String,
-    /// Zero disables the silence timeout.
-    pub auto_stop_minutes: u32,
-    pub auto_summary: bool,
-    pub vocabulary: String,
-    pub diarize: bool,
-    pub speakers: Option<u32>,
-    pub folder: Option<String>,
-    pub folder_mode_override: Option<notetaker_core::Mode>,
-    pub voice_library: bool,
-    /// Only credential IDs and display names, never subscription URLs.
-    pub calendars: Vec<notetaker_llm::calendar::Subscription>,
-    pub calendar_timezone: String,
-    pub mcp_exclude_local: bool,
-    pub check_updates: bool,
-    /// Meeting actions shown as buttons in the header, in menu order.
-    pub pinned_actions: Vec<DocumentAction>,
-    // Retired preferences remain readable but are no longer written or used.
-    #[serde(skip_serializing, rename = "hide_quickstart")]
-    pub _hide_quickstart: bool,
-    #[serde(skip_serializing, rename = "auto_download_models")]
-    pub _auto_download_models: bool,
-    #[serde(skip_serializing, rename = "auto_diarization_attempted")]
-    pub _auto_diarization_attempted: bool,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        let home = UserDirs::new();
-        let documents = home
-            .as_ref()
-            .map(|dirs| dirs.document_dir().unwrap_or(dirs.home_dir()).to_owned())
-            .unwrap_or_else(|| PathBuf::from("."));
-        Self {
-            user_name: String::new(),
-            digest_reminder: false,
-            user_aliases: String::new(),
-            theme: crate::theme::Theme::Light,
-            ui_zoom: 1.0,
-            onboarding_complete: None,
-            models_folder: None,
-            library: documents.join("notetaker"),
-            model: default_speech_model(system_language()).into(),
-            asr_acceleration: notetaker_asr_proto::Provider::Auto,
-            asr_threads: 0,
-            mode: Mode::Local,
-            retention_days: Some(7),
-            hotkey: if cfg!(target_os = "macos") {
-                "Super+Alt+Shift+R"
-            } else {
-                "Ctrl+Alt+R"
-            }
-            .into(),
-            recap_hotkey: if cfg!(target_os = "macos") {
-                "Super+Alt+Shift+M"
-            } else {
-                "Ctrl+Alt+M"
-            }
-            .into(),
-            bookmark_hotkey: if cfg!(target_os = "macos") {
-                "Super+Alt+Shift+B"
-            } else {
-                "Ctrl+Alt+B"
-            }
-            .into(),
-            live_summary: true,
-            live_summary_minutes: 3,
-            recap_minutes: 5,
-            detect_calls: true,
-            detect_browsers: true,
-            detect_any_microphone: true,
-            call_apps: String::new(),
-            auto_stop_minutes: 15,
-            auto_summary: true,
-            vocabulary: String::new(),
-            diarize: true,
-            speakers: None,
-            folder: None,
-            folder_mode_override: None,
-            voice_library: false,
-            calendars: Vec::new(),
-            calendar_timezone: "Europe/Moscow".into(),
-            mcp_exclude_local: true,
-            check_updates: true,
-            pinned_actions: vec![DocumentAction::CopyAll],
-            _hide_quickstart: false,
-            _auto_download_models: true,
-            _auto_diarization_attempted: false,
-        }
-    }
-}
+notetaker_core::app_settings_schema!(
+    Settings,
+    crate::theme::Theme,
+    crate::theme::Theme::Light,
+    notetaker_llm::calendar::Subscription,
+    DocumentAction,
+    DocumentAction::CopyAll
+);
 
 /// Keeps a rejected config next to the original. The app then runs on defaults, and
 /// the next settings save would otherwise overwrite the user's file for good.
@@ -281,19 +125,6 @@ impl Settings {
             toml::from_str(&fs::read_to_string(path)?).context("Некорректный app.toml")?;
         settings.validate()?;
         Ok(settings)
-    }
-
-    pub fn models_path(&self) -> PathBuf {
-        self.models_folder.clone().unwrap_or_else(|| {
-            std::env::var_os("NOTETAKER_MODELS_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    ProjectDirs::from("", "", "notetaker")
-                        .expect("app data directory")
-                        .data_local_dir()
-                        .join("models")
-                })
-        })
     }
 
     pub fn needs_onboarding(&self) -> bool {
@@ -702,5 +533,24 @@ mod tests {
         assert!(config.validate().is_err());
         config.providers[0].api_key_env = Some("LLM_API_KEY".into());
         assert!(config.validate().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod shared_schema_tests {
+    #[test]
+    fn legacy_config_matches_cli_schema() {
+        let text = include_str!("../../core/tests/fixtures/app-0.23.1.toml");
+        let app: super::Settings = toml::from_str(text).unwrap();
+        let cli: notetaker_core::app_config::AppSettings = toml::from_str(text).unwrap();
+        assert_eq!(
+            toml::to_string(&app).unwrap(),
+            toml::to_string(&cli).unwrap()
+        );
+        assert_eq!(app.models_path(), cli.models_path());
+        assert_eq!(
+            toml::to_string(&super::Settings::default()).unwrap(),
+            toml::to_string(&notetaker_core::app_config::AppSettings::default()).unwrap()
+        );
     }
 }

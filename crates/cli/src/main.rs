@@ -60,7 +60,14 @@ enum Command {
 }
 
 fn main() -> anyhow::Result<()> {
-    match Args::parse().command {
+    let command = Args::parse().command;
+    // Search and reindex resolve embedding models in-process: use the app's folder.
+    if let Ok(settings) = notetaker_core::app_config::AppSettings::load()
+        && let Some(folder) = settings.models_folder
+    {
+        notetaker_core::embedding::set_models_dir(folder);
+    }
+    match command {
         Command::Search(args) => cmd_search::search(args),
         Command::Reindex(args) => cmd_search::reindex(args),
         Command::People(args) => cmd_people::people(args),

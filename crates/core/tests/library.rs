@@ -559,3 +559,32 @@ fn speaker_names_are_optional_searchable_and_invalidate_summary() {
     assert!(library.search("Александра", 10).unwrap().is_empty());
     assert_eq!(library.search("Екатерина", 10).unwrap().len(), 1);
 }
+
+#[test]
+fn concurrent_metadata_updates_preserve_title_renames() {
+    let dir = tempfile::tempdir().unwrap();
+    let library = Library::open(dir.path()).unwrap();
+    let meeting = library.create_meeting(meta("Original")).unwrap();
+    let stale = meeting.read_meta().unwrap();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let other = meeting.clone();
+    let ready = barrier.clone();
+    let rename = std::thread::spawn(move || {
+        ready.wait();
+        for _ in 0..100 {
+            other.update_meta(|m| m.title = "Renamed".into()).unwrap();
+        }
+    });
+    barrier.wait();
+    for _ in 0..100 {
+        meeting
+            .update_meta(|m| {
+                m.ended_at = Some(stale.started_at);
+            })
+            .unwrap();
+    }
+    rename.join().unwrap();
+    let saved = meeting.read_meta().unwrap();
+    assert_eq!(saved.title, "Renamed");
+    assert_eq!(saved.ended_at, Some(stale.started_at));
+}

@@ -1,7 +1,6 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use notetaker_core::{DigestFilter, DigestPeriod, Library};
-use serde::Deserialize;
-use std::{fs, path::PathBuf};
+use std::path::PathBuf;
 
 #[derive(clap::Args)]
 pub struct PeopleArgs {
@@ -29,28 +28,10 @@ pub struct DigestArgs {
     #[arg(long)]
     folder: Option<String>,
 }
-#[derive(Default, Deserialize)]
-#[serde(default)]
-struct Preferences {
-    library: Option<PathBuf>,
-    user_name: String,
-    user_aliases: String,
-}
+type Preferences = notetaker_core::app_config::AppSettings;
 fn library(path: Option<PathBuf>) -> Result<(Library, Preferences)> {
-    let settings = directories::ProjectDirs::from("", "", "notetaker")
-        .context("Нет каталога настроек")?
-        .config_dir()
-        .join("app.toml");
-    let prefs: Preferences = match fs::read_to_string(settings) {
-        Ok(text) => toml::from_str(&text)?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Preferences::default(),
-        Err(e) => return Err(e.into()),
-    };
-    let root = path.or_else(|| prefs.library.clone()).unwrap_or_else(|| {
-        directories::UserDirs::new()
-            .map(|d| d.document_dir().unwrap_or(d.home_dir()).join("notetaker"))
-            .unwrap_or_else(|| PathBuf::from("notetaker"))
-    });
+    let prefs = Preferences::load()?;
+    let root = path.unwrap_or_else(|| prefs.library.clone());
     Ok((Library::open(root)?, prefs))
 }
 pub fn people(args: PeopleArgs) -> Result<()> {

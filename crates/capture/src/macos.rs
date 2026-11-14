@@ -265,17 +265,16 @@ impl AudioSource for LiveSource {
                 );
             }
             recover_default(
+                stop,
+                channel == Channel::Mic,
                 |use_default, healthy| {
                     capture(channel, &options, use_default, stop, sender, healthy)
                 },
-                |_| {
+                |restored| {
                     send(
                         sender,
                         stop,
-                        CaptureMessage::Event(CaptureEvent::Discontinuity {
-                            channel,
-                            at: options.origin.elapsed(),
-                        }),
+                        CaptureMessage::Event(CaptureEvent::Recovery { channel, restored }),
                     );
                 },
             )
@@ -539,7 +538,7 @@ fn capture(
     use_default: bool,
     stop: &AtomicBool,
     sender: &SyncSender<CaptureMessage>,
-    healthy: &mut bool,
+    healthy: &mut dyn FnMut(),
 ) -> Result<()> {
     if channel == Channel::Mic {
         unsafe {
@@ -628,7 +627,7 @@ fn capture(
                 input_end = Some(at + length);
                 let start = *start.get_or_insert(at);
                 pending.extend(normalizer.push(&packet.samples[..packet.count])?);
-                *healthy = true;
+                healthy();
                 while pending.len() >= FRAME_SAMPLES {
                     let frame = AudioFrame {
                         channel,

@@ -140,6 +140,8 @@ impl AudioSource for LiveSource {
                 ..options.clone()
             };
             recover_default(
+                stop,
+                channel == Channel::Mic,
                 |use_default, healthy| {
                     let options = if use_default { &defaults } else { &options };
                     let result = match channel {
@@ -156,16 +158,11 @@ impl AudioSource for LiveSource {
                         result
                     }
                 },
-                |error| {
+                |restored| {
                     send(
                         sender,
                         stop,
-                        CaptureMessage::Event(CaptureEvent::Error {
-                            channel,
-                            message: format!(
-                                "capture interrupted; reopening default device: {error:#}"
-                            ),
-                        }),
+                        CaptureMessage::Event(CaptureEvent::Recovery { channel, restored }),
                     );
                 },
             )
@@ -397,7 +394,7 @@ fn capture_mic(
     clock: &Clock,
     stop: &AtomicBool,
     sender: &SyncSender<CaptureMessage>,
-    healthy: &mut bool,
+    healthy: &mut dyn FnMut(),
 ) -> Result<()> {
     let device = match &options.microphone_id {
         Some(id) => enumerator.get_device(id)?,
@@ -412,7 +409,9 @@ fn capture_mic(
     let mut checked = Instant::now();
     while !stop.load(Ordering::Relaxed) {
         let frames = stream.drain(Channel::Mic, clock, sender, stop)?;
-        *healthy = true;
+        if !frames.is_empty() {
+            healthy();
+        }
         for frame in frames {
             if !send(sender, stop, CaptureMessage::Frame(frame)) {
                 return Ok(());
@@ -435,7 +434,7 @@ fn capture_system(
     clock: &Clock,
     stop: &AtomicBool,
     sender: &SyncSender<CaptureMessage>,
-    healthy: &mut bool,
+    healthy: &mut dyn FnMut(),
 ) -> Result<()> {
     // Monitor the real endpoint concurrently, never infer its activity from the
     // process stream or a historical session peak (the Teams/WebView2 failure).
@@ -465,7 +464,7 @@ fn capture_system(
     let mut buffer = LoopbackBuffer::new(options.silence_timeout);
     while !stop.load(Ordering::Relaxed) {
         let endpoint_frames = endpoint.drain(Channel::System, clock, sender, stop)?;
-        *healthy = true;
+        healthy();
         let mut process_frames = Vec::new();
         if let Some(stream) = &mut process {
             match stream.drain(Channel::System, clock, sender, stop) {

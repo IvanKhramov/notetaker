@@ -75,3 +75,5 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(test)]
 mod relationships_tests;
+
+pub mod app_config;

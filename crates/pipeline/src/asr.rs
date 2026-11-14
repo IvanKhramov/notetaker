@@ -121,7 +121,12 @@ impl AsrConfig {
                     provider,
                     command: &mut dyn FnMut(&std::path::Path) -> Command|
          -> Result<AsrClient> {
-            let mut client = AsrClient::spawn_command(command(path), self.timeout)
+            let mut process = command(path);
+            process.env(
+                "NOTETAKER_MODELS_DIR",
+                notetaker_core::app_config::AppSettings::load()?.models_path(),
+            );
+            let mut client = AsrClient::spawn_command(process, self.timeout)
                 .with_context(|| format!("launch {}", path.display()))?;
             let actual = client.load_model_with_options(
                 &self.model,
