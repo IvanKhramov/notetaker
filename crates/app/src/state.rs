@@ -1926,6 +1926,7 @@ impl AppState {
                     }
                     doc.data.transcript.segments.sort_by_key(|s| s.start_ms);
                     notetaker_pipeline::suppress_echo(&mut doc.data.transcript.segments);
+                    doc.speaker_ui.invalidate_transcript();
                 }
             }
             Event::RecordDone {

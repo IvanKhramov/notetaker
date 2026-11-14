@@ -3226,7 +3226,7 @@ fn notes_editor(
 }
 #[derive(Default)]
 struct TranscriptCache {
-    key: Option<(Instant, notetaker_core::Revision, usize, bool)>,
+    key: Option<(Instant, notetaker_core::Revision, usize, bool, u64)>,
     path: std::path::PathBuf,
     revision: u64,
     rows: crate::virtual_rows::VirtualRows,
@@ -3257,6 +3257,7 @@ impl TranscriptCache {
             document.data.revisions.transcript,
             document.data.transcript.segments.len(),
             live,
+            document.speaker_ui.cache_revision,
         );
         let changed = self.key != Some(key) || self.path != path;
         let geometry = (width.to_bits(), zoom.to_bits());
@@ -3609,6 +3610,46 @@ fn transcript_view(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn live_echo_replacement_invalidates_caches_even_when_turn_count_is_unchanged() {
+        use super::*;
+        let (_dir, mut document, path) = synthetic_document(1);
+        document.data.transcript.segments[0].channel = notetaker_core::Channel::Mic;
+        document.data.transcript.segments[0].speaker.0 = "me".into();
+        let old_id = document.data.transcript.segments[0].id;
+        let changed_at = document.changed_at;
+        let mut system = document.data.transcript.segments[0].clone();
+        system.id = uuid::Uuid::now_v7();
+        system.channel = notetaker_core::Channel::System;
+        system.speaker.0 = "s1".into();
+        let new_id = system.id;
+        let old_timeline = crate::speakers::timeline(&mut document);
+        assert_eq!(old_timeline.remote_count, 0);
+        let mut cache = TranscriptCache::default();
+        cache.sync(&document, &path, 900.0, 1.0, true);
+        let (mut state, _commands, events) = crate::test_ui::state();
+        state.recording.phase = Phase::Recording;
+        state.recording.path = Some(path.clone());
+        state.documents.insert(path.clone(), document);
+        events
+            .send(crate::worker::Event::Pipeline(
+                notetaker_pipeline::PipelineEvent::LiveSegments(vec![system]),
+            ))
+            .unwrap();
+        state.poll();
+        let document = state.documents.get_mut(&path).unwrap();
+        assert_eq!(document.data.transcript.segments.len(), 1);
+        assert_eq!(
+            document.changed_at, changed_at,
+            "cache invalidation must not delay note autosave"
+        );
+        cache.sync(document, &path, 900.0, 1.0, true);
+        assert!(!cache.indices.contains_key(&old_id));
+        assert_eq!(cache.indices.get(&new_id), Some(&0));
+        let new_timeline = crate::speakers::timeline(document);
+        assert_eq!(new_timeline.remote_count, 1);
+        assert!(!std::sync::Arc::ptr_eq(&old_timeline, &new_timeline));
+    }
     #[test]
     fn middle_jump_tracks_the_target_until_lazy_heights_settle() {
         use super::*;

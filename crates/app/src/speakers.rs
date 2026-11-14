@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 #[derive(Default)]
 pub struct SpeakerUi {
+    pub cache_revision: u64,
     timeline: Option<(
         (std::time::Instant, notetaker_core::Revision, usize),
         std::sync::Arc<CachedTimeline>,
@@ -42,6 +43,10 @@ pub fn timeline(document: &mut crate::state::Document) -> std::sync::Arc<CachedT
     cached
 }
 impl SpeakerUi {
+    pub fn invalidate_transcript(&mut self) {
+        self.cache_revision = self.cache_revision.wrapping_add(1);
+        self.timeline = None;
+    }
     pub fn select(&mut self, transcript: &Transcript, index: usize, shift: bool, ctrl: bool) {
         let Some(segment) = transcript.segments.get(index) else {
             return;
