@@ -19,6 +19,8 @@ mod quickstart;
 mod settings;
 mod speakers;
 mod state;
+#[cfg(test)]
+mod test_ui;
 mod theme;
 mod trackers;
 mod ui;
@@ -27,6 +29,7 @@ mod updates;
 #[cfg(target_os = "macos")]
 #[path = "updates_macos.rs"]
 mod updates;
+mod virtual_rows;
 mod worker;
 
 fn main() -> eframe::Result {

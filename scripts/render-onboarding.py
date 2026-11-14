@@ -28,7 +28,7 @@ manifest = re.sub(r'path = "\.\./([^"]+)"', lambda m: f'path = "{root / "crates"
 (harness / "Cargo.lock").write_text((root / "Cargo.lock").read_text().replace('name = "notetaker-app"', 'name = "onboarding-preview"'))
 modules = []
 for path in sorted((root / "crates/app/src").glob("*.rs")):
-    if path.stem in {"main", "desktop", "macos", "updates", "updates_macos", "icons"}:
+    if path.stem in {"main", "desktop", "macos", "updates", "updates_macos", "icons", "test_ui"}:
         continue
     text = path.read_text()
     if path.stem == "state":
@@ -83,15 +83,13 @@ impl Panel { pub fn fixture(&mut self,state:&AppState) {
         text=text.replace('#[cfg(any(windows, target_os = "macos"))]','')
         text=text.replace('self.default_open,', 'self.default_open || ui.ctx().data(|data| data.get_temp::<bool>(egui::Id::unique("preview-expand-settings")).unwrap_or(false)),')
     if path.stem == "ui":
-        text = text.replace("    pub fn new() -> Self", "    pub fn new(state: AppState) -> Self")
-        text = text.replace("state: AppState::new(),", "state,")
         expected = 'egui::Popup::menu(&menu_response)'
         assert text.count(expected) == 1, "meeting menu fixture hook changed"
         text = text.replace(expected, expected + '.open(ui.ctx().data(|data| data.get_temp::<bool>(egui::Id::unique("fixture-meeting-menu")).unwrap_or(false)) || egui::Popup::is_id_open(ui.ctx(), egui::Popup::menu(&menu_response).get_id()))')
         text += '''
 impl NotetakerApp {
     pub fn fixture(state: AppState, screen: usize) -> Self {
-        let mut app = Self::new(state);
+        let mut app = Self::with_state(state);
         app.home = ![4,5,12,14,15].contains(&screen);
         if screen < 3 { app.quickstart.open = true; app.quickstart.step = screen; }
         if screen == 13 { app.quickstart.open = true; app.quickstart.step = 2; app.quickstart.expanded = true; }
@@ -126,8 +124,29 @@ impl NotetakerApp {
         if screen == 37 {app.organization.fixture(&app.state.settings);app.organization.fixture_select();}
         if screen == 38 {app.show_settings=true;app.settings_panel.section=crate::settings::Section::Ai;}
         if screen == 5 { app.state.tab = Tab::Transcript; }
+        if screen == 39 || screen == 41 {
+            app.home=false; app.state.tab=Tab::Transcript;
+            let path=app.state.selected.clone().unwrap();
+            let document=app.state.documents.get_mut(&path).unwrap();
+            let template=document.data.transcript.segments[0].clone();
+            document.data.transcript.segments=(0..5000).map(|index|{
+                let mut turn=template.clone();turn.id=uuid::Uuid::now_v7();turn.start_ms=index*1000;turn.end_ms=index*1000+900;
+                turn.text=format!("Реплика {}. Проверяем длинную встречу, переносы строк и сохранение позиции при прокрутке.",index+1);turn
+            }).collect();
+            if screen==39 {document.speaker_ui.scroll_to=Some(document.data.transcript.segments[2499].id);}
+            if screen==41 {app.state.recording.path=Some(path);app.state.recording.phase=crate::state::Phase::Recording;app.state.recording.started=Some(std::time::Instant::now()-Duration::from_secs(123));app.state.recording.levels=[0.65,0.3];}
+        }
+        if screen == 40 {
+            app.home=true; let template=&app.state.rows[0];
+            app.state.rows=(0..5000).map(|index| {
+                let mut meta=template.meta.clone();meta.id=uuid::Uuid::now_v7();meta.title=format!("Встреча {}",index+1);meta.started_at-=chrono::Duration::minutes(index*5);
+                crate::worker::MeetingRow {meeting:template.meeting.clone(),meta,snippet:String::new(),anchor:None}
+            }).collect();
+        }
+
         app
     }
+    pub fn fixture_jump_settled(&self) -> bool { self.state.selected.as_ref().and_then(|path| self.state.documents.get(path)).is_none_or(|document| document.speaker_ui.scroll_to.is_none()) }
     pub fn pill(ui: &mut egui::Ui) { recording_pill(ui, Duration::from_secs(123), 0.3); }
 }
 '''
@@ -143,6 +162,8 @@ struct Preview { app: ui::NotetakerApp, frames: usize, output: std::path::PathBu
 impl eframe::App for Preview {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         // Use the real UI, but never call its logic/worker polling.
+        // A stationary Xvfb pointer must not open an unrelated hover submenu.
+        ui.ctx().input_mut(|input| input.pointer = Default::default());
         ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("fixture-meeting-menu"), self.screen == 15));
         ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("preview-expand-settings"),self.screen==37 || self.screen==38));
         self.app.ui(ui, frame);
@@ -173,7 +194,8 @@ impl eframe::App for Preview {
         self.frames += 1;
         let now=ui.input(|input|input.time);
         let started=*self.started.get_or_insert(now);
-        if self.frames >= 10 && now-started >= 0.4 && !self.captured {
+        let settled = self.screen != 39 || self.app.fixture_jump_settled();
+        if self.frames >= 10 && now-started >= 0.4 && !self.captured && settled {
             self.captured=true;
             let output = self.output.clone(); let context = ui.ctx().clone();
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::ScreenshotCallback::new(move |image| {
@@ -261,7 +283,7 @@ if shutil.disk_usage(root).free < 2 * 1024**3:
 # Resolve the derived harness root against the copied workspace lock before its locked build.
 subprocess.run(["cargo", "metadata", "--offline", "--format-version", "1", "--manifest-path", str(harness / "Cargo.toml")], cwd=root, env=env, check=True, stdout=subprocess.DEVNULL)
 subprocess.run(["cargo", "build", "--locked", "--manifest-path", str(harness / "Cargo.toml")], cwd=root, env=env, check=True)
-names = ["welcome", "name", "connections", "home", "note", "transcript", "general", "recording", "calendars", "ai", "search", "storage", "recording-pill", "connections-expanded", "delete-confirm", "meeting-menu", "toast", "empty-library", "narrow-settings", "recording-bar", "chat", "tasks", "people", "person", "series", "digest", "folders", "diagnostics", "tracker-preview", "new-recording", "rename", "regenerate", "capture-warning", "widgets", "update-card", "folder-delete", "merge-people", "folders-advanced", "ai-expanded"]
+names = ["welcome", "name", "connections", "home", "note", "transcript", "general", "recording", "calendars", "ai", "search", "storage", "recording-pill", "connections-expanded", "delete-confirm", "meeting-menu", "toast", "empty-library", "narrow-settings", "recording-bar", "chat", "tasks", "people", "person", "series", "digest", "folders", "diagnostics", "tracker-preview", "new-recording", "rename", "regenerate", "capture-warning", "widgets", "update-card", "folder-delete", "merge-people", "folders-advanced", "ai-expanded", "performance-transcript", "performance-meetings", "performance-live"]
 def render(spec):
     index, name, theme, width, height, zoom = spec
     actual_width = 760 if name == "narrow-settings" and zoom == 1.0 else width

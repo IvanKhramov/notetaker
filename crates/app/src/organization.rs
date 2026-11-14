@@ -14,6 +14,7 @@ use std::{
 };
 
 struct Snapshot {
+    names: Vec<String>,
     folders: Versioned<Folders>,
     metas: BTreeMap<PathBuf, MeetingMeta>,
     conflicts: BTreeMap<PathBuf, Vec<SyncConflict>>,
@@ -30,8 +31,18 @@ impl Snapshot {
                 conflicts.insert(m.path().to_owned(), copies);
             }
         }
+        let folders = library.load_folders()?;
+        let names = folders
+            .value
+            .keys()
+            .chain(metas.values().filter_map(|meta| meta.folder.as_ref()))
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
         Ok(Self {
-            folders: library.load_folders()?,
+            names,
+            folders,
             metas,
             conflicts,
             shared: library.is_shared(),
@@ -40,6 +51,7 @@ impl Snapshot {
 }
 #[derive(Default)]
 pub struct Panel {
+    revision: u64,
     root: PathBuf,
     snapshot: Option<Snapshot>,
     receiver: Option<Receiver<Result<Snapshot, String>>>,
@@ -162,6 +174,20 @@ impl Panel {
         {
             self.launch(ctx, |_| Ok(()));
         }
+        if state.ready
+            && self.receiver.is_none()
+            && !self.settings_open
+            && self.compare.is_none()
+            && !state.unsaved()
+            && !state.recording.busy()
+            && state.enhancing.is_none()
+            && ctx.input(|i| i.viewport().focused.unwrap_or(false))
+            && let Some(checked) = self.checked
+        {
+            ctx.request_repaint_after(
+                (checked + Duration::from_secs(30)).saturating_duration_since(Instant::now()),
+            );
+        }
     }
     pub fn visible(&self, meta: &MeetingMeta, state: &AppState) -> bool {
         matches_folder(meta, state.folder_filter.as_deref())
@@ -200,29 +226,23 @@ impl Panel {
             });
         });
         if let Some(s) = &self.snapshot {
-            let mut names: BTreeSet<_> = s.folders.value.keys().cloned().collect();
-            for meta in s.metas.values() {
-                if let Some(folder) = &meta.folder {
-                    names.insert(folder.clone());
-                }
-            }
-            for name in std::iter::once(String::new()).chain(names) {
+            for name in std::iter::once("").chain(s.names.iter().map(String::as_str)) {
                 let label = if name.is_empty() {
                     "Без папки"
                 } else {
-                    &name
+                    name
                 };
                 let response = theme::nav_row(
                     ui,
                     &format!("▫  {label}"),
-                    state.folder_filter.as_deref() == Some(&name),
+                    state.folder_filter.as_deref() == Some(name),
                 )
                 .on_hover_text(label);
                 if response.clicked() {
-                    state.folder_filter = Some(name.clone());
+                    state.folder_filter = Some(name.to_owned());
                 }
                 if let Some(paths) = response.dnd_release_payload::<Vec<PathBuf>>() {
-                    destination = Some(((*paths).clone(), name.clone()));
+                    destination = Some(((*paths).clone(), name.to_owned()));
                 }
                 response.context_menu(|ui| {
                     if !name.is_empty()
@@ -233,7 +253,7 @@ impl Panel {
                         )
                         .clicked()
                     {
-                        edit_folder = Some(name.clone());
+                        edit_folder = Some(name.to_owned());
                         ui.close();
                     }
                     if !self.selected.is_empty()
@@ -244,7 +264,8 @@ impl Panel {
                         )
                         .clicked()
                     {
-                        destination = Some((self.selected.iter().cloned().collect(), name.clone()));
+                        destination =
+                            Some((self.selected.iter().cloned().collect(), name.to_owned()));
                         ui.close();
                     }
                 });
@@ -330,6 +351,7 @@ impl Panel {
         self.settings_open = true;
     }
     fn apply_snapshot(&mut self, snapshot: Snapshot) {
+        self.revision = self.revision.wrapping_add(1);
         self.settings_revision = snapshot.folders.revision;
         self.snapshot = Some(snapshot);
         if let Some(name) = self.pending_folder_name.take() {
@@ -363,6 +385,9 @@ impl Panel {
         self.destinations = Default::default();
         self.destinations_rx = None;
     }
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
     pub fn meeting(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
         let Some(path) = state.selected.clone() else {
             return;
@@ -371,7 +396,7 @@ impl Panel {
             return;
         };
         let m = doc.data.meeting.clone();
-        let meta = doc.data.meta.clone();
+        let meta = &doc.data.meta;
         let enabled = !state.unsaved()
             && !state.recording.busy()
             && state.enhancing.is_none()
@@ -512,18 +537,11 @@ impl Panel {
         }
     }
     fn folder_settings(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, can_share: bool) {
-        let mut names: BTreeSet<String> = self
+        let names = self
             .snapshot
             .as_ref()
-            .map(|s| s.folders.value.keys().cloned().collect())
+            .map(|snapshot| snapshot.names.clone())
             .unwrap_or_default();
-        if let Some(snapshot) = &self.snapshot {
-            for meta in snapshot.metas.values() {
-                if let Some(name) = &meta.folder {
-                    names.insert(name.clone());
-                }
-            }
-        }
         let mut select = None;
         for name in names {
             ui.push_id(&name, |ui| {
@@ -1132,9 +1150,95 @@ fn choose(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn folder_dialog_creates_renames_and_confirms_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = Library::open(dir.path()).unwrap();
+        let (mut state, _commands, _events) = crate::test_ui::state();
+        state.settings.library = dir.path().to_owned();
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut panel = Panel {
+            root: dir.path().to_owned(),
+            settings_open: true,
+            create_name: "Created".into(),
+            ..Default::default()
+        };
+        panel.apply_snapshot(Snapshot::read(&library).unwrap());
+        crate::test_ui::click(&ctx, &mut |ui| panel.windows(ui.ctx(), false), "Создать");
+        wait(&mut panel, &ctx, &mut state);
+        assert!(
+            library
+                .load_folders()
+                .unwrap()
+                .value
+                .contains_key("Created")
+        );
+        assert_eq!(panel.folder_name, "Created");
+        crate::test_ui::click(
+            &ctx,
+            &mut |ui| panel.windows(ui.ctx(), false),
+            theme::icons::PENCIL,
+        );
+        assert!(panel.rename_dialog.is_some());
+        crate::test_ui::replace_text(
+            &ctx,
+            &mut |ui| panel.windows(ui.ctx(), false),
+            "Created",
+            "Renamed",
+        );
+        crate::test_ui::click(&ctx, &mut |ui| panel.windows(ui.ctx(), false), "Сохранить");
+        wait(&mut panel, &ctx, &mut state);
+        assert_eq!(panel.folder_name, "Renamed");
+        let folders = library.load_folders().unwrap().value;
+        assert!(!folders.contains_key("Created"));
+        assert!(folders.contains_key("Renamed"));
+        crate::test_ui::click(
+            &ctx,
+            &mut |ui| panel.windows(ui.ctx(), false),
+            theme::icons::TRASH_2,
+        );
+        assert!(panel.delete_dialog.is_some());
+        assert!(
+            library
+                .load_folders()
+                .unwrap()
+                .value
+                .contains_key("Renamed")
+        );
+        crate::test_ui::click(&ctx, &mut |ui| panel.windows(ui.ctx(), false), "Отмена");
+        assert!(
+            library
+                .load_folders()
+                .unwrap()
+                .value
+                .contains_key("Renamed")
+        );
+        crate::test_ui::click(
+            &ctx,
+            &mut |ui| panel.windows(ui.ctx(), false),
+            theme::icons::TRASH_2,
+        );
+        crate::test_ui::click(&ctx, &mut |ui| panel.windows(ui.ctx(), false), "Удалить");
+        wait(&mut panel, &ctx, &mut state);
+        assert!(library.load_folders().unwrap().value.is_empty());
+        assert!(panel.folder_name.is_empty());
+    }
+    fn wait(panel: &mut Panel, ctx: &egui::Context, state: &mut AppState) {
+        for _ in 0..300 {
+            panel.poll(ctx, state);
+            if panel.receiver.is_none() {
+                assert!(panel.message.is_empty(), "{}", panel.message);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("folder operation timed out");
+    }
 
     fn snapshot(folders: Folders) -> Snapshot {
         Snapshot {
+            names: folders.keys().cloned().collect(),
             folders: Versioned {
                 value: folders,
                 revision: Default::default(),

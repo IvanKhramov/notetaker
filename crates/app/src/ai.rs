@@ -117,6 +117,14 @@ impl Connections {
             .iter()
             .any(|card| card.edited.is_some() || (card.key_editing && !card.key.is_empty()))
     }
+    pub fn wake_after(&self, now: Instant) -> Option<Duration> {
+        self.cards
+            .iter()
+            .filter(|card| !card.busy && !card.key_editing && !card.save_error)
+            .filter_map(|card| card.edited)
+            .map(|due| due.saturating_duration_since(now))
+            .min()
+    }
     /// Called even when Settings is closed, so a debounce cannot get stranded.
     pub fn autosaves(&mut self) -> Vec<Action> {
         let mut actions = Vec::new();

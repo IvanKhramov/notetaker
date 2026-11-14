@@ -7,6 +7,8 @@ use std::{
 };
 
 pub struct Maintenance {
+    #[cfg(any(windows, unix))]
+    native_requests: Option<Receiver<(bool, bool)>>,
     crashed: bool,
     message: Option<String>,
     report: Option<Receiver<anyhow::Result<std::path::PathBuf>>>,
@@ -38,6 +40,8 @@ impl Default for Maintenance {
             } else { None }
         });
         Self {
+            #[cfg(any(windows, unix))]
+            native_requests: None,
             crashed: diagnostics::previous_crash(),
             message,
             report: None,
@@ -76,7 +80,30 @@ impl Maintenance {
         }
         #[cfg(any(windows, unix))]
         {
-            if notetaker_runtime::platform::Instance::quit_requested() {
+            let requests = self.native_requests.get_or_insert_with(|| {
+                let (tx, rx) = mpsc::channel();
+                let ctx = ctx.clone();
+                std::thread::spawn(move || {
+                    loop {
+                        let quit = notetaker_runtime::platform::Instance::quit_requested();
+                        let show = notetaker_runtime::platform::Instance::show_requested();
+                        if quit || show {
+                            if tx.send((quit, show)).is_err() {
+                                return;
+                            }
+                            ctx.request_repaint();
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                    }
+                });
+                rx
+            });
+            let (quit, show) = requests
+                .try_iter()
+                .fold((false, false), |(q, s), (quit, show)| {
+                    (q || quit, s || show)
+                });
+            if quit {
                 if busy {
                     notetaker_runtime::platform::Instance::refuse_quit();
                     self.message = Some("Перед установкой или удалением завершите запись и чистовой проход, затем повторите попытку.".into());
@@ -87,7 +114,7 @@ impl Maintenance {
                     return true;
                 }
             }
-            if notetaker_runtime::platform::Instance::show_requested() {
+            if show {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -293,5 +320,69 @@ fn reveal(path: &Path) -> anyhow::Result<()> {
     #[cfg(not(windows))]
     {
         open(path.parent().unwrap_or(path))
+    }
+}
+
+#[cfg(any(windows, test))]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum HelperStartup {
+    Pending,
+    Ready,
+    Failed,
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn helper_startup(
+    ready: bool,
+    running: bool,
+    elapsed: std::time::Duration,
+) -> HelperStartup {
+    // A ready file from an exited helper is not a live handoff acknowledgement.
+    if !running {
+        HelperStartup::Failed
+    } else if ready {
+        HelperStartup::Ready
+    } else if elapsed > std::time::Duration::from_secs(15) {
+        HelperStartup::Failed
+    } else {
+        HelperStartup::Pending
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HelperStartup, helper_startup};
+    use std::time::Duration;
+
+    #[test]
+    fn ready_helper_wins_over_startup_timeout() {
+        assert_eq!(
+            helper_startup(true, true, Duration::from_secs(30)),
+            HelperStartup::Ready
+        );
+    }
+
+    #[test]
+    fn startup_timeout_only_applies_to_unready_running_helpers() {
+        assert_eq!(
+            helper_startup(false, true, Duration::from_secs(15)),
+            HelperStartup::Pending
+        );
+        assert_eq!(
+            helper_startup(false, true, Duration::from_secs(16)),
+            HelperStartup::Failed
+        );
+    }
+
+    #[test]
+    fn exited_helper_is_rejected_even_with_a_ready_file() {
+        assert_eq!(
+            helper_startup(true, false, Duration::from_secs(1)),
+            HelperStartup::Failed
+        );
+        assert_eq!(
+            helper_startup(false, false, Duration::ZERO),
+            HelperStartup::Failed
+        );
     }
 }

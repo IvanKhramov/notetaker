@@ -94,6 +94,28 @@ pub fn auto_download(state: &mut AppState) {
         state.quickstart.checked_at.get_or_insert_with(Instant::now);
     }
 }
+pub fn wake_after(state: &AppState, now: Instant) -> Option<Duration> {
+    if !state.ready
+        || state.downloading
+        || state.recording.busy()
+        || state.settings_pending
+        || state.settings_autosave.pending
+        || state.exit_requested
+    {
+        return None;
+    }
+    let due = if state
+        .quickstart
+        .models
+        .missing(&state.settings.model)
+        .is_some()
+    {
+        state.quickstart.retry_at?
+    } else {
+        state.quickstart.checked_at? + Duration::from_secs(60)
+    };
+    Some(due.saturating_duration_since(now))
+}
 
 pub fn check_models() -> Models {
     let check = |model| -> Status {
@@ -387,6 +409,7 @@ impl Panel {
 pub enum ProbeEvent {
     Done(Result<[Status; 2], String>),
 }
+
 fn probe() -> anyhow::Result<[Status; 2]> {
     use notetaker_capture::{
         AudioSource, CaptureEvent, CaptureMessage, Channel, LevelMeter, LiveOptions, live_sources,
@@ -438,4 +461,53 @@ fn probe() -> anyhow::Result<[Status; 2]> {
             Status::Ready
         }
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn quickstart_advances_three_steps_preserving_name_and_reopens_at_start() {
+        let (mut state, _commands, _events) = crate::test_ui::state();
+        state.ready = true;
+        state.settings.onboarding_complete = Some(false);
+        state.settings_draft = state.settings.clone();
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut panel = Panel::default();
+        panel.reopen();
+        panel.tick(&mut state);
+        assert_eq!(state.settings_draft.onboarding_complete, Some(true));
+        state.settings_draft.user_name = "Before".into();
+        crate::test_ui::click(
+            &ctx,
+            &mut |ui| panel.show(ui.ctx(), &mut state),
+            "Пропустить",
+        );
+        assert_eq!(panel.step, 1);
+        crate::test_ui::replace_text(
+            &ctx,
+            &mut |ui| panel.show(ui.ctx(), &mut state),
+            "Before",
+            "After",
+        );
+        crate::test_ui::click(
+            &ctx,
+            &mut |ui| panel.show(ui.ctx(), &mut state),
+            "Продолжить",
+        );
+        assert_eq!(panel.step, 2);
+        assert_eq!(state.settings_draft.user_name, "After");
+        crate::test_ui::click(
+            &ctx,
+            &mut |ui| panel.show(ui.ctx(), &mut state),
+            "Начать работу",
+        );
+        assert!(!panel.open);
+        assert_eq!(state.settings_draft.user_name, "After");
+        panel.reopen();
+        assert!(panel.open);
+        assert_eq!(panel.step, 0);
+        assert_eq!(state.settings_draft.user_name, "After");
+    }
 }

@@ -258,6 +258,7 @@ impl Document {
 }
 
 pub struct AppState {
+    pub view_revision: u64,
     pub settings: Settings,
     pub settings_draft: Settings,
     pub llm_draft: LlmSettings,
@@ -286,7 +287,7 @@ pub struct AppState {
     pub calendar_secrets: HashMap<String, String>,
     pub calendar_busy: bool,
     pub calendar_status: String,
-    calendar_checked: Option<Instant>,
+    pub calendar_checked: Option<Instant>,
     calendar_generation: u64,
     prefilled_title: Option<String>,
     selected_event: Option<notetaker_core::calendar::CalendarEvent>,
@@ -341,6 +342,10 @@ pub struct AppState {
     rx: Receiver<Event>,
 }
 impl AppState {
+    #[cfg(test)]
+    pub(crate) fn test_channels(tx: Sender<Command>, rx: Receiver<Event>) -> Self {
+        Self::with_channels(tx, rx)
+    }
     pub fn new() -> Self {
         let (tx, rx) = worker::spawn();
         let mut state = Self::with_channels(tx, rx);
@@ -350,6 +355,7 @@ impl AppState {
     fn with_channels(tx: Sender<Command>, rx: Receiver<Event>) -> Self {
         let settings = Settings::default();
         Self {
+            view_revision: 0,
             settings: settings.clone(),
             settings_draft: settings.clone(),
             llm_draft: LlmSettings::default(),
@@ -1234,11 +1240,14 @@ impl AppState {
     }
     pub fn poll(&mut self) {
         // Bound one UI update even if ASR/LLM produced a burst.
-        for _ in 0..256 {
+        for index in 0..256 {
             let Ok(event) = self.rx.try_recv() else {
                 break;
             };
             self.apply(event);
+            if index == 255 {
+                crate::worker::wake_ui();
+            }
         }
         if let Some(count) = self.recording.audio_warnings.take(Instant::now()) {
             self.recording.message(format!(
@@ -1379,6 +1388,19 @@ impl AppState {
         }
     }
     fn apply(&mut self, event: Event) {
+        if matches!(
+            &event,
+            Event::Listed { .. }
+                | Event::Tasks { .. }
+                | Event::TaskToggled { .. }
+                | Event::Calendar { .. }
+                | Event::SettingsSaved(..)
+                | Event::Boot { .. }
+                | Event::Renamed { .. }
+                | Event::Trashed { .. }
+        ) {
+            self.view_revision = self.view_revision.wrapping_add(1);
+        }
         match event {
             Event::SearchNote { request, note } => {
                 if request == self.request {
@@ -1641,6 +1663,9 @@ impl AppState {
                     doc.saving = false;
                     doc.data.revisions = result.revisions;
                     let reloaded = result.reloaded.as_deref();
+                    if let Some(data) = reloaded {
+                        doc.data.system_audio = data.system_audio;
+                    }
                     // Keep edits made after enqueueing the save. If they also
                     // conflict, their next save preserves them before reloading.
                     if result.conflicts.notes
@@ -1901,6 +1926,7 @@ impl AppState {
                     }
                     doc.data.transcript.segments.sort_by_key(|s| s.start_ms);
                     notetaker_pipeline::suppress_echo(&mut doc.data.transcript.segments);
+                    doc.speaker_ui.invalidate_transcript();
                 }
             }
             Event::RecordDone {
@@ -1911,6 +1937,7 @@ impl AppState {
                 if let (Some(path), Some(data)) = (path, document) {
                     if let Some(doc) = self.documents.get_mut(&path) {
                         doc.data.meta = data.meta;
+                        doc.data.system_audio = data.system_audio;
                         let bookmarks = doc.data.transcript.bookmarks.clone();
                         doc.data.transcript = data.transcript;
                         for bookmark in bookmarks {

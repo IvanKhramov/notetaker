@@ -110,7 +110,12 @@ impl Updates {
                 Err(mpsc::TryRecvError::Empty) => {}
             }
         }
-        if enabled && self.receiver.is_none() {
+        if enabled
+            && !self.exit
+            && self.receiver.is_none()
+            && self.prepared.is_none()
+            && self.helper.is_none()
+        {
             // An idle egui window does not repaint; wake it for the next hourly check.
             ctx.request_repaint_after(self.next_check.saturating_duration_since(Instant::now()));
         }
@@ -128,21 +133,27 @@ impl Updates {
             }
         }
         if let Some(helper) = &mut self.helper {
-            if helper.started.elapsed() > Duration::from_secs(15)
-                || !matches!(helper.child.try_wait(), Ok(None))
-            {
-                let _ = helper.child.kill();
-                let _ = helper.child.wait();
-                self.helper = None;
-                self.message = Some("Обновление не запустилось. Повторите позже.".into());
-                return false;
-            }
-            if !busy && helper.prepared.directory.path().join("ready").is_file() {
-                // The helper now owns the temp directory and waits for our PID.
-                let helper = self.helper.take().expect("helper");
-                let _ = helper.prepared.directory.keep();
-                self.exit = true;
-                return true;
+            let running = matches!(helper.child.try_wait(), Ok(None));
+            let ready = helper.prepared.directory.path().join("ready").is_file();
+            match crate::maintenance::helper_startup(ready, running, helper.started.elapsed()) {
+                crate::maintenance::HelperStartup::Failed => {
+                    let _ = helper.child.kill();
+                    let _ = helper.child.wait();
+                    self.helper = None;
+                    self.message = Some("Обновление не запустилось. Повторите позже.".into());
+                    return false;
+                }
+                crate::maintenance::HelperStartup::Ready if !busy => {
+                    // The helper now owns the temp directory and waits for our PID.
+                    let helper = self.helper.take().expect("helper");
+                    let _ = helper.prepared.directory.keep();
+                    self.exit = true;
+                    return true;
+                }
+                crate::maintenance::HelperStartup::Pending
+                | crate::maintenance::HelperStartup::Ready => {
+                    ctx.request_repaint_after(Duration::from_millis(200));
+                }
             }
         }
         false

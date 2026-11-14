@@ -1423,7 +1423,10 @@ pub fn menu_item(
         Color32::PLACEHOLDER,
     );
     let width = ui.available_width().max(text.size().x + 64.0);
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 30.0), egui::Sense::click());
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(width, ui.spacing().interact_size.y.min(30.0)),
+        egui::Sense::click(),
+    );
     let hover =
         ui.ctx()
             .animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
@@ -1636,6 +1639,29 @@ pub fn toast(
 #[cfg(test)]
 mod interaction_tests {
     use super::*;
+    #[test]
+    fn painted_submenu_opens_and_dispatches_its_child_action() {
+        let ctx = egui::Context::default();
+        install(&ctx);
+        let mut selected = false;
+        {
+            let mut draw = |ui: &mut egui::Ui| {
+                let anchor = ui.button("Menu");
+                egui::Popup::menu(&anchor).open(true).show(|ui| {
+                    ui.set_width(300.0);
+                    submenu(ui, icons::COPY, "Copy submenu", |ui| {
+                        if menu_item(ui, icons::COPY, "Child action", false, false).clicked() {
+                            selected = true;
+                            ui.close();
+                        }
+                    });
+                });
+            };
+            crate::test_ui::click(&ctx, &mut draw, "Copy submenu");
+            crate::test_ui::click(&ctx, &mut draw, "Child action");
+        }
+        assert!(selected);
+    }
     fn escape_input() -> egui::RawInput {
         egui::RawInput {
             events: vec![egui::Event::Key {
@@ -2188,40 +2214,18 @@ pub fn submenu<R>(
     label: &str,
     body: impl FnOnce(&mut egui::Ui) -> R,
 ) {
-    let p = Palette::of(ui);
-    let mut job = egui::text::LayoutJob::default();
-    if !icon.is_empty() {
-        job.append(
-            icon,
-            0.0,
-            egui::TextFormat {
-                font_id: FontId::new(16.0, FontFamily::Name("icons".into())),
-                color: p.muted,
-                ..Default::default()
-            },
-        );
-    }
-    job.append(
-        label,
-        if icon.is_empty() { 0.0 } else { 6.0 },
-        egui::TextFormat {
-            font_id: FontId::proportional(14.0),
-            color: p.text,
-            ..Default::default()
-        },
+    let response = menu_item(ui, icon, label, false, false);
+    paint_icon(
+        ui,
+        response.rect.right_center() - egui::vec2(14.0, 0.0),
+        icons::CHEVRON_RIGHT,
+        16.0,
+        Palette::of(ui).tertiary,
     );
-    let button = egui::Button::new(job)
-        .frame(false)
-        .min_size(egui::vec2(ui.available_width(), 30.0))
-        .right_text(
-            egui::RichText::new(icons::CHEVRON_RIGHT)
-                .font(FontId::new(16.0, FontFamily::Name("icons".into())))
-                .color(p.tertiary),
-        );
-    ui.scope(|ui| {
+    egui::containers::menu::SubMenu::new().show(ui, &response, |ui| {
+        ui.set_width(300.0_f32.min(ui.ctx().content_rect().width() - 32.0));
         ui.spacing_mut().interact_size.y = 30.0;
-        ui.spacing_mut().item_spacing.y = 0.0;
-        egui::containers::menu::SubMenuButton::from_button(button).ui(ui, body);
+        body(ui)
     });
 }
 
