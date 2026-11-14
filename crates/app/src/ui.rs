@@ -197,8 +197,11 @@ fn action_icon(item: DocumentAction) -> &'static str {
 }
 impl NotetakerApp {
     pub fn new() -> Self {
+        Self::with_state(AppState::new())
+    }
+    fn with_state(state: AppState) -> Self {
         Self {
-            state: AppState::new(),
+            state,
             people: crate::people::Panel::default(),
             organization: Default::default(),
             trackers: Default::default(),
@@ -845,153 +848,194 @@ impl NotetakerApp {
         let mut send_task = None;
         let mut toggle = None;
         let mut open = None;
-        egui::ScrollArea::vertical().id_salt("all_tasks").show_rows(
-            ui,
-            48.0,
-            self.tasks_cache.entries.len().max(1),
-            |ui, range| {
+        let _layout = ui
+            .scope(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                if self.tasks_cache.entries.is_empty() && !self.state.tasks_busy {
-                    ui.weak("Нет задач по выбранным фильтрам");
-                }
-                for index in range {
-                    let Some(entry) = self.tasks_cache.entries.get(index) else {
-                        continue;
-                    };
-                    let task = match entry {
-                        TaskEntry::Header(title) => {
-                            ui.add_space(24.0);
-                            theme::section_caption(ui, title);
-                            ui.add_space(8.0);
-                            continue;
+                egui::ScrollArea::vertical().id_salt("all_tasks").show_rows(
+                    ui,
+                    48.0,
+                    self.tasks_cache.entries.len().max(1),
+                    |ui, range| {
+                        if self.tasks_cache.entries.is_empty() && !self.state.tasks_busy {
+                            ui.weak("Нет задач по выбранным фильтрам");
                         }
-                        TaskEntry::Task(index) => &self.state.tasks[*index],
-                    };
-                    ui.push_id((&task.path, task.line), |ui| {
-                        let p = Palette::of(ui);
-                        let (rect, response) = ui.allocate_exact_size(
-                            egui::vec2(ui.available_width(), 48.0),
-                            egui::Sense::hover(),
-                        );
-                        theme::row_background(ui, &response, false);
-                        ui.scope_builder(
-                            egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(
-                                rect.left_top() + egui::vec2(8.0, 12.0),
-                                egui::vec2(16.0, 24.0),
-                            )),
-                            |ui| {
-                                let mut completed = task.completed;
-                                if ui
-                                    .add_enabled(
-                                        can_toggle,
-                                        theme::Checkbox::without_text(&mut completed),
-                                    )
-                                    .changed()
-                                {
-                                    toggle = Some((task.clone(), completed));
-                                }
-                            },
-                        );
-                        let title_rect = egui::Rect::from_min_size(
-                            rect.min + egui::vec2(36.0, 6.0),
-                            egui::vec2((rect.width() - 80.0).max(1.0), 36.0),
-                        );
-                        ui.scope_builder(
-                            egui::UiBuilder::new()
-                                .max_rect(title_rect)
-                                .layout(egui::Layout::top_down(egui::Align::Min)),
-                            |ui| {
-                                ui.spacing_mut().item_spacing.y = 0.0;
-                                let overdue = !task.completed
-                                    && task.due.is_some_and(|date| {
-                                        date < chrono::Local::now().date_naive()
-                                    });
-                                let label = RichText::new(&task.text)
-                                    .font(theme::medium(14.0))
-                                    .color(if overdue { p.red } else { p.text });
-                                if ui
-                                    .add(
-                                        egui::Label::new(if task.completed {
-                                            label.strikethrough()
-                                        } else {
-                                            label
-                                        })
-                                        .truncate()
-                                        .sense(egui::Sense::click()),
-                                    )
-                                    .clicked()
-                                {
-                                    open = Some(task.clone());
-                                }
-                                let due = task.due.map_or_else(
-                                    || task.due_text.clone(),
-                                    |date| date.format("%d.%m.%Y").to_string(),
-                                );
-                                let metadata = [
-                                    task.meeting_title.as_str(),
-                                    task.owner.as_str(),
-                                    due.as_str(),
-                                ]
-                                .into_iter()
-                                .filter(|part| !part.is_empty())
-                                .collect::<Vec<_>>()
-                                .join(" · ");
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(metadata).size(12.0).color(p.tertiary),
-                                    )
-                                    .truncate(),
-                                );
-                            },
-                        );
-                        if task.issue_url.is_some() || !task.completed {
-                            ui.scope_builder(
-                                egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(
-                                    rect.right_top() - egui::vec2(36.0, -10.0),
-                                    egui::vec2(28.0, 28.0),
-                                )),
-                                |ui| {
-                                    let glyph = if task.issue_url.is_some() {
-                                        theme::icons::EXTERNAL_LINK
-                                    } else {
-                                        theme::icons::SEND
-                                    };
-                                    let tooltip = if task.issue_url.is_some() {
-                                        "В трекере"
-                                    } else {
-                                        "Отправить в трекер"
-                                    };
-                                    if ui
-                                        .add_enabled_ui(
-                                            task.issue_url.is_some() || can_toggle,
-                                            |ui| {
-                                                theme::icon_button_visible(
-                                                    ui,
-                                                    glyph,
-                                                    tooltip,
-                                                    ui.rect_contains_pointer(rect),
-                                                )
-                                            },
+                        for index in range {
+                            let Some(entry) = self.tasks_cache.entries.get(index) else {
+                                continue;
+                            };
+                            let task = match entry {
+                                TaskEntry::Header(title) => {
+                                    let (rect, _) = ui.allocate_exact_size(
+                                        egui::vec2(ui.available_width(), 48.0),
+                                        egui::Sense::hover(),
+                                    );
+                                    let mut header = ui.new_child(
+                                        egui::UiBuilder::new()
+                                            .id_salt(("task-group", index))
+                                            .max_rect(rect),
+                                    );
+                                    header.add_space(24.0);
+                                    header
+                                        .add(
+                                            egui::Label::new(
+                                                RichText::new(title)
+                                                    .font(theme::semibold(theme::SMALL))
+                                                    .color(Palette::of(ui).tertiary),
+                                            )
+                                            .truncate(),
                                         )
-                                        .inner
-                                        .clicked()
-                                    {
-                                        if let Some(url) = &task.issue_url {
-                                            ui.ctx().open_url(egui::OpenUrl::new_tab(url));
-                                        } else {
-                                            send_task = Some(task.clone());
+                                        .on_hover_text(title);
+                                    continue;
+                                }
+                                TaskEntry::Task(index) => &self.state.tasks[*index],
+                            };
+                            ui.push_id((&task.path, task.line), |ui| {
+                                let p = Palette::of(ui);
+                                let (rect, response) = ui.allocate_exact_size(
+                                    egui::vec2(ui.available_width(), 48.0),
+                                    egui::Sense::hover(),
+                                );
+                                #[cfg(test)]
+                                ui.ctx().data_mut(|data| {
+                                    data.insert_temp(
+                                        egui::Id::unique((
+                                            "task-row-rect",
+                                            task.path.as_path(),
+                                            task.line,
+                                        )),
+                                        rect,
+                                    )
+                                });
+                                theme::row_background(ui, &response, false);
+                                ui.scope_builder(
+                                    egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(
+                                        rect.left_top() + egui::vec2(8.0, 12.0),
+                                        egui::vec2(16.0, 24.0),
+                                    )),
+                                    |ui| {
+                                        let mut completed = task.completed;
+                                        if ui
+                                            .add_enabled(
+                                                can_toggle,
+                                                theme::Checkbox::without_text(&mut completed),
+                                            )
+                                            .changed()
+                                        {
+                                            toggle = Some((task.clone(), completed));
                                         }
-                                    }
-                                },
-                            );
+                                    },
+                                );
+                                let title_rect = egui::Rect::from_min_size(
+                                    rect.min + egui::vec2(36.0, 6.0),
+                                    egui::vec2((rect.width() - 80.0).max(1.0), 36.0),
+                                );
+                                ui.scope_builder(
+                                    egui::UiBuilder::new()
+                                        .max_rect(title_rect)
+                                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                                    |ui| {
+                                        ui.spacing_mut().item_spacing.y = 0.0;
+                                        let overdue = !task.completed
+                                            && task.due.is_some_and(|date| {
+                                                date < chrono::Local::now().date_naive()
+                                            });
+                                        let label = RichText::new(&task.text)
+                                            .font(theme::medium(14.0))
+                                            .color(if overdue { p.red } else { p.text });
+                                        if ui
+                                            .add(
+                                                egui::Label::new(if task.completed {
+                                                    label.strikethrough()
+                                                } else {
+                                                    label
+                                                })
+                                                .truncate()
+                                                .sense(egui::Sense::click()),
+                                            )
+                                            .clicked()
+                                        {
+                                            open = Some(task.clone());
+                                        }
+                                        let due = task.due.map_or_else(
+                                            || task.due_text.clone(),
+                                            |date| date.format("%d.%m.%Y").to_string(),
+                                        );
+                                        let metadata = [
+                                            task.meeting_title.as_str(),
+                                            task.owner.as_str(),
+                                            due.as_str(),
+                                        ]
+                                        .into_iter()
+                                        .filter(|part| !part.is_empty())
+                                        .collect::<Vec<_>>()
+                                        .join(" · ");
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(metadata)
+                                                    .size(12.0)
+                                                    .color(p.tertiary),
+                                            )
+                                            .truncate(),
+                                        );
+                                    },
+                                );
+                                if task.issue_url.is_some() || !task.completed {
+                                    ui.scope_builder(
+                                        egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(
+                                            rect.right_top() - egui::vec2(36.0, -10.0),
+                                            egui::vec2(28.0, 28.0),
+                                        )),
+                                        |ui| {
+                                            let glyph = if task.issue_url.is_some() {
+                                                theme::icons::EXTERNAL_LINK
+                                            } else {
+                                                theme::icons::SEND
+                                            };
+                                            let tooltip = if task.issue_url.is_some() {
+                                                "В трекере"
+                                            } else {
+                                                "Отправить в трекер"
+                                            };
+                                            if ui
+                                                .add_enabled_ui(
+                                                    task.issue_url.is_some() || can_toggle,
+                                                    |ui| {
+                                                        theme::icon_button_visible(
+                                                            ui,
+                                                            glyph,
+                                                            tooltip,
+                                                            ui.rect_contains_pointer(rect),
+                                                        )
+                                                    },
+                                                )
+                                                .inner
+                                                .clicked()
+                                            {
+                                                if let Some(url) = &task.issue_url {
+                                                    ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                                                } else {
+                                                    send_task = Some(task.clone());
+                                                }
+                                            }
+                                        },
+                                    );
+                                }
+                            });
                         }
-                    });
-                }
-                if self.state.tasks_busy {
-                    ui.spinner();
-                }
-            },
-        );
+                        if self.state.tasks_busy {
+                            ui.spinner();
+                        }
+                    },
+                )
+            })
+            .inner;
+        #[cfg(test)]
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(
+                egui::Id::unique("task-list-model"),
+                (_layout.inner_rect, _layout.state.clamped_offset().y),
+            )
+        });
         if let Some(task) = send_task {
             self.trackers.prepare(ui.ctx(), &self.state, vec![task]);
         }
@@ -3610,6 +3654,104 @@ fn transcript_view(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn task_rows_follow_the_fixed_stride_across_scroll_offsets_and_group_headers() {
+        use super::*;
+        let (mut state, _commands, _events) = crate::test_ui::state();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meeting");
+        state.tasks = (0..200)
+            .map(|index| notetaker_core::Task {
+                meeting_id: uuid::Uuid::now_v7(),
+                path: path.clone(),
+                meeting_title: "Meeting".into(),
+                line: index + 1,
+                text: format!("Task {index:03}"),
+                owner: format!("Group {:02}", index / 10),
+                requester: String::new(),
+                due_text: String::new(),
+                due: None,
+                completed: false,
+                source: String::new(),
+                issue_url: None,
+                revision: Default::default(),
+            })
+            .collect();
+        let mut app = NotetakerApp::with_state(state);
+        app.sync_tasks_cache();
+        let target = 20;
+        let row = app
+            .tasks_cache
+            .entries
+            .iter()
+            .position(|entry| matches!(entry, TaskEntry::Task(index) if *index == target))
+            .unwrap();
+        assert_eq!(row, 23, "the target follows three group headers");
+        let id = egui::Id::unique(("task-row-rect", path.as_path(), target + 1));
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut frame = 0;
+        let mut draw = |events| {
+            ctx.data_mut(|data| data.remove::<egui::Rect>(id));
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1280.0, 900.0),
+                    )),
+                    time: Some(frame as f64 / 60.0),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    app.tasks_screen(ui);
+                },
+            )
+            .drop_without_applying_deltas();
+            frame += 1;
+        };
+        for _ in 0..3 {
+            draw(vec![]);
+        }
+        let viewport = ctx
+            .data(|data| data.get_temp::<(egui::Rect, f32)>(egui::Id::unique("task-list-model")))
+            .unwrap()
+            .0;
+        let mut offsets = Vec::new();
+        for delta in [400.0, 100.0] {
+            draw(vec![
+                egui::Event::PointerMoved(viewport.center()),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -delta),
+                    phase: egui::TouchPhase::Move,
+                    source: egui::MouseWheelSource::Wheel,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]);
+            for _ in 0..40 {
+                draw(vec![]);
+            }
+            let (viewport, offset) = ctx
+                .data(|data| {
+                    data.get_temp::<(egui::Rect, f32)>(egui::Id::unique("task-list-model"))
+                })
+                .unwrap();
+            let rect = ctx
+                .data(|data| data.get_temp::<egui::Rect>(id))
+                .expect("target must be laid out in this frame");
+            assert!(viewport.intersects(rect));
+            let expected = viewport.top() + row as f32 * 48.0 - offset;
+            assert!(
+                (rect.top() - expected).abs() < 0.1,
+                "task row at {} instead of {expected}, scroll={offset}",
+                rect.top()
+            );
+            assert_eq!(rect.height(), 48.0);
+            offsets.push(offset);
+        }
+        assert!(offsets[0] > 300.0 && offsets[1] - offsets[0] > 48.0);
+    }
     #[test]
     fn live_echo_replacement_invalidates_caches_even_when_turn_count_is_unchanged() {
         use super::*;

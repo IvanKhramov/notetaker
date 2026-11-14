@@ -83,15 +83,13 @@ impl Panel { pub fn fixture(&mut self,state:&AppState) {
         text=text.replace('#[cfg(any(windows, target_os = "macos"))]','')
         text=text.replace('self.default_open,', 'self.default_open || ui.ctx().data(|data| data.get_temp::<bool>(egui::Id::unique("preview-expand-settings")).unwrap_or(false)),')
     if path.stem == "ui":
-        text = text.replace("    pub fn new() -> Self", "    pub fn new(state: AppState) -> Self")
-        text = text.replace("state: AppState::new(),", "state,")
         expected = 'egui::Popup::menu(&menu_response)'
         assert text.count(expected) == 1, "meeting menu fixture hook changed"
         text = text.replace(expected, expected + '.open(ui.ctx().data(|data| data.get_temp::<bool>(egui::Id::unique("fixture-meeting-menu")).unwrap_or(false)) || egui::Popup::is_id_open(ui.ctx(), egui::Popup::menu(&menu_response).get_id()))')
         text += '''
 impl NotetakerApp {
     pub fn fixture(state: AppState, screen: usize) -> Self {
-        let mut app = Self::new(state);
+        let mut app = Self::with_state(state);
         app.home = ![4,5,12,14,15].contains(&screen);
         if screen < 3 { app.quickstart.open = true; app.quickstart.step = screen; }
         if screen == 13 { app.quickstart.open = true; app.quickstart.step = 2; app.quickstart.expanded = true; }
