@@ -498,15 +498,20 @@ impl Panel {
         );
     }
     fn folder_settings(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, can_share: bool) {
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
         self.shared_step(ui, can_share);
         ui.separator();
         if self.receiver.is_some() || self.destinations_rx.is_some() {
             ui.spinner();
             return;
         }
+        let width = ui.available_width();
         egui::ScrollArea::vertical()
             .max_height(540.0)
+            .max_width(width)
+            .auto_shrink([false, true])
             .show(ui, |ui| {
+                ui.set_max_width(width);
                 let names = self
                     .snapshot
                     .as_ref()

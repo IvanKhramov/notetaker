@@ -997,96 +997,109 @@ impl NotetakerApp {
                     theme::icon_button(ui, theme::icons::ELLIPSIS, "Действия встречи");
                 egui::Popup::menu(&menu_response).show(|ui| {
                     ui.set_width(280.0);
-                    let mut row = |ui: &mut egui::Ui, item: DocumentAction| {
-                        if ui
-                            .add_enabled_ui(enabled(item), |ui| {
-                                theme::menu_item(
+                    ui.set_max_height((ui.ctx().content_rect().height() - 32.0).max(120.0));
+                    egui::ScrollArea::vertical()
+                        .id_salt("meeting-actions-scroll")
+                        .max_height((ui.ctx().content_rect().height() - 32.0).max(120.0))
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            let mut row = |ui: &mut egui::Ui, item: DocumentAction| {
+                                if ui
+                                    .add_enabled_ui(enabled(item), |ui| {
+                                        theme::menu_item(
+                                            ui,
+                                            theme::icon_for_label(item.label()),
+                                            item.label(),
+                                            item == DocumentAction::Delete,
+                                            false,
+                                        )
+                                    })
+                                    .inner
+                                    .clicked()
+                                {
+                                    action = Some(item);
+                                    ui.close();
+                                }
+                            };
+                            row(ui, DocumentAction::EditNotes);
+                            row(ui, DocumentAction::EditSummary);
+                            row(ui, DocumentAction::Read);
+                            ui.separator();
+                            theme::setting_row(ui, "Шаблон", |ui| {
+                                crate::theme::select("template")
+                                    .selected_text(&document.template)
+                                    .show_ui(ui, |ui| {
+                                        for name in &self.state.templates {
+                                            crate::theme::select_value(
+                                                ui,
+                                                &mut document.template,
+                                                name.clone(),
+                                                name,
+                                            );
+                                        }
+                                    });
+                            });
+                            for item in [
+                                DocumentAction::Regenerate,
+                                DocumentAction::Copy,
+                                DocumentAction::CopyAll,
+                                DocumentAction::Reveal,
+                                DocumentAction::SendTasks,
+                            ] {
+                                row(ui, item);
+                            }
+                            ui.menu_button("Серия встречи", |ui| {
+                                series_action = self.people.header(
                                     ui,
-                                    theme::icon_for_label(item.label()),
-                                    item.label(),
-                                    item == DocumentAction::Delete,
-                                    false,
-                                )
-                            })
-                            .inner
-                            .clicked()
-                        {
-                            action = Some(item);
-                            ui.close();
-                        }
-                    };
-                    row(ui, DocumentAction::EditNotes);
-                    row(ui, DocumentAction::EditSummary);
-                    row(ui, DocumentAction::Read);
-                    ui.separator();
-                    theme::setting_row(ui, "Шаблон", |ui| {
-                        crate::theme::select("template")
-                            .selected_text(&document.template)
-                            .show_ui(ui, |ui| {
-                                for name in &self.state.templates {
-                                    crate::theme::select_value(
+                                    &document.data.meta,
+                                    !locked && can_enhance,
+                                );
+                            });
+                            row(ui, DocumentAction::ExportSummary);
+                            row(ui, DocumentAction::Rename);
+                            row(ui, DocumentAction::Delete);
+                            ui.menu_button("Экспорт транскрипта", |ui| {
+                                for (format, label) in [
+                                    (notetaker_core::ExportFormat::Md, "Markdown"),
+                                    (notetaker_core::ExportFormat::Srt, "SRT"),
+                                    (notetaker_core::ExportFormat::Vtt, "VTT"),
+                                    (notetaker_core::ExportFormat::Csv, "CSV"),
+                                    (notetaker_core::ExportFormat::Json, "JSON"),
+                                ] {
+                                    if crate::theme::button(
                                         ui,
-                                        &mut document.template,
-                                        name.clone(),
-                                        name,
-                                    );
+                                        label,
+                                        crate::theme::ButtonStyle::Ghost,
+                                    )
+                                    .clicked()
+                                    {
+                                        export = Some(Command::ExportTranscript {
+                                            meeting: document.data.meeting.clone(),
+                                            transcript: document.data.transcript.clone(),
+                                            format,
+                                        });
+                                        ui.close();
+                                    }
                                 }
                             });
-                    });
-                    for item in [
-                        DocumentAction::Regenerate,
-                        DocumentAction::Copy,
-                        DocumentAction::CopyAll,
-                        DocumentAction::Reveal,
-                        DocumentAction::SendTasks,
-                    ] {
-                        row(ui, item);
-                    }
-                    ui.menu_button("Серия встречи", |ui| {
-                        series_action =
-                            self.people
-                                .header(ui, &document.data.meta, !locked && can_enhance);
-                    });
-                    row(ui, DocumentAction::ExportSummary);
-                    row(ui, DocumentAction::Rename);
-                    row(ui, DocumentAction::Delete);
-                    ui.menu_button("Экспорт транскрипта", |ui| {
-                        for (format, label) in [
-                            (notetaker_core::ExportFormat::Md, "Markdown"),
-                            (notetaker_core::ExportFormat::Srt, "SRT"),
-                            (notetaker_core::ExportFormat::Vtt, "VTT"),
-                            (notetaker_core::ExportFormat::Csv, "CSV"),
-                            (notetaker_core::ExportFormat::Json, "JSON"),
-                        ] {
-                            if crate::theme::button(ui, label, crate::theme::ButtonStyle::Ghost)
-                                .clicked()
-                            {
-                                export = Some(Command::ExportTranscript {
-                                    meeting: document.data.meeting.clone(),
-                                    transcript: document.data.transcript.clone(),
-                                    format,
-                                });
-                                ui.close();
-                            }
-                        }
-                    });
-                    ui.separator();
-                    ui.menu_button("Кнопки на панели", |ui| {
-                        for item in DocumentAction::ALL {
-                            let on = pinned.contains(&item);
-                            if theme::menu_item(
-                                ui,
-                                theme::icon_for_label(item.label()),
-                                item.label(),
-                                false,
-                                on,
-                            )
-                            .clicked()
-                            {
-                                pin_toggle = Some(item);
-                            }
-                        }
-                    });
+                            ui.separator();
+                            ui.menu_button("Кнопки на панели", |ui| {
+                                for item in DocumentAction::ALL {
+                                    let on = pinned.contains(&item);
+                                    if theme::menu_item(
+                                        ui,
+                                        theme::icon_for_label(item.label()),
+                                        item.label(),
+                                        false,
+                                        on,
+                                    )
+                                    .clicked()
+                                    {
+                                        pin_toggle = Some(item);
+                                    }
+                                }
+                            });
+                        });
                 });
                 // Right-to-left layout: reverse so pinned buttons read in menu order.
                 for &item in pinned.iter().rev() {
@@ -2403,8 +2416,11 @@ fn mode_selector(ui: &mut egui::Ui, mode: &mut Mode) -> bool {
     let mut selected = false;
     ui.horizontal_wrapped(|ui| {
         ui.label("Режим:");
-        selected |= crate::theme::select_value(ui, mode, Mode::Local, "Локально").clicked();
-        selected |= crate::theme::select_value(ui, mode, Mode::Hybrid, "Гибрид").clicked();
+        selected |= theme::segmented(
+            ui,
+            mode,
+            &[(Mode::Local, "Локально"), (Mode::Hybrid, "Гибрид")],
+        );
     });
     ui.small(mode_label(*mode));
     selected

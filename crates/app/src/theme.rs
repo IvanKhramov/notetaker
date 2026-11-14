@@ -678,7 +678,12 @@ pub fn chip(ui: &mut egui::Ui, text: &str) {
         );
     });
 }
-pub fn segmented<T: Copy + PartialEq>(ui: &mut egui::Ui, selected: &mut T, values: &[(T, &str)]) {
+pub fn segmented<T: Copy + PartialEq>(
+    ui: &mut egui::Ui,
+    selected: &mut T,
+    values: &[(T, &str)],
+) -> bool {
+    let mut clicked = false;
     let p = Palette::of(ui);
     egui::Frame::new()
         .fill(p.soft)
@@ -733,10 +738,12 @@ pub fn segmented<T: Copy + PartialEq>(ui: &mut egui::Ui, selected: &mut T, value
                     });
                     if response.clicked() {
                         *selected = value;
+                        clicked = true;
                     }
                 }
             });
         });
+    clicked
 }
 /// Animated recording state. It is the only colored ornament in navigation.
 /// Recording indicator. Its bars follow the captured level, so a silent input shows as flat.

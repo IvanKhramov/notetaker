@@ -422,13 +422,19 @@ impl Panel {
         if let Some(message) = &self.message {
             ui.colored_label(ui.visuals().warn_fg_color, message);
         }
+        let width = ui.available_width();
         egui::ScrollArea::vertical()
             .id_salt("people-screen")
-            .show(ui, |ui| match view {
-                View::People => self.people_screen(ui),
-                View::Person(_) => self.person_screen(ui, state),
-                View::Series(id) => self.series_screen(ui, state, &id),
-                View::Digest => self.digest_screen(ui, state),
+            .max_width(width)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.set_max_width(width);
+                match view {
+                    View::People => self.people_screen(ui),
+                    View::Person(_) => self.person_screen(ui, state),
+                    View::Series(id) => self.series_screen(ui, state, &id),
+                    View::Digest => self.digest_screen(ui, state),
+                }
             });
     }
     fn people_screen(&mut self, ui: &mut egui::Ui) {
@@ -809,7 +815,15 @@ impl Panel {
                 }
             });
         if self.digest.is_none() && self.receiver.is_none() {
-            ui.weak("Выберите период и участников, чтобы собрать итоги встреч.");
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(
+                        "Выберите период и участников, чтобы собрать итоги встреч.",
+                    )
+                    .color(theme::Palette::of(ui).muted),
+                )
+                .wrap(),
+            );
         }
         if ui
             .add_enabled(
