@@ -29,7 +29,7 @@ pub use enhance::{
 pub use provider::{CompletionRequest, HttpProvider, OutputLimit, Provider};
 pub use template::Template;
 
-pub use cli::{Cancellation, CliProvider, find_cli, open_login};
+pub use cli::{Cancellation, CliProvider, find_cli, install_cli, open_login};
 pub use credentials::{CredentialStore, OsCredentialStore, resolve_key};
 
 pub fn create_provider(
