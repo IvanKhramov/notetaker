@@ -265,7 +265,7 @@ pub fn install(ctx: &egui::Context) {
             spread: 0,
             color: Color32::from_black_alpha(if v.dark_mode { 102 } else { 31 }),
         };
-        v.hyperlink_color = p.text;
+        v.hyperlink_color = p.accent;
         v.text_cursor.stroke = Stroke::new(1.5, p.text);
         v.menu_corner_radius = 8.into();
         v.extreme_bg_color = p.card;

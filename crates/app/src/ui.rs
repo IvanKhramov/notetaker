@@ -2275,6 +2275,14 @@ impl eframe::App for NotetakerApp {
         }
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.frame(ui);
+        for url in take_urls(ui.ctx()) {
+            open_url(url);
+        }
+    }
+}
+impl NotetakerApp {
+    fn frame(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.organization.windows(
             &ctx,
@@ -2474,6 +2482,36 @@ impl eframe::App for NotetakerApp {
             ctx.request_repaint_after(delay);
         }
     }
+}
+/// eframe is built without its link opener, so every hyperlink and `open_url` call
+/// of the frame is collected here and handed to the system.
+fn take_urls(ctx: &egui::Context) -> Vec<String> {
+    let mut urls = Vec::new();
+    ctx.output_mut(|output| {
+        output.commands.retain(|command| match command {
+            egui::OutputCommand::OpenUrl(open) => {
+                urls.push(open.url.clone());
+                false
+            }
+            _ => true,
+        });
+    });
+    // Links come from summaries and trackers too: only web addresses leave the app.
+    urls.retain(|url| {
+        ["https://", "http://", "mailto:"]
+            .iter()
+            .any(|scheme| url.starts_with(scheme))
+    });
+    urls
+}
+fn open_url(url: String) {
+    // The system opener may block for a moment; keep the frame responsive.
+    std::thread::spawn(move || {
+        #[cfg(windows)]
+        let _ = notetaker_runtime::windows::open_url(&url);
+        #[cfg(unix)]
+        let _ = notetaker_runtime::unix::open_url(&url);
+    });
 }
 fn next_state_wake(state: &AppState, now: Instant) -> Option<Duration> {
     let mut deadlines = Vec::new();
@@ -4223,6 +4261,25 @@ mod tests {
         assert_eq!(runs, vec![(false, "## Решения\n- Готово\n".into())]);
     }
 
+    #[test]
+    fn link_clicks_are_handed_to_the_system_opener_and_only_web_addresses_pass() {
+        let ctx = egui::Context::default();
+        let mut urls = Vec::new();
+        ctx.run_ui(Default::default(), |ui| {
+            for url in [
+                "https://code.claude.com/docs",
+                "file:///etc/passwd",
+                "mailto:a@b.c",
+            ] {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+            }
+            urls = take_urls(ui.ctx());
+            // Nothing is left for eframe, which is built without its own opener.
+            assert!(take_urls(ui.ctx()).is_empty());
+        })
+        .drop_without_applying_deltas();
+        assert_eq!(urls, ["https://code.claude.com/docs", "mailto:a@b.c"]);
+    }
     #[test]
     fn file_uris_strip_windows_verbatim_prefix_and_encode_utf8() {
         for (path, uri) in [

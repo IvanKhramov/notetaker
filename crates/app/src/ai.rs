@@ -230,34 +230,14 @@ impl Connections {
                 }
             });
         if let Some(card) = self.cards.get_mut(*selected) {
-            ui.label(&card.status);
             let mut operation = None;
+            // A missing CLI is explained by the setup block, not by a raw error line.
+            if card.cli.is_none() || card.installed {
+                status_line(ui, &card.status);
+            }
             ui.add_enabled_ui(!card.busy, |ui| {
                 if let Some(kind) = card.cli {
-                    if !card.installed {
-                        ui.label("Для подписки нужен CLI.");
-                        ui.hyperlink_to(
-                            "Установить CLI",
-                            if kind == ProviderKind::ClaudeCli {
-                                "https://code.claude.com/docs"
-                            } else {
-                                "https://developers.openai.com/codex/cli"
-                            },
-                        );
-                    }
-                    if ui
-                        .add(
-                            crate::theme::styled_button(
-                                crate::theme::Palette::of(ui),
-                                "Войти в подписку",
-                                crate::theme::ButtonStyle::Secondary,
-                            )
-                            .icon(crate::theme::icons::EXTERNAL_LINK),
-                        )
-                        .clicked()
-                    {
-                        operation = Some(Operation::Login);
-                    }
+                    operation = cli_setup(ui, kind, card.installed);
                 } else {
                     if *selected != 2 {
                         ui.add(
@@ -274,20 +254,24 @@ impl Connections {
                     });
                     ui.add(crate::theme::text_field(&mut card.provider.model).hint_text("Модель"));
                 }
-                if ui
-                    .add_enabled(
-                        can_default,
-                        crate::theme::styled_button(
-                            crate::theme::Palette::of(ui),
-                            "Подключить",
-                            crate::theme::ButtonStyle::Secondary,
-                        ),
-                    )
-                    .clicked()
+                if (card.cli.is_none() || card.installed)
+                    && ui
+                        .add_enabled(
+                            can_default,
+                            crate::theme::styled_button(
+                                crate::theme::Palette::of(ui),
+                                "Подключить",
+                                crate::theme::ButtonStyle::Secondary,
+                            ),
+                        )
+                        .clicked()
                 {
                     operation = Some(Operation::Default);
                 }
             });
+            if card.busy {
+                ui.spinner();
+            }
             if let Some(operation) = operation {
                 card.busy = true;
                 card.edited = None;
@@ -316,11 +300,10 @@ impl Connections {
             if selected.is_some_and(|selected| selected != index) {
                 continue;
             }
-            ui.push_id(index, |ui| { crate::theme::settings_group(ui,"",|ui| {crate::theme::disclosure(card.title).status(if card.status.starts_with("Ошибка:"){ "Ошибка" }else{&card.status})
+            let usable = card.cli.is_none() || card.installed;
+            ui.push_id(index, |ui| { crate::theme::settings_group(ui,"",|ui| {crate::theme::disclosure(card.title).status(status_chip(&card.status, usable, default == card.provider.id))
                 .default_open(default == card.provider.id || selected.is_some()).show(ui, |ui| {
-                if card.status.starts_with("Ошибка:") {
-                    ui.colored_label(crate::theme::Palette::of(ui).red, &card.status);
-                } else if card.status.len()>48 { ui.label(&card.status); }
+                if usable { status_line(ui, &card.status); }
                 let before = serde_json::to_value(&card.provider).expect("provider serialize");
                 let mut operation = None;
                 let mut typing = false;
@@ -328,26 +311,17 @@ impl Connections {
                 let mut key_blur = false;
                 ui.add_enabled_ui(!card.busy, |ui| {
                     if let Some(kind) = card.cli {
-                        if !card.installed {
-                            ui.label("CLI не установлен");
-                            if kind == ProviderKind::ClaudeCli {
-                                ui.hyperlink_to("Инструкция по установке", "https://code.claude.com/docs");
-                                ui.code("npm i -g @anthropic-ai/claude-code");
-                            } else {
-                                ui.hyperlink_to("Инструкция по установке", "https://developers.openai.com/codex/cli");
-                                ui.code("npm i -g @openai/codex");
-                            }
-                        }
-                        if kind == ProviderKind::ClaudeCli {
-                            crate::theme::select("model").selected_text(if card.provider.model.is_empty() { "Авто" } else { &card.provider.model }).show_ui(ui, |ui| {
-                                for (value, label) in [("", "Авто"), ("sonnet", "Sonnet"), ("opus", "Opus"), ("haiku", "Haiku")] {
-                                    crate::theme::select_value(ui, &mut card.provider.model, value.into(), label);
-                                }
+                        if let Some(requested) = cli_setup(ui, kind, card.installed) { operation = Some(requested); }
+                        if card.installed && kind == ProviderKind::ClaudeCli {
+                            crate::theme::form_field(ui, "Модель", None, |ui| {
+                                crate::theme::select("model").selected_text(if card.provider.model.is_empty() { "Авто" } else { &card.provider.model }).show_ui(ui, |ui| {
+                                    for (value, label) in [("", "Авто"), ("sonnet", "Sonnet"), ("opus", "Opus"), ("haiku", "Haiku")] {
+                                        crate::theme::select_value(ui, &mut card.provider.model, value.into(), label);
+                                    }
+                                });
                             });
-                            ui.small("В окне Claude выполните /login. Токенами входа управляет Claude Code.");
-                        } else { ui.small("Вход откроет браузер. Учётными данными управляет Codex CLI."); }
-                        ui.small("Пользовательские MCP отключены. Ограничение инструментов CLI не гарантирует изоляцию Локально-файлов: доступ зависит от версии CLI и managed-настроек. Для строгой конфиденциальности используйте HTTP-провайдер.");
-                        if crate::theme::button(ui, "Войти", crate::theme::ButtonStyle::Ghost).clicked() { operation = Some(Operation::Login); }
+                        }
+                        note(ui, "Пользовательские MCP отключены. Ограничение инструментов CLI не гарантирует изоляцию локальных файлов: доступ зависит от версии CLI и managed-настроек. Для строгой конфиденциальности используйте HTTP-провайдер.");
                     } else {
                         if index == 2 {
                             ui.small("Ключ: 4o.flant.ru → Settings → Account → API Keys. Шлюз доступен из VPN Фланта.");
@@ -380,11 +354,10 @@ impl Connections {
                         }
                         if selected.is_none() && crate::theme::button(ui, "Загрузить список моделей", crate::theme::ButtonStyle::Ghost).clicked() { operation = Some(Operation::Models); }
                     }
-                    ui.horizontal(|ui| {
-                        if crate::theme::button(ui, "Проверить", crate::theme::ButtonStyle::Ghost).clicked() { operation = Some(Operation::Check); }
-                        if ui.add_enabled(can_default, crate::theme::styled_button(crate::theme::Palette::of(ui),if selected.is_some() { "Подключить" } else { "Использовать по умолчанию" },crate::theme::ButtonStyle::Secondary)).clicked() { operation = Some(Operation::Default); }
-                        if default == card.provider.id { ui.small("По умолчанию"); }
-                    });
+                    if usable { ui.add_space(4.0); ui.horizontal(|ui| {
+                        if ui.add(crate::theme::styled_button(crate::theme::Palette::of(ui), "Проверить", crate::theme::ButtonStyle::Secondary).icon(crate::theme::icons::REFRESH_CW)).clicked() { operation = Some(Operation::Check); }
+                        if default != card.provider.id && ui.add_enabled(can_default, crate::theme::styled_button(crate::theme::Palette::of(ui),if selected.is_some() { "Подключить" } else { "Использовать по умолчанию" },crate::theme::ButtonStyle::Secondary)).clicked() { operation = Some(Operation::Default); }
+                    }); }
                 });
                 if before != serde_json::to_value(&card.provider).expect("provider serialize") {
                     card.save_error = false;
@@ -401,6 +374,117 @@ impl Connections {
         }
         actions
     }
+}
+
+/// Short state for the card header; the full text is shown inside the card.
+fn status_chip(status: &str, usable: bool, default: bool) -> &str {
+    if !usable {
+        "Не установлен"
+    } else if status.starts_with("Ошибка") {
+        "Ошибка"
+    } else if status.starts_with("Подключено") {
+        if default {
+            "По умолчанию"
+        } else {
+            "Подключено"
+        }
+    } else if status.starts_with("Сохранено") || status.starts_with("Настроено") {
+        "Не проверено"
+    } else {
+        "Не подключено"
+    }
+}
+fn status_line(ui: &mut egui::Ui, status: &str) {
+    let p = crate::theme::Palette::of(ui);
+    if let Some(error) = status.strip_prefix("Ошибка: ") {
+        crate::theme::callout(ui, crate::theme::icons::CIRCLE_ALERT, |ui| {
+            ui.add(egui::Label::new(egui::RichText::new(error).color(p.red)).wrap());
+        });
+    } else {
+        ui.add(egui::Label::new(egui::RichText::new(status).size(13.0).color(p.muted)).wrap());
+    }
+}
+fn note(ui: &mut egui::Ui, text: &str) {
+    let p = crate::theme::Palette::of(ui);
+    ui.add(egui::Label::new(egui::RichText::new(text).size(12.0).color(p.muted)).wrap());
+}
+/// What a subscription needs before it can be used: its CLI, then a login.
+fn cli_setup(ui: &mut egui::Ui, kind: ProviderKind, installed: bool) -> Option<Operation> {
+    use crate::theme::{ButtonStyle, Palette, icons};
+    let claude = kind == ProviderKind::ClaudeCli;
+    let mut operation = None;
+    if !installed {
+        let (name, url, command) = if claude {
+            (
+                "Claude Code",
+                "https://code.claude.com/docs",
+                "npm i -g @anthropic-ai/claude-code",
+            )
+        } else {
+            (
+                "Codex CLI",
+                "https://developers.openai.com/codex/cli",
+                "npm i -g @openai/codex",
+            )
+        };
+        crate::theme::callout(ui, icons::INFO, |ui| {
+            ui.add(
+                egui::Label::new(format!(
+                    "Вход по подписке работает через {name}. На этом компьютере он не найден. Установите его и нажмите «Проверить снова»."
+                ))
+                .wrap(),
+            );
+            ui.horizontal(|ui| {
+                ui.code(command);
+                if crate::theme::icon_button(ui, icons::COPY, "Скопировать команду").clicked()
+                {
+                    ui.ctx().copy_text(command.into());
+                }
+            });
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add(
+                        crate::theme::styled_button(
+                            Palette::of(ui),
+                            "Открыть инструкцию",
+                            ButtonStyle::Secondary,
+                        )
+                        .icon(icons::EXTERNAL_LINK),
+                    )
+                    .clicked()
+                {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                }
+                if crate::theme::button(ui, "Проверить снова", ButtonStyle::Ghost).clicked()
+                {
+                    operation = Some(Operation::Check);
+                }
+            });
+        });
+    } else {
+        note(
+            ui,
+            if claude {
+                "Откроется окно Claude Code. Выполните в нём /login, затем вернитесь и нажмите «Проверить»."
+            } else {
+                "Откроется браузер для входа в ChatGPT. После входа нажмите «Проверить»."
+            },
+        );
+        if ui
+            .add(
+                crate::theme::styled_button(
+                    Palette::of(ui),
+                    "Войти в подписку",
+                    ButtonStyle::Secondary,
+                )
+                .icon(icons::EXTERNAL_LINK),
+            )
+            .clicked()
+        {
+            operation = Some(Operation::Login);
+        }
+    }
+    operation
 }
 
 pub fn execute(mut action: Action) -> Response {
