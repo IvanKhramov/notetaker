@@ -1,0 +1,4 @@
+lucide-static 0.468.0
+Font and codepoint map: https://unpkg.com/lucide-static@0.468.0/font/
+License: ISC, see LUCIDE-LICENSE.txt
+Inter Medium: rsms/inter release v4.1, OFL.txt

@@ -145,7 +145,7 @@ pub fn model_status(ui: &mut egui::Ui, state: &mut AppState) {
     } else if let Some(error) = state.quickstart.download_error.clone() {
         ui.horizontal_wrapped(|ui| {
             ui.colored_label(Palette::of(ui).red, error);
-            if theme::action_link(ui, "Повторить").clicked() {
+            if theme::button(ui, "Повторить", crate::theme::ButtonStyle::Ghost).clicked() {
                 state.quickstart.retry_at = None;
             }
         });
@@ -267,10 +267,14 @@ impl Panel {
         }
         let mut open = true;
         let mut next = false;
-        egui::Modal::new(egui::Id::unique("quickstart"))
+        let alpha = theme::appearance(ctx, egui::Id::unique("quickstart-fade"));
+        let modal=egui::Modal::new(egui::Id::unique("quickstart"))
+            .backdrop_color(egui::Color32::from_black_alpha(((if ctx.global_style().visuals.dark_mode {140.0} else {89.0})*alpha) as u8))
             .frame(egui::Frame::window(&ctx.global_style()))
             .show(ctx, |ui| {
+                ui.multiply_opacity(alpha);
                 ui.set_width((ctx.content_rect().width() - 64.0).min(520.0));
+                ui.style_mut().text_styles.insert(egui::TextStyle::Heading,theme::semibold(20.0));
                 ui.horizontal(|ui| {
                     for step in 0..3 {
                         let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
@@ -283,7 +287,7 @@ impl Panel {
                 ui.add_space(8.0);
                 // Reserve the bar's lane so it never covers the right edge of fields.
                 ui.style_mut().spacing.scroll.floating_allocated_width = theme::SCROLL_LANE;
-                egui::ScrollArea::vertical().max_height((ctx.content_rect().height() - if self.step == 0 { 260.0 } else { 180.0 }).max(80.0))
+                egui::ScrollArea::vertical().max_height((ctx.content_rect().height() - if self.step == 0 { 320.0 } else { 180.0 }).max(80.0))
                     .show(ui, |ui| {
                     match self.step {
                         0 => {
@@ -306,13 +310,13 @@ impl Panel {
                             ui.small("Если нет доступа: Параметры → Конфиденциальность → Микрофон. Разрешите доступ приложениям.");
                             #[cfg(not(any(windows, target_os = "macos")))]
                             ui.small("Проверка и запись звука доступны на macOS и Windows.");
-                            if self.probe_status.is_some() && theme::action_link(ui, "Проверить ещё раз").clicked() { self.start_probe(state); }
+                            if self.probe_status.is_some() && theme::button(ui, "Проверить ещё раз", crate::theme::ButtonStyle::Ghost).clicked() { self.start_probe(state); }
 
                         }
                         1 => {
                             ui.heading("Как вас зовут?");
                             ui.label("Этим именем отметим ваш голос в транскрипте.");
-                            let response = ui.add(egui::TextEdit::singleline(&mut state.settings_draft.user_name)
+                            let response = ui.add(crate::theme::text_field(&mut state.settings_draft.user_name)
                                 .hint_text("Ваше имя").desired_width(f32::INFINITY));
                             if response.changed() { state.settings_edited(true, false); }
                             if response.lost_focus() { state.save_preferences(); }
@@ -324,13 +328,13 @@ impl Panel {
                                 ui.label("Встречи из календаря появятся на главном экране.");
                                 if state.settings.calendars.is_empty() {
                                     ui.add_enabled_ui(cfg!(any(windows, target_os = "macos")), |ui| {
-                                        let response = ui.add(egui::TextEdit::singleline(&mut self.calendar_url)
+                                        let response = ui.add(crate::theme::text_field(&mut self.calendar_url)
                                             .password(true).hint_text("HTTPS URL ICS").desired_width(f32::INFINITY));
                                         if response.lost_focus() { self.accept_calendar(state); }
                                     });
                                     if let Some(error) = &state.quickstart.calendar_error { ui.colored_label(Palette::of(ui).red, error); }
                                 } else { ui.label("Календарь подключён"); }
-                                if theme::action_link(ui, "Пропустить календарь").clicked() { self.calendar_url.clear(); }
+                                if theme::button(ui, "Пропустить календарь", crate::theme::ButtonStyle::Ghost).clicked() { self.calendar_url.clear(); }
                             });
                             crate::theme::disclosure("AI для конспектов").show(ui, |ui| {
                                 ui.label("Текст встречи будет отправлен выбранному AI. Аудио останется на компьютере.");
@@ -358,9 +362,12 @@ impl Panel {
                         if check_audio && cfg!(any(windows, target_os = "macos")) { self.start_probe(state); }
                         else { next = true; }
                     }
-                    if theme::action_link(ui, "Пропустить").clicked() { next = true; }
+                    if theme::button(ui, "Пропустить", crate::theme::ButtonStyle::Ghost).clicked() { next = true; }
                 });
             });
+        if modal.should_close() {
+            open = false;
+        }
         if next {
             self.blur(state);
             state.save_preferences();

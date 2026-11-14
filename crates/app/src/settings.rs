@@ -43,6 +43,7 @@ impl Section {
 #[derive(Default)]
 pub struct Panel {
     pub section: Section,
+    save_error: Option<String>,
     calendar_inputs: HashMap<String, String>,
     calendar_errors: HashMap<String, String>,
     folder_picker: Option<std::sync::mpsc::Receiver<(bool, Option<std::path::PathBuf>)>>,
@@ -58,8 +59,8 @@ struct Edits {
 }
 impl Edits {
     fn text(&mut self, ui: &mut egui::Ui, label: &str, value: &mut String) {
-        let response = theme::setting_row(ui, label, |ui| {
-            ui.add(egui::TextEdit::singleline(value).desired_width(240.0))
+        let response = theme::settings_row(ui, label, |ui| {
+            ui.add(crate::theme::text_field(value).desired_width(240.0))
         });
         self.typing |= response.changed();
         self.blur |= response.lost_focus();
@@ -129,6 +130,14 @@ impl Panel {
             }
             self.folder_picker = None;
         }
+        if self.save_error != state.settings_autosave.error {
+            self.save_error = state.settings_autosave.error.clone();
+            if let Some(error) = &self.save_error {
+                state
+                    .notices
+                    .push((theme::ToastLevel::Error, error.clone()));
+            }
+        }
         let mut quickstart = false;
         let previous_section = self.section;
         let mut close = false;
@@ -141,16 +150,13 @@ impl Panel {
                     .inner_margin(32),
             )
             .show(ui, |ui| {
-                ui.set_max_width(680.0);
+                ui.set_max_width(ui.available_width().min(680.0));
+                ui.style_mut()
+                    .text_styles
+                    .insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
                 ui.heading(self.section.label())
                     .on_hover_text(state.settings_status());
                 ui.add_space(24.0);
-                if let Some(message) = state.settings_autosave.error.clone() {
-                    ui.colored_label(Palette::of(ui).red, message);
-                    if theme::button(ui, "Повторить", ButtonStyle::Secondary).clicked() {
-                        state.settings_edited(false, state.settings_autosave.llm);
-                    }
-                }
                 egui::ScrollArea::vertical()
                     .id_salt(("settings_section", self.section as u8))
                     .auto_shrink([false, false])
@@ -213,9 +219,8 @@ impl Panel {
         match self.section {
             Section::General => {
                 let settings = &mut state.settings_draft;
-                theme::setting_row(ui, "Тема", |ui| {
-                    egui::ComboBox::from_id_salt("theme")
-                        .icon(crate::theme::select_icon)
+                theme::settings_row(ui, "Тема", |ui| {
+                    crate::theme::select("theme")
                         .selected_text(settings.theme.label())
                         .show_ui(ui, |ui| {
                             for theme in [
@@ -232,9 +237,8 @@ impl Panel {
                             }
                         });
                 });
-                theme::setting_row(ui, "Масштаб интерфейса", |ui| {
-                    egui::ComboBox::from_id_salt("ui_zoom")
-                        .icon(crate::theme::select_icon)
+                theme::settings_row(ui, "Масштаб интерфейса", |ui| {
+                    crate::theme::select("ui_zoom")
                         .selected_text(format!("{:.0}%", settings.ui_zoom * 100.0))
                         .show_ui(ui, |ui| {
                             for value in [0.9, 1.0, 1.1, 1.25, 1.5] {
@@ -261,19 +265,19 @@ impl Panel {
                     edits.text(ui, "Горячая клавиша записи", &mut settings.hotkey);
                     error(ui, crate::config::validate_hotkey(&settings.hotkey));
                 });
-                theme::setting_row(ui, "Быстрый старт", |ui| {
+                theme::settings_row(ui, "Быстрый старт", |ui| {
                     quickstart = theme::button(ui, "Открыть ›", ButtonStyle::Ghost).clicked();
                 });
                 maintenance.windows_settings(ui);
-                theme::toggle(
+                toggle(
                     ui,
                     &mut settings.digest_reminder,
                     "Напоминать о дайджесте по пятницам",
                 );
                 ui.add_enabled_ui(cfg!(any(windows, target_os = "macos")), |ui| {
-                    theme::toggle(ui, &mut settings.check_updates, "Проверять обновления");
+                    toggle(ui, &mut settings.check_updates, "Проверять обновления");
                     hint(ui, "Раз в час и при запуске.");
-                    theme::setting_row(
+                    theme::settings_row(
                         ui,
                         &format!("Версия {}", env!("CARGO_PKG_VERSION")),
                         |ui| {
@@ -284,9 +288,8 @@ impl Panel {
             }
             Section::Recording => {
                 let settings = &mut state.settings_draft;
-                theme::setting_row(ui, "Режим новых встреч", |ui| {
-                    egui::ComboBox::from_id_salt("settings_mode")
-                        .icon(crate::theme::select_icon)
+                theme::settings_row(ui, "Режим новых встреч", |ui| {
+                    crate::theme::select("settings_mode")
                         .selected_text(if settings.mode == notetaker_core::Mode::Local {
                             "Локально"
                         } else {
@@ -309,19 +312,19 @@ impl Panel {
                 });
                 hint(
                     ui,
-                    "Local: локальный AI. Hybrid: текст может отправляться провайдеру. Аудио остаётся на компьютере.",
+                    "Локально: локальный AI. Гибрид: текст может отправляться провайдеру. Аудио остаётся на компьютере.",
                 );
                 ui.add_enabled_ui(cfg!(any(windows, target_os = "macos")), |ui| {
-                    theme::toggle(ui, &mut settings.detect_calls, "Предлагать запись звонков");
+                    toggle(ui, &mut settings.detect_calls, "Предлагать запись звонков");
                 });
-                theme::toggle(
+                toggle(
                     ui,
                     &mut settings.auto_summary,
                     "Создавать конспект после встречи",
                 );
-                theme::toggle(ui, &mut settings.voice_library, "Запоминать голоса");
+                toggle(ui, &mut settings.voice_library, "Запоминать голоса");
                 hint(ui, "Голосовые отпечатки хранятся только локально.");
-                theme::setting_row(ui, "Автостоп по тишине", |ui| {
+                theme::settings_row(ui, "Автостоп по тишине", |ui| {
                     edits.number(
                         ui.add(
                             egui::DragValue::new(&mut settings.auto_stop_minutes)
@@ -335,10 +338,9 @@ impl Panel {
                     "0 минут: выключен. Завершение звонка не останавливает запись.",
                 );
                 crate::theme::disclosure("Распознавание и обнаружение звонков").show(ui, |ui| {
-                    theme::toggle(ui, &mut settings.diarize, "Разделять собеседников");
-                    theme::setting_row(ui, "Число собеседников", |ui| {
-                        egui::ComboBox::from_id_salt("speakers")
-                            .icon(crate::theme::select_icon)
+                    toggle(ui, &mut settings.diarize, "Разделять собеседников");
+                    theme::settings_row(ui, "Число собеседников", |ui| {
+                        crate::theme::select("speakers")
                             .selected_text(
                                 settings.speakers.map_or("Авто".into(), |n| n.to_string()),
                             )
@@ -359,14 +361,13 @@ impl Panel {
                                 }
                             });
                     });
-                    theme::setting_row(ui, "Потоков ASR (0: авто)", |ui| {
+                    theme::settings_row(ui, "Потоков ASR (0: авто)", |ui| {
                         edits.number(
                             ui.add(egui::DragValue::new(&mut settings.asr_threads).range(0..=8)),
                         );
                     });
-                    theme::setting_row(ui, "Ускорение ASR", |ui| {
-                        egui::ComboBox::from_id_salt("acceleration")
-                            .icon(crate::theme::select_icon)
+                    theme::settings_row(ui, "Ускорение ASR", |ui| {
+                        crate::theme::select("acceleration")
                             .selected_text(format!("{:?}", settings.asr_acceleration))
                             .show_ui(ui, |ui| {
                                 crate::theme::select_value(
@@ -397,8 +398,8 @@ impl Panel {
                     );
                     hint(ui, "Алиасы: werf = верф, вёрф.");
                     ui.add_enabled_ui(cfg!(any(windows, target_os = "macos")), |ui| {
-                        theme::toggle(ui, &mut settings.detect_browsers, "Учитывать браузеры");
-                        theme::toggle(
+                        toggle(ui, &mut settings.detect_browsers, "Учитывать браузеры");
+                        toggle(
                             ui,
                             &mut settings.detect_any_microphone,
                             "Любое приложение с микрофоном",
@@ -412,7 +413,7 @@ impl Panel {
                     });
                 });
                 crate::theme::disclosure("Для опытных").show(ui, |ui| {
-                    theme::setting_row(ui, "Модель распознавания", |ui| {
+                    theme::settings_row(ui, "Модель распознавания", |ui| {
                         crate::ui::model_selector(ui, "settings_model", &mut settings.model);
                     });
                     hint(ui, "Выбранная модель загрузится автоматически.");
@@ -423,8 +424,10 @@ impl Panel {
                     }
                     let mut delete = None;
                     for voice in &state.voices.voices {
-                        theme::setting_row(ui, &voice.name, |ui| {
-                            if ui.button("Удалить").clicked() {
+                        theme::settings_row(ui, &voice.name, |ui| {
+                            if crate::theme::button(ui, "Удалить", crate::theme::ButtonStyle::Ghost)
+                                .clicked()
+                            {
                                 delete = Some(voice.name.clone());
                             }
                         });
@@ -479,7 +482,7 @@ impl Panel {
                         let input = self.calendar_inputs.entry(calendar.id.clone()).or_default();
                         ui.add_enabled_ui(cfg!(any(windows, target_os = "macos")), |ui| {
                             let response = ui.add(
-                                egui::TextEdit::singleline(input)
+                                crate::theme::text_field(input)
                                     .password(true)
                                     .desired_width(f32::INFINITY)
                                     .hint_text("HTTPS URL ICS (пусто: сохранённый)"),
@@ -513,7 +516,13 @@ impl Panel {
                         {
                             hint(ui, "Укажите URL, затем перейдите к другому полю.");
                         }
-                        if ui.small_button("Удалить календарь").clicked() {
+                        if crate::theme::button(
+                            ui,
+                            "Удалить календарь",
+                            crate::theme::ButtonStyle::Ghost,
+                        )
+                        .clicked()
+                        {
                             remove = Some(calendar.id.clone());
                         }
                     });
@@ -532,7 +541,11 @@ impl Panel {
                     .add_enabled(
                         cfg!(any(windows, target_os = "macos"))
                             && state.settings_draft.calendars.len() < 16,
-                        egui::Button::new("Добавить календарь"),
+                        crate::theme::styled_button(
+                            crate::theme::Palette::of(ui),
+                            "Добавить календарь",
+                            crate::theme::ButtonStyle::Secondary,
+                        ),
                     )
                     .clicked()
                 {
@@ -547,7 +560,11 @@ impl Panel {
                 if ui
                     .add_enabled(
                         !state.calendar_busy,
-                        egui::Button::new("Обновить календари"),
+                        crate::theme::styled_button(
+                            crate::theme::Palette::of(ui),
+                            "Обновить календари",
+                            crate::theme::ButtonStyle::Secondary,
+                        ),
                     )
                     .clicked()
                 {
@@ -583,16 +600,16 @@ impl Panel {
                 );
                 crate::quickstart::model_status(ui, state);
                 organization.shared_step(ui, !state.semantic_running && state.can_save_settings());
-                theme::toggle(
+                toggle(
                     ui,
                     &mut state.settings_draft.mcp_exclude_local,
-                    "MCP: не отдавать Local-встречи",
+                    "MCP: не отдавать Локально-встречи",
                 );
                 crate::theme::disclosure("Удалённый поиск по смыслу").show(ui, |ui| {
-                    hint(ui, "Только Hybrid и только без локальной модели. Local-встречи остаются в поиске по словам.");
+                    hint(ui, "Только Гибрид и только без локальной модели. Локально-встречи остаются в поиске по словам.");
                     let llm = &mut state.llm_draft;
-                    theme::setting_row(ui, "Провайдер", |ui| {
-                        egui::ComboBox::from_id_salt("embedding_provider").icon(crate::theme::select_icon).selected_text(if llm.embeddings.provider.is_empty() { "Выключено" } else { &llm.embeddings.provider }).show_ui(ui, |ui| {
+                    theme::settings_row(ui, "Провайдер", |ui| {
+                        crate::theme::select("embedding_provider").selected_text(if llm.embeddings.provider.is_empty() { "Выключено" } else { &llm.embeddings.provider }).show_ui(ui, |ui| {
                             crate::theme::select_value(ui, &mut llm.embeddings.provider, String::new(), "Выключено");
                             for provider in &llm.providers { if provider.kind == "openai" { crate::theme::select_value(ui, &mut llm.embeddings.provider, provider.id.clone(), &provider.id); } }
                         });
@@ -635,11 +652,15 @@ impl Panel {
                         state.settings_draft.models_path(),
                     ),
                 ] {
-                    theme::setting_row(ui, title, |ui| {
+                    theme::settings_row(ui, title, |ui| {
                         if ui
                             .add_enabled(
                                 self.folder_picker.is_none(),
-                                egui::Button::new("Выбрать…"),
+                                crate::theme::styled_button(
+                                    crate::theme::Palette::of(ui),
+                                    "Выбрать…",
+                                    crate::theme::ButtonStyle::Secondary,
+                                ),
                             )
                             .clicked()
                         {
@@ -675,12 +696,12 @@ impl Panel {
                 let settings = &mut state.settings_draft;
                 crate::theme::disclosure("Для опытных").show(ui, |ui| {
                     let mut forever = settings.retention_days.is_none();
-                    if theme::toggle(ui, &mut forever, "Хранить аудио всегда").changed()
+                    if toggle(ui, &mut forever, "Хранить аудио всегда").changed()
                     {
                         settings.retention_days = if forever { None } else { Some(7) };
                     }
                     if let Some(days) = &mut settings.retention_days {
-                        theme::setting_row(ui, "Хранить аудио", |ui| {
+                        theme::settings_row(ui, "Хранить аудио", |ui| {
                             edits.number(
                                 ui.add(
                                     egui::DragValue::new(days).range(0..=36_500).suffix(" дней"),
@@ -714,9 +735,8 @@ fn scenarios(ui: &mut egui::Ui, llm: &mut LlmSettings, edits: &mut Edits) {
         ("Чат", &mut llm.scenarios.chat),
     ] {
         ui.push_id(label, |ui| {
-            theme::setting_row(ui, label, |ui| {
-                egui::ComboBox::from_id_salt("provider")
-                    .icon(crate::theme::select_icon)
+            theme::settings_row(ui, label, |ui| {
+                crate::theme::select("provider")
                     .selected_text(if choice.provider.is_empty() {
                         "По умолчанию"
                     } else {
@@ -744,31 +764,30 @@ fn scenarios(ui: &mut egui::Ui, llm: &mut LlmSettings, edits: &mut Edits) {
     }
     hint(
         ui,
-        "Для Local облачный сценарий заменяется локальным провайдером по умолчанию.",
+        "Для Локально облачный сценарий заменяется локальным провайдером по умолчанию.",
     );
 }
 fn providers(ui: &mut egui::Ui, llm: &mut LlmSettings, edits: &mut Edits) {
     theme::section_caption(ui, "Провайдеры");
     hint(
         ui,
-        "Только имена переменных окружения. Ключи вводятся в подключении AI. Для Local разрешён только loopback.",
+        "Только имена переменных окружения. Ключи вводятся в подключении AI. Для Локально разрешён только loopback.",
     );
-    edits.text(ui, "По умолчанию Local", &mut llm.defaults.local);
+    edits.text(ui, "По умолчанию Локально", &mut llm.defaults.local);
     if !llm.providers.iter().any(|p| p.id == llm.defaults.local) {
-        ui.colored_label(Palette::of(ui).red, "Провайдер Local не найден");
+        ui.colored_label(Palette::of(ui).red, "Провайдер Локально не найден");
     }
-    edits.text(ui, "По умолчанию Hybrid", &mut llm.defaults.hybrid);
+    edits.text(ui, "По умолчанию Гибрид", &mut llm.defaults.hybrid);
     if !llm.providers.iter().any(|p| p.id == llm.defaults.hybrid) {
-        ui.colored_label(Palette::of(ui).red, "Провайдер Hybrid не найден");
+        ui.colored_label(Palette::of(ui).red, "Провайдер Гибрид не найден");
     }
     let mut remove = None;
     for (index, provider) in llm.providers.iter_mut().enumerate() {
         ui.push_id(index, |ui| {
             ui.separator();
             edits.text(ui, "id", &mut provider.id);
-            theme::setting_row(ui, "Тип", |ui| {
-                egui::ComboBox::from_id_salt("kind")
-                    .icon(crate::theme::select_icon)
+            theme::settings_row(ui, "Тип", |ui| {
+                crate::theme::select("kind")
                     .selected_text(&provider.kind)
                     .show_ui(ui, |ui| {
                         for kind in ["openai", "anthropic", "claude-cli", "codex-cli"] {
@@ -778,9 +797,8 @@ fn providers(ui: &mut egui::Ui, llm: &mut LlmSettings, edits: &mut Edits) {
             });
             edits.text(ui, "base_url", &mut provider.base_url);
             edits.text(ui, "model", &mut provider.model);
-            theme::setting_row(ui, "key_source", |ui| {
-                egui::ComboBox::from_id_salt("key_source")
-                    .icon(crate::theme::select_icon)
+            theme::settings_row(ui, "key_source", |ui| {
+                crate::theme::select("key_source")
                     .selected_text(&provider.key_source)
                     .show_ui(ui, |ui| {
                         for source in ["env", "credential"] {
@@ -806,13 +824,15 @@ fn providers(ui: &mut egui::Ui, llm: &mut LlmSettings, edits: &mut Edits) {
                 );
             }
             provider.api_key_env = (!env.is_empty()).then_some(env);
-            theme::setting_row(ui, "context_tokens", |ui| {
+            theme::settings_row(ui, "context_tokens", |ui| {
                 edits.number(
                     ui.add(egui::DragValue::new(&mut provider.context_tokens).range(1..=2_000_000)),
                 );
             });
             error(ui, provider.config().map(|_| ()));
-            if ui.small_button("Удалить провайдер").clicked() {
+            if crate::theme::button(ui, "Удалить провайдер", crate::theme::ButtonStyle::Ghost)
+                .clicked()
+            {
                 remove = Some(index);
             }
         });
@@ -820,7 +840,8 @@ fn providers(ui: &mut egui::Ui, llm: &mut LlmSettings, edits: &mut Edits) {
     if let Some(index) = remove {
         llm.providers.remove(index);
     }
-    if ui.button("Добавить провайдер").clicked() {
+    if crate::theme::button(ui, "Добавить провайдер", crate::theme::ButtonStyle::Ghost).clicked()
+    {
         let mut number = llm.providers.len() + 1;
         while llm
             .providers
@@ -849,4 +870,11 @@ fn directory_bytes(path: &std::path::Path) -> u64 {
             _ => 0,
         })
         .sum()
+}
+
+fn toggle(ui: &mut egui::Ui, value: &mut bool, label: &str) -> egui::Response {
+    if ui.cursor().top() > ui.max_rect().top() + 1.0 {
+        ui.separator();
+    }
+    theme::toggle(ui, value, label)
 }

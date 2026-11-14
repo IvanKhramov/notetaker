@@ -6,6 +6,7 @@ pub const FOLDER: &str = "\u{e0dc}";
 pub const PLUS: &str = "\u{e140}";
 pub const SETTINGS: &str = "\u{e157}";
 pub const ELLIPSIS: &str = "\u{e0ba}";
+pub const CHEVRON_RIGHT: &str = "\u{e073}";
 pub const CHEVRON_LEFT: &str = "\u{e072}";
 pub const CHEVRON_DOWN: &str = "\u{e071}";
 pub const X: &str = "\u{e1b1}";
@@ -19,6 +20,7 @@ pub const REFRESH_CW: &str = "\u{e148}";
 pub const FILE_TEXT: &str = "\u{e0d0}";
 pub const USERS: &str = "\u{e1a3}";
 pub const DOWNLOAD: &str = "\u{e0b6}";
+pub const CIRCLE_ALERT: &str = "\u{e07b}";
 pub const INFO: &str = "\u{e0fe}";
 pub const TRIANGLE_ALERT: &str = "\u{e192}";
 pub const SPARKLES: &str = "\u{e416}";
@@ -36,6 +38,7 @@ pub const ALL: &[&str] = &[
     SETTINGS,
     ELLIPSIS,
     CHEVRON_LEFT,
+    CHEVRON_RIGHT,
     CHEVRON_DOWN,
     X,
     COPY,
@@ -49,6 +52,7 @@ pub const ALL: &[&str] = &[
     USERS,
     DOWNLOAD,
     INFO,
+    CIRCLE_ALERT,
     TRIANGLE_ALERT,
     SPARKLES,
     PANEL_LEFT,

@@ -341,7 +341,14 @@ impl Panel {
                 ),
             ] {
                 if ui
-                    .add_enabled(next.is_some(), egui::Button::new(label))
+                    .add_enabled(
+                        next.is_some(),
+                        crate::theme::styled_button(
+                            crate::theme::Palette::of(ui),
+                            label,
+                            crate::theme::ButtonStyle::Secondary,
+                        ),
+                    )
                     .clicked()
                     && let Some(meeting) = next.and_then(|m| snapshot.meetings.get(&m.path))
                 {
@@ -367,10 +374,17 @@ impl Panel {
             crate::theme::disclosure("С прошлой встречи").show(ui, |ui| {
                 ui.label(carry.markdown());
                 if meta.mode == Mode::Hybrid && previous.meta.mode == Mode::Local {
-                    ui.weak("Источник Local: при вставке встреча станет Local");
+                    ui.weak("Источник Локально: при вставке встреча станет Локально");
                 }
                 if ui
-                    .add_enabled(editable, egui::Button::new("Вставить в заметки"))
+                    .add_enabled(
+                        editable,
+                        crate::theme::styled_button(
+                            crate::theme::Palette::of(ui),
+                            "Вставить в заметки",
+                            crate::theme::ButtonStyle::Secondary,
+                        ),
+                    )
                     .clicked()
                 {
                     action = Some(HeaderAction::Insert(previous.meta.id));
@@ -384,11 +398,19 @@ impl Panel {
             return;
         };
         ui.horizontal(|ui| {
-            if ui.button("К встрече").clicked() {
+            if crate::theme::button(ui, "К встрече", crate::theme::ButtonStyle::Ghost).clicked()
+            {
                 self.close();
             }
             if ui
-                .add_enabled(self.receiver.is_none(), egui::Button::new("Обновить"))
+                .add_enabled(
+                    self.receiver.is_none(),
+                    crate::theme::styled_button(
+                        crate::theme::Palette::of(ui),
+                        "Обновить",
+                        crate::theme::ButtonStyle::Secondary,
+                    ),
+                )
                 .clicked()
             {
                 self.refresh(ui.ctx(), &state.settings);
@@ -411,7 +433,7 @@ impl Panel {
     }
     fn people_screen(&mut self, ui: &mut egui::Ui) {
         theme::page_heading(ui, "Люди");
-        ui.add(egui::TextEdit::singleline(&mut self.query).hint_text("Поиск по имени или почте…"));
+        ui.add(crate::theme::text_field(&mut self.query).hint_text("Поиск по имени или почте…"));
         ui.checkbox(&mut self.show_hidden, "Показать скрытых");
         let mut selected = None;
         if let Some(snapshot) = &self.snapshot {
@@ -503,29 +525,33 @@ impl Panel {
         let mut changed = None;
         ui.add_enabled_ui(self.receiver.is_none(), |ui| {
             crate::theme::disclosure("Изменить человека").show(ui, |ui| {
-                ui.text_edit_singleline(&mut self.rename);
+                ui.add(crate::theme::text_field(&mut self.rename));
                 let mut edits = self
                     .snapshot
                     .as_ref()
                     .map(|s| s.edits.clone())
                     .unwrap_or_default();
-                if ui.button("Переименовать").clicked() {
+                if crate::theme::button(ui, "Переименовать", crate::theme::ButtonStyle::Ghost)
+                    .clicked()
+                {
                     edits.rename(&page.person, &self.rename);
                     changed = Some(edits.clone());
                 }
-                if ui
-                    .button(if page.person.hidden {
+                if crate::theme::button(
+                    ui,
+                    if page.person.hidden {
                         "Показать"
                     } else {
                         "Скрыть"
-                    })
-                    .clicked()
+                    },
+                    crate::theme::ButtonStyle::Ghost,
+                )
+                .clicked()
                 {
                     edits.set_hidden(&page.person, !page.person.hidden);
                     changed = Some(edits.clone());
                 }
-                egui::ComboBox::from_id_salt("merge-person")
-                    .icon(crate::theme::select_icon)
+                crate::theme::select("merge-person")
                     .selected_text("Объединить с...")
                     .show_ui(ui, |ui| {
                         if let Some(snapshot) = &self.snapshot {
@@ -553,7 +579,11 @@ impl Panel {
                 if ui
                     .add_enabled(
                         !self.merge_into.is_empty(),
-                        egui::Button::new("Объединить выбранных людей"),
+                        crate::theme::styled_button(
+                            crate::theme::Palette::of(ui),
+                            "Объединить выбранных людей",
+                            crate::theme::ButtonStyle::Secondary,
+                        ),
                     )
                     .clicked()
                     && let Some(other) = self
@@ -585,13 +615,19 @@ impl Panel {
             generate = ui
                 .add_enabled(
                     self.receiver.is_none(),
-                    egui::Button::new("Сводка по человеку"),
+                    crate::theme::styled_button(
+                        crate::theme::Palette::of(ui),
+                        "Сводка по человеку",
+                        crate::theme::ButtonStyle::Secondary,
+                    ),
                 )
                 .clicked();
         });
         if !self.brief.is_empty() {
             ui.label(&self.brief);
-            if ui.button("Копировать сводку").clicked() {
+            if crate::theme::button(ui, "Копировать сводку", crate::theme::ButtonStyle::Ghost)
+                .clicked()
+            {
                 ui.ctx().copy_text(self.brief.clone());
                 state
                     .notices
@@ -727,13 +763,12 @@ impl Panel {
         if self.period == 2 {
             ui.horizontal(|ui| {
                 ui.label("С (YYYY-MM-DD):");
-                ui.text_edit_singleline(&mut self.start);
+                ui.add(crate::theme::text_field(&mut self.start));
                 ui.label("До (не включая):");
-                ui.text_edit_singleline(&mut self.end);
+                ui.add(crate::theme::text_field(&mut self.end));
             });
         }
-        egui::ComboBox::from_id_salt("digest-person")
-            .icon(crate::theme::select_icon)
+        crate::theme::select("digest-person")
             .selected_text(
                 self.snapshot
                     .as_ref()
@@ -753,8 +788,7 @@ impl Panel {
                     }
                 }
             });
-        egui::ComboBox::from_id_salt("digest-series")
-            .icon(crate::theme::select_icon)
+        crate::theme::select("digest-series")
             .selected_text(
                 self.snapshot
                     .as_ref()
@@ -780,7 +814,11 @@ impl Panel {
         if ui
             .add_enabled(
                 self.receiver.is_none(),
-                egui::Button::new("Создать дайджест"),
+                crate::theme::styled_button(
+                    crate::theme::Palette::of(ui),
+                    "Создать дайджест",
+                    crate::theme::ButtonStyle::Secondary,
+                ),
             )
             .clicked()
         {
@@ -821,13 +859,17 @@ impl Panel {
         }
         if let Some((digest, path)) = &self.digest {
             ui.horizontal(|ui| {
-                if ui.button("Копировать").clicked() {
+                if crate::theme::button(ui, "Копировать", crate::theme::ButtonStyle::Ghost)
+                    .clicked()
+                {
                     ui.ctx().copy_text(digest.markdown.clone());
                     state
                         .notices
                         .push((theme::ToastLevel::Success, "Дайджест скопирован".into()));
                 }
-                if ui.button("Показать в папке").clicked() {
+                if crate::theme::button(ui, "Показать в папке", crate::theme::ButtonStyle::Ghost)
+                    .clicked()
+                {
                     state.send(Command::Reveal(path.clone()));
                 }
             });

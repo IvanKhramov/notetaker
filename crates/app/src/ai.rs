@@ -214,8 +214,7 @@ impl Connections {
         selected: &mut usize,
     ) -> Vec<Action> {
         let mut actions = Vec::new();
-        egui::ComboBox::from_id_salt("onboarding_ai")
-            .icon(crate::theme::select_icon)
+        crate::theme::select("onboarding_ai")
             .selected_text(self.cards.get(*selected).map_or("Выберите AI", |c| c.title))
             .show_ui(ui, |ui| {
                 for (index, card) in self.cards.iter().enumerate() {
@@ -238,29 +237,40 @@ impl Connections {
                             },
                         );
                     }
-                    if crate::theme::action_link(ui, "Войти в подписку").clicked() {
+                    if crate::theme::button(
+                        ui,
+                        "Войти в подписку",
+                        crate::theme::ButtonStyle::Ghost,
+                    )
+                    .clicked()
+                    {
                         operation = Some(Operation::Login);
                     }
                 } else {
                     if *selected != 2 {
                         ui.add(
-                            egui::TextEdit::singleline(&mut card.provider.base_url)
+                            crate::theme::text_field(&mut card.provider.base_url)
                                 .hint_text("Адрес API"),
                         );
                     }
                     ui.add_enabled_ui(cfg!(any(windows, target_os = "macos")), |ui| {
                         ui.add(
-                            egui::TextEdit::singleline(&mut card.key)
+                            crate::theme::text_field(&mut card.key)
                                 .password(true)
                                 .hint_text("API-ключ"),
                         );
                     });
-                    ui.add(
-                        egui::TextEdit::singleline(&mut card.provider.model).hint_text("Модель"),
-                    );
+                    ui.add(crate::theme::text_field(&mut card.provider.model).hint_text("Модель"));
                 }
                 if ui
-                    .add_enabled(can_default, egui::Button::new("Подключить"))
+                    .add_enabled(
+                        can_default,
+                        crate::theme::styled_button(
+                            crate::theme::Palette::of(ui),
+                            "Подключить",
+                            crate::theme::ButtonStyle::Secondary,
+                        ),
+                    )
                     .clicked()
                 {
                     operation = Some(Operation::Default);
@@ -317,50 +327,50 @@ impl Connections {
                             }
                         }
                         if kind == ProviderKind::ClaudeCli {
-                            egui::ComboBox::from_id_salt("model").icon(crate::theme::select_icon).selected_text(if card.provider.model.is_empty() { "Авто" } else { &card.provider.model }).show_ui(ui, |ui| {
+                            crate::theme::select("model").selected_text(if card.provider.model.is_empty() { "Авто" } else { &card.provider.model }).show_ui(ui, |ui| {
                                 for (value, label) in [("", "Авто"), ("sonnet", "Sonnet"), ("opus", "Opus"), ("haiku", "Haiku")] {
                                     crate::theme::select_value(ui, &mut card.provider.model, value.into(), label);
                                 }
                             });
                             ui.small("В окне Claude выполните /login. Токенами входа управляет Claude Code.");
                         } else { ui.small("Вход откроет браузер. Учётными данными управляет Codex CLI."); }
-                        ui.small("Пользовательские MCP отключены. Ограничение инструментов CLI не гарантирует изоляцию Local-файлов: доступ зависит от версии CLI и managed-настроек. Для строгой конфиденциальности используйте HTTP-провайдер.");
-                        if ui.button("Войти").clicked() { operation = Some(Operation::Login); }
+                        ui.small("Пользовательские MCP отключены. Ограничение инструментов CLI не гарантирует изоляцию Локально-файлов: доступ зависит от версии CLI и managed-настроек. Для строгой конфиденциальности используйте HTTP-провайдер.");
+                        if crate::theme::button(ui, "Войти", crate::theme::ButtonStyle::Ghost).clicked() { operation = Some(Operation::Login); }
                     } else {
                         if index == 2 {
                             ui.small("Ключ: 4o.flant.ru → Settings → Account → API Keys. Шлюз доступен из VPN Фланта.");
                         } else {
                             crate::theme::setting_row(ui, "Адрес API", |ui| {
-                                let response = ui.text_edit_singleline(&mut card.provider.base_url);
+                                let response = ui.add(crate::theme::text_field(&mut card.provider.base_url));
                                 typing |= response.changed(); blur |= response.lost_focus();
                             });
-                            egui::ComboBox::from_id_salt("kind").icon(crate::theme::select_icon).selected_text(if card.provider.kind == "anthropic" { "Anthropic" } else { "OpenAI-совместимый" }).show_ui(ui, |ui| {
+                            crate::theme::select("kind").selected_text(if card.provider.kind == "anthropic" { "Anthropic" } else { "OpenAI-совместимый" }).show_ui(ui, |ui| {
                                 crate::theme::select_value(ui, &mut card.provider.kind, "openai".into(), "OpenAI-совместимый");
                                 crate::theme::select_value(ui, &mut card.provider.kind, "anthropic".into(), "Anthropic");
                             });
                         }
                         ui.label("API-ключ (пусто - использовать сохранённый)");
                         ui.add_enabled_ui(cfg!(any(windows, target_os = "macos")), |ui| {
-                            let response = ui.add(egui::TextEdit::singleline(&mut card.key).password(true));
+                            let response = ui.add(crate::theme::text_field(&mut card.key).password(true));
                             card.key_editing = response.has_focus();
                             key_blur = response.lost_focus() && !card.key.is_empty();
                         });
                         #[cfg(not(any(windows, target_os = "macos")))]
                         ui.small("На этой ОС задайте api_key_env в Расширенных и переменную окружения перед запуском.");
                         if index == 3 { crate::theme::setting_row(ui, "Модель", |ui| {
-                            let response = ui.text_edit_singleline(&mut card.provider.model);
+                            let response = ui.add(crate::theme::text_field(&mut card.provider.model));
                             typing |= response.changed(); blur |= response.lost_focus();
                         }); }
                         if !card.models.is_empty() {
-                            egui::ComboBox::from_id_salt("model").icon(crate::theme::select_icon).selected_text(&card.provider.model).show_ui(ui, |ui| {
+                            crate::theme::select("model").selected_text(&card.provider.model).show_ui(ui, |ui| {
                                 for model in &card.models { crate::theme::select_value(ui, &mut card.provider.model, model.clone(), model); }
                             });
                         }
-                        if selected.is_none() && ui.button("Загрузить список моделей").clicked() { operation = Some(Operation::Models); }
+                        if selected.is_none() && crate::theme::button(ui, "Загрузить список моделей", crate::theme::ButtonStyle::Ghost).clicked() { operation = Some(Operation::Models); }
                     }
                     ui.horizontal(|ui| {
-                        if ui.button("Проверить").clicked() { operation = Some(Operation::Check); }
-                        if ui.add_enabled(can_default, egui::Button::new(if selected.is_some() { "Подключить" } else { "Использовать по умолчанию" })).clicked() { operation = Some(Operation::Default); }
+                        if crate::theme::button(ui, "Проверить", crate::theme::ButtonStyle::Ghost).clicked() { operation = Some(Operation::Check); }
+                        if ui.add_enabled(can_default, crate::theme::styled_button(crate::theme::Palette::of(ui),if selected.is_some() { "Подключить" } else { "Использовать по умолчанию" },crate::theme::ButtonStyle::Secondary)).clicked() { operation = Some(Operation::Default); }
                         if default == card.provider.id { ui.small("По умолчанию"); }
                     });
                 });

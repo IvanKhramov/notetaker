@@ -114,7 +114,8 @@ impl Updates {
         if let Some(message) = self.message.clone() {
             let close = crate::theme::modal(ctx, "Обновление").show(ctx, |ui| {
                 ui.label(message);
-                if ui.button("Закрыть").clicked() {
+                if crate::theme::button(ui, "Закрыть", crate::theme::ButtonStyle::Ghost).clicked()
+                {
                     self.message = None;
                 }
             });

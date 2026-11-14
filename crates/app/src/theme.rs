@@ -42,6 +42,7 @@ pub struct Palette {
     pub border: Color32,
     pub soft: Color32,
     pub accent: Color32,
+    pub accent_hover: Color32,
     pub on_accent: Color32,
     pub red: Color32,
     pub me: Color32,
@@ -63,6 +64,7 @@ impl Palette {
                 hover: rgb(42, 42, 40),
                 selected: rgb(50, 50, 48),
                 accent: rgb(95, 176, 108),
+                accent_hover: rgb(81, 158, 94),
                 on_accent: rgb(15, 36, 19),
                 red: rgb(224, 103, 91),
                 me: rgb(35, 35, 34),
@@ -81,6 +83,7 @@ impl Palette {
                 hover: rgb(239, 239, 237),
                 selected: rgb(232, 232, 229),
                 accent: rgb(47, 122, 61),
+                accent_hover: rgb(40, 106, 53),
                 on_accent: Color32::WHITE,
                 red: rgb(196, 69, 58),
                 me: rgb(247, 247, 246),
@@ -91,6 +94,14 @@ impl Palette {
         Self::for_dark(ui.visuals().dark_mode)
     }
 }
+
+pub const SPACE: [f32; 6] = [4.0, 8.0, 12.0, 16.0, 24.0, 32.0];
+pub const RADIUS_CONTROL: u8 = 6;
+pub const RADIUS_SURFACE: u8 = 8;
+pub const RADIUS_MODAL: u8 = 12;
+pub const CONTROL_HEIGHT: f32 = 32.0;
+pub const COMPACT_HEIGHT: f32 = 28.0;
+pub const CTA_HEIGHT: f32 = 36.0;
 
 // Shared type scale, in logical points at 100% zoom.
 pub const SMALL: f32 = 12.0;
@@ -222,6 +233,8 @@ pub fn install(ctx: &egui::Context) {
         v.text_cursor.stroke = Stroke::new(1.5, p.text);
         v.menu_corner_radius = 8.into();
         v.extreme_bg_color = p.card;
+        v.text_edit_bg_color = Some(p.bg);
+        v.indent_has_left_vline = false;
         v.faint_bg_color = p.sidebar;
         v.code_bg_color = p.soft;
         v.warn_fg_color = p.red;
@@ -232,7 +245,7 @@ pub fn install(ctx: &egui::Context) {
         } else {
             Color32::from_rgb(208, 230, 212)
         };
-        v.selection.stroke = Stroke::new(1.0, p.text);
+        v.selection.stroke = Stroke::new(1.0, p.accent);
         for widget in [
             &mut v.widgets.noninteractive,
             &mut v.widgets.inactive,
@@ -316,7 +329,11 @@ impl<'a> Dialog<'a> {
             return false;
         }
         let mut close = false;
+        let popup_was_open = egui::Popup::is_any_open(ctx);
+        let alpha = appearance(ctx, egui::Id::unique(("modal-fade", &self.title)));
         let body = |ui: &mut egui::Ui| {
+            ui.multiply_opacity(alpha);
+            ui.set_max_height((ctx.content_rect().height() - 80.0).max(100.0));
             ui.set_width(
                 self.width
                     .min((ctx.content_rect().width() - 80.0).max(180.0)),
@@ -330,8 +347,7 @@ impl<'a> Dialog<'a> {
                     close = icon_button(ui, icons::X, "Закрыть").clicked();
                 });
             });
-            ui.add_space(4.0);
-            ui.add_space(8.0);
+            ui.add_space(12.0);
             egui::ScrollArea::vertical()
                 .id_salt("dialog_body")
                 .auto_shrink([false, true])
@@ -342,21 +358,38 @@ impl<'a> Dialog<'a> {
             self.window.resizable(false).movable(false).show(ctx, body);
         } else {
             let dark = ctx.global_style().visuals.dark_mode;
-            let response = egui::Modal::new(egui::Id::unique(("modal", &self.title)))
-                .backdrop_color(Color32::from_black_alpha(if dark { 140 } else { 89 }))
+            let modal_id = egui::Id::unique(("modal", &self.title));
+            let response = egui::Modal::new(modal_id)
+                .area(egui::Modal::default_area(modal_id).default_size(egui::vec2(
+                    self.width + 40.0,
+                    ctx.content_rect().height() - 32.0,
+                )))
+                .backdrop_color(Color32::from_black_alpha(
+                    ((if dark { 140.0 } else { 89.0 }) * alpha) as u8,
+                ))
                 .frame(
-                    egui::Frame::window(&ctx.global_style()).shadow(egui::epaint::Shadow {
-                        offset: [0, 16],
-                        blur: 48,
-                        spread: 0,
-                        color: Color32::from_black_alpha(if dark { 102 } else { 51 }),
-                    }),
+                    egui::Frame::window(&ctx.global_style())
+                        .fill(Palette::for_dark(dark).card.gamma_multiply(alpha))
+                        .stroke(Stroke::new(
+                            1.0,
+                            Palette::for_dark(dark).border.gamma_multiply(alpha),
+                        ))
+                        .shadow(egui::epaint::Shadow {
+                            offset: [0, 16],
+                            blur: 48,
+                            spread: 0,
+                            color: Color32::from_black_alpha(
+                                ((if dark { 102.0 } else { 51.0 }) * alpha) as u8,
+                            ),
+                        }),
                 )
                 .show(ctx, body);
             close |= response.should_close();
         }
         // Esc closes the dialog unless a menu or combo box is open and takes it first.
-        close |= !egui::Popup::is_any_open(ctx)
+        close |= self.anchored
+            && !popup_was_open
+            && !egui::Popup::is_any_open(ctx)
             && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
         if close && let Some(open) = self.open {
             *open = false;
@@ -425,110 +458,201 @@ pub fn update_prompt(
     action
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ButtonStyle {
     Primary,
     Secondary,
     Ghost,
-    Stop,
     Danger,
+    DangerFilled,
 }
-pub fn button(ui: &mut egui::Ui, text: &str, style: ButtonStyle) -> egui::Response {
-    let response = ui.add(styled_button(Palette::of(ui), text, style));
-    if response.has_focus() {
+
+/// A single painter-backed action control shared by toolbars, forms and menus.
+pub struct Button<'a> {
+    text: &'a str,
+    variant: ButtonStyle,
+    icon: Option<&'a str>,
+    min_size: egui::Vec2,
+    trailing: Option<&'a str>,
+}
+impl<'a> Button<'a> {
+    pub fn icon(mut self, glyph: &'a str) -> Self {
+        self.icon = Some(glyph);
+        self
+    }
+    pub fn min_size(mut self, size: egui::Vec2) -> Self {
+        self.min_size = size;
+        self
+    }
+    pub fn right_text(mut self, text: &'a str) -> Self {
+        self.trailing = Some(text);
+        self
+    }
+}
+impl egui::Widget for Button<'_> {
+    fn ui(self, ui: &mut egui::Ui) -> egui::Response {
+        let p = Palette::of(ui);
+        let text =
+            ui.painter()
+                .layout_no_wrap(self.text.to_owned(), medium(BUTTON), Color32::PLACEHOLDER);
+        let leading = if self.icon.is_some() { 22.0 } else { 0.0 };
+        let trailing = if self.trailing.is_some() { 24.0 } else { 0.0 };
+        let size = egui::vec2(text.size().x + 24.0 + leading + trailing, 32.0).max(self.min_size);
+        let (rect, response) = ui.allocate_at_least(size, egui::Sense::click());
+        let (base, hover, ink, border) = match self.variant {
+            ButtonStyle::Primary => (p.accent, p.accent_hover, p.on_accent, Stroke::NONE),
+            ButtonStyle::Secondary => (
+                Color32::TRANSPARENT,
+                p.hover,
+                p.text,
+                Stroke::new(1.0, p.border_strong),
+            ),
+            ButtonStyle::Ghost => (Color32::TRANSPARENT, p.hover, p.muted, Stroke::NONE),
+            ButtonStyle::Danger => (Color32::TRANSPARENT, p.hover, p.red, Stroke::NONE),
+            ButtonStyle::DangerFilled => (
+                p.red,
+                p.red.gamma_multiply(0.85),
+                Color32::WHITE,
+                Stroke::NONE,
+            ),
+        };
+        let hovering = ui.ctx().animate_bool_with_time(
+            response.id.with("hover"),
+            response.hovered() && ui.is_enabled(),
+            0.12,
+        );
+        let pressing = ui.ctx().animate_bool_with_time(
+            response.id.with("press"),
+            response.is_pointer_button_down_on() && ui.is_enabled(),
+            0.12,
+        );
+        let fill = mix(
+            mix(base, hover, hovering),
+            if self.variant == ButtonStyle::Primary {
+                p.accent_hover
+            } else {
+                p.selected
+            },
+            pressing,
+        );
+        ui.painter()
+            .rect(rect, RADIUS_CONTROL, fill, border, egui::StrokeKind::Inside);
+        focus_ring(ui, &response, RADIUS_CONTROL);
+        let ink = if !ui.is_enabled() {
+            p.tertiary
+        } else if self.variant == ButtonStyle::Ghost && response.hovered() {
+            p.text
+        } else {
+            ink
+        };
+        let x = rect.left() + (rect.width() - text.size().x - leading - trailing) / 2.0;
+        if let Some(icon) = self.icon {
+            paint_icon(ui, egui::pos2(x + 8.0, rect.center().y), icon, 16.0, ink);
+        }
+        ui.painter().galley(
+            egui::pos2(x + leading, rect.center().y - text.size().y / 2.0),
+            text,
+            ink,
+        );
+        if let Some(trailing) = self.trailing {
+            paint_icon(
+                ui,
+                rect.right_center() - egui::vec2(12.0, 0.0),
+                trailing,
+                16.0,
+                ink,
+            );
+        }
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), self.text)
+        });
+        response
+    }
+}
+pub fn button(ui: &mut egui::Ui, text: &str, variant: ButtonStyle) -> egui::Response {
+    ui.add(styled_button(Palette::of(ui), text, variant))
+}
+pub fn styled_button<'a>(_: Palette, text: &'a str, variant: ButtonStyle) -> Button<'a> {
+    let variant = if variant == ButtonStyle::Ghost && text.starts_with("Удалить") {
+        ButtonStyle::Danger
+    } else {
+        variant
+    };
+    let icon = match text {
+        "Новая запись"
+        | "Стоп"
+        | "Копировать"
+        | "Копировать всё"
+        | "Удалить"
+        | "Переименовать"
+        | "Обновить"
+        | "Объединить собеседников…" => Some(icon_for_label(text)),
+        _ => None,
+    };
+    Button {
+        text,
+        variant,
+        icon,
+        min_size: egui::vec2(0.0, CONTROL_HEIGHT),
+        trailing: None,
+    }
+}
+/// Shared menu anchor preserves egui's popup keyboard handling.
+pub fn menu_button<R>(
+    ui: &mut egui::Ui,
+    button: Button<'_>,
+    content: impl FnOnce(&mut egui::Ui) -> R,
+) -> (egui::Response, Option<egui::InnerResponse<R>>) {
+    let response = ui.add(button);
+    let inner = egui::Popup::menu(&response).show(content);
+    (response, inner)
+}
+
+fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
+    let blend = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t) as u8;
+    Color32::from_rgba_premultiplied(
+        blend(a.r(), b.r()),
+        blend(a.g(), b.g()),
+        blend(a.b(), b.b()),
+        blend(a.a(), b.a()),
+    )
+}
+/// Focus is independent of hover. egui only focuses action widgets via keyboard/accessibility.
+fn focus_ring(ui: &egui::Ui, response: &egui::Response, radius: u8) {
+    if response.has_focus() && ui.is_enabled() {
         ui.painter().rect_stroke(
             response.rect.expand(1.0),
-            6,
+            radius,
             Stroke::new(2.0, Palette::of(ui).accent),
             egui::StrokeKind::Outside,
         );
     }
-    response
-}
-pub fn styled_button(p: Palette, text: &str, style: ButtonStyle) -> egui::Button<'_> {
-    let (fill, ink, border) = match style {
-        ButtonStyle::Danger => (p.red, Color32::WHITE, Stroke::NONE),
-        ButtonStyle::Stop | ButtonStyle::Secondary => (
-            Color32::TRANSPARENT,
-            p.text,
-            Stroke::new(1.0, p.border_strong),
-        ),
-        ButtonStyle::Primary => (p.accent, p.on_accent, Stroke::NONE),
-        ButtonStyle::Ghost => (Color32::TRANSPARENT, p.muted, Stroke::NONE),
-    };
-    let mut job = egui::text::LayoutJob::default();
-    if matches!(
-        text,
-        "Новая запись"
-            | "Стоп"
-            | "Копировать"
-            | "Копировать всё"
-            | "Удалить"
-            | "Переименовать"
-    ) {
-        job.append(
-            icon_for_label(text),
-            0.0,
-            egui::TextFormat {
-                font_id: FontId::new(16.0, FontFamily::Name("icons".into())),
-                color: ink,
-                ..Default::default()
-            },
-        );
-        job.append(
-            " ",
-            6.0,
-            egui::TextFormat {
-                font_id: medium(BUTTON),
-                color: ink,
-                ..Default::default()
-            },
-        );
-    }
-    job.append(
-        text,
-        0.0,
-        egui::TextFormat {
-            font_id: medium(BUTTON),
-            color: ink,
-            ..Default::default()
-        },
-    );
-    egui::Button::new(job)
-        .fill(fill)
-        .stroke(border)
-        .corner_radius(6)
-}
-
-/// A text action inside prose. Always underlined: links use the text color and would
-/// otherwise read as a plain sentence until hovered.
-pub fn action_link(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    button(ui, text, ButtonStyle::Ghost)
 }
 
 pub fn section_caption(ui: &mut egui::Ui, text: &str) {
     ui.label(
         egui::RichText::new(text)
-            .size(SMALL)
-            .color(Palette::of(ui).muted),
+            .font(semibold(SMALL))
+            .color(Palette::of(ui).tertiary),
     );
 }
 pub fn page_heading(ui: &mut egui::Ui, text: &str) {
     ui.heading(text);
-    ui.add_space(24.0);
+    ui.add_space(SPACE[4]);
 }
 /// Quiet list group, shared by secondary screens and dialogs.
 pub fn card(p: Palette, selected: bool) -> egui::Frame {
     egui::Frame::new()
         .fill(if selected { p.selected } else { p.card })
-        .inner_margin(egui::Margin::symmetric(0, 10))
+        .inner_margin(egui::Margin::symmetric(0, 8))
 }
 
 pub fn chip_frame(p: Palette) -> egui::Frame {
     egui::Frame::new()
         .fill(p.soft)
         .stroke(Stroke::NONE)
-        .corner_radius(12)
-        .inner_margin(egui::Margin::symmetric(9, 4))
+        .corner_radius(255)
+        .inner_margin(egui::Margin::symmetric(8, 3))
 }
 
 pub fn chip(ui: &mut egui::Ui, text: &str) {
@@ -536,7 +660,7 @@ pub fn chip(ui: &mut egui::Ui, text: &str) {
     chip_frame(p).show(ui, |ui| {
         ui.add_sized(
             [0.0, 18.0],
-            egui::Label::new(egui::RichText::new(text).size(SMALL).color(p.muted)),
+            egui::Label::new(egui::RichText::new(text).size(SMALL).color(p.muted)).truncate(),
         );
     });
 }
@@ -544,26 +668,56 @@ pub fn segmented<T: Copy + PartialEq>(ui: &mut egui::Ui, selected: &mut T, value
     let p = Palette::of(ui);
     egui::Frame::new()
         .fill(p.soft)
-        .corner_radius(6)
+        .corner_radius(RADIUS_CONTROL)
         .inner_margin(4)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
-                for &(value, text) in values {
-                    if ui
-                        .add(
-                            egui::Button::new(egui::RichText::new(text).font(medium(BUTTON)))
-                                .min_size(egui::vec2(0.0, 24.0))
-                                .corner_radius(4)
-                                .stroke(Stroke::NONE)
-                                .fill(if *selected == value {
-                                    p.card
-                                } else {
-                                    Color32::TRANSPARENT
-                                }),
+                for &(value, label) in values {
+                    let text = ui.painter().layout_no_wrap(
+                        label.into(),
+                        medium(BUTTON),
+                        Color32::PLACEHOLDER,
+                    );
+                    let (rect, response) = ui.allocate_exact_size(
+                        egui::vec2(text.size().x + 24.0, 24.0),
+                        egui::Sense::click(),
+                    );
+                    let active = *selected == value;
+                    let hover = ui.ctx().animate_bool_with_time(
+                        response.id.with("hover"),
+                        response.hovered(),
+                        0.12,
+                    );
+                    if active {
+                        ui.painter().add(egui::epaint::RectShape::filled(
+                            rect.translate(egui::vec2(0.0, 1.0)),
+                            4,
+                            Color32::from_black_alpha(12),
+                        ));
+                        ui.painter().rect_filled(rect, 4, p.card);
+                    } else {
+                        ui.painter().rect_filled(
+                            rect,
+                            4,
+                            mix(Color32::TRANSPARENT, p.hover, hover),
+                        );
+                    }
+                    ui.painter().galley(
+                        rect.center() - text.size() / 2.0,
+                        text,
+                        if active { p.text } else { p.muted },
+                    );
+                    focus_ring(ui, &response, 4);
+                    response.widget_info(|| {
+                        egui::WidgetInfo::selected(
+                            egui::Role::RadioButton,
+                            ui.is_enabled(),
+                            active,
+                            label,
                         )
-                        .clicked()
-                    {
+                    });
+                    if response.clicked() {
                         *selected = value;
                     }
                 }
@@ -622,9 +776,17 @@ pub fn nav_label(
     selected: bool,
 ) -> egui::Response {
     let p = Palette::of(ui);
-    if response.hovered() && !selected {
-        ui.painter().rect_filled(response.rect, 6, p.hover);
+    let hover =
+        ui.ctx()
+            .animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
+    if !selected {
+        ui.painter().rect_filled(
+            response.rect,
+            RADIUS_CONTROL,
+            mix(Color32::TRANSPARENT, p.hover, hover),
+        );
     }
+    focus_ring(ui, &response, RADIUS_CONTROL);
     let (text, glyph) = if let Some(name) = text.strip_prefix("▫  ") {
         (name, icons::FOLDER)
     } else {
@@ -662,9 +824,7 @@ pub fn nav_label(
 
 pub fn setting_row<R>(ui: &mut egui::Ui, label: &str, value: impl FnOnce(&mut egui::Ui) -> R) -> R {
     ui.scope(|ui| {
-        // The divider precedes the row, so a hint drawn right after a row stays in its group.
-        ui.separator();
-        ui.spacing_mut().item_spacing.y = 3.0;
+        ui.spacing_mut().item_spacing.y = 4.0;
         if ui.available_width() < 440.0 {
             ui.label(label);
             ui.horizontal(value).inner
@@ -689,25 +849,37 @@ pub fn setting_row<R>(ui: &mut egui::Ui, label: &str, value: impl FnOnce(&mut eg
 pub fn toggle(ui: &mut egui::Ui, value: &mut bool, label: &str) -> egui::Response {
     setting_row(ui, label, |ui| {
         let p = Palette::of(ui);
-        let mut response = ui.add(
-            egui::Button::new("")
-                .min_size(egui::vec2(36.0, 28.0))
-                .fill(Color32::TRANSPARENT)
-                .stroke(Stroke::NONE),
-        );
+        let (_, mut response) =
+            ui.allocate_exact_size(egui::vec2(34.0, 28.0), egui::Sense::click());
         if response.clicked() {
             *value = !*value;
             response.mark_changed();
         }
         let rect = egui::Rect::from_center_size(response.rect.center(), egui::vec2(34.0, 20.0));
-        ui.painter()
-            .rect_filled(rect, 9, if *value { p.accent } else { p.border_strong });
+        let t = ui
+            .ctx()
+            .animate_bool_with_time(response.id.with("knob"), *value, 0.16);
+        let hover =
+            ui.ctx()
+                .animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
+        let track = mix(p.border_strong, p.accent, t);
+        ui.painter().rect_filled(
+            rect,
+            255,
+            mix(
+                track,
+                if *value { p.accent_hover } else { p.selected },
+                hover * 0.5,
+            ),
+        );
+        focus_ring(ui, &response, 255);
         ui.painter().circle_filled(
-            rect.center()
-                + egui::vec2(
-                    -7.0 + 14.0 * ui.ctx().animate_bool_with_time(response.id, *value, 0.16),
-                    0.0,
-                ),
+            rect.center() + egui::vec2(-7.0 + 14.0 * t, 1.0),
+            8.0,
+            Color32::from_black_alpha(24),
+        );
+        ui.painter().circle_filled(
+            rect.center() + egui::vec2(-7.0 + 14.0 * t, 0.0),
             8.0,
             Color32::WHITE,
         );
@@ -737,9 +909,10 @@ impl ToastLevel {
 pub fn bar(p: Palette) -> egui::Frame {
     egui::Frame::new()
         .fill(p.card)
-        .stroke(Stroke::new(1.0, p.border))
-        .corner_radius(12)
-        .inner_margin(12)
+        .stroke(Stroke::new(1.0, p.border_strong))
+        .corner_radius(RADIUS_MODAL)
+        .shadow(surface_shadow(p))
+        .inner_margin(egui::Margin::symmetric(12, 6))
 }
 
 #[cfg(test)]
@@ -792,6 +965,7 @@ mod tests {
                     FontId::proportional(BODY),
                     FontId::monospace(BODY),
                     FontId::new(BODY, FontFamily::Name("heading".into())),
+                    FontId::new(BODY, FontFamily::Name("medium".into())),
                 ] {
                     assert!(fonts.has_glyphs(
                         &font,
@@ -857,32 +1031,47 @@ pub fn icon_for_label(label: &str) -> &'static str {
         "Задачи" => icons::CHECK,
         "Экспорт" => icons::DOWNLOAD,
         "Диагностика" => icons::INFO,
+        "Обновить" => icons::REFRESH_CW,
+        "Объединить собеседников…" => icons::USERS,
         "Ошибка" => icons::TRIANGLE_ALERT,
         "База" => icons::DATABASE,
         "Новая запись" => icons::MIC,
         "Стоп" => icons::SQUARE,
         "Назад" => icons::CHEVRON_LEFT,
         "Добавить" => icons::PLUS,
+        text if text.starts_with("Удалить") => icons::TRASH_2,
+        text if text.starts_with("Переименовать") || text.starts_with("Редактировать") => {
+            icons::PENCIL
+        }
+        text if text.starts_with("Копировать") => icons::COPY,
+        text if text.starts_with("Экспорт") => icons::DOWNLOAD,
+        "Показать в папке" => icons::FOLDER,
+        "Отправить задачи в трекер…" => icons::CHECK,
         _ => icons::FILE_TEXT,
     }
 }
 pub fn icon_button(ui: &mut egui::Ui, glyph: &str, tooltip: &str) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::click());
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(COMPACT_HEIGHT, COMPACT_HEIGHT),
+        egui::Sense::click(),
+    );
     let p = Palette::of(ui);
-    let t = ui
-        .ctx()
-        .animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
-    if t > 0.0 {
-        ui.painter().rect_filled(rect, 6, p.hover.gamma_multiply(t));
-    }
-    if response.has_focus() {
-        ui.painter().rect_stroke(
-            rect.expand(1.0),
-            6,
-            Stroke::new(2.0, p.accent),
-            egui::StrokeKind::Outside,
-        );
-    }
+    let t = ui.ctx().animate_bool_with_time(
+        response.id.with("hover"),
+        response.hovered() && ui.is_enabled(),
+        0.12,
+    );
+    let down = ui.ctx().animate_bool_with_time(
+        response.id.with("press"),
+        response.is_pointer_button_down_on() && ui.is_enabled(),
+        0.12,
+    );
+    ui.painter().rect_filled(
+        rect,
+        RADIUS_CONTROL,
+        mix(mix(Color32::TRANSPARENT, p.hover, t), p.selected, down),
+    );
+    focus_ring(ui, &response, RADIUS_CONTROL);
     paint_icon(
         ui,
         rect.center(),
@@ -909,22 +1098,88 @@ pub fn select_icon(ui: &egui::Ui, rect: egui::Rect, _: &egui::style::WidgetVisua
         Palette::of(ui).muted,
     );
 }
-pub fn disclosure(title: impl Into<egui::WidgetText>) -> egui::CollapsingHeader {
-    egui::CollapsingHeader::new(title).icon(|ui, openness, response| {
-        let center = response.rect.center();
-        let angle = openness * std::f32::consts::FRAC_PI_2;
-        let rot = egui::emath::Rot2::from_angle(angle);
-        let points = [
-            egui::vec2(-2.0, -4.0),
-            egui::vec2(2.0, 0.0),
-            egui::vec2(-2.0, 4.0),
-        ]
-        .map(|v| center + rot * v);
-        ui.painter().add(egui::Shape::line(
-            points.to_vec(),
-            Stroke::new(1.5, Palette::of(ui).muted),
-        ));
-    })
+pub struct Disclosure {
+    title: egui::WidgetText,
+    default_open: bool,
+}
+pub fn disclosure(title: impl Into<egui::WidgetText>) -> Disclosure {
+    Disclosure {
+        title: title.into(),
+        default_open: false,
+    }
+}
+impl Disclosure {
+    pub fn default_open(mut self, open: bool) -> Self {
+        self.default_open = open;
+        self
+    }
+    pub fn show<R>(
+        self,
+        ui: &mut egui::Ui,
+        contents: impl FnOnce(&mut egui::Ui) -> R,
+    ) -> Option<egui::InnerResponse<R>> {
+        ui.scope(|ui| {
+            ui.style_mut().animation_time = 0.16;
+            let label = self.title.text().to_owned();
+            let id = ui.make_persistent_id(&label);
+            let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+                ui.ctx(),
+                id,
+                self.default_open,
+            );
+            let (rect, response) = ui
+                .allocate_exact_size(egui::vec2(ui.available_width(), 32.0), egui::Sense::click());
+            let p = Palette::of(ui);
+            let hover = ui.ctx().animate_bool_with_time(
+                response.id.with("hover"),
+                response.hovered(),
+                0.12,
+            );
+            ui.painter().rect_filled(
+                rect,
+                RADIUS_CONTROL,
+                mix(Color32::TRANSPARENT, p.hover, hover),
+            );
+            if response.clicked() {
+                state.toggle(ui);
+            }
+            let t = ui
+                .ctx()
+                .animate_bool_with_time(id.with("chevron"), state.is_open(), 0.16);
+            let galley = ui.painter().layout_no_wrap(
+                icons::CHEVRON_RIGHT.into(),
+                FontId::new(16.0, FontFamily::Name("icons".into())),
+                p.muted,
+            );
+            let center = rect.left_center() + egui::vec2(12.0, 0.0);
+            ui.painter().add(
+                egui::epaint::TextShape::new(center - galley.size() / 2.0, galley, p.muted)
+                    .with_angle_and_anchor(
+                        t * std::f32::consts::FRAC_PI_2,
+                        egui::Align2::CENTER_CENTER,
+                    ),
+            );
+            let text = self.title.into_galley(
+                ui,
+                Some(egui::TextWrapMode::Truncate),
+                rect.width() - 40.0,
+                medium(BUTTON),
+            );
+            ui.painter().galley(
+                rect.left_center() + egui::vec2(28.0, -text.size().y / 2.0),
+                text,
+                p.text,
+            );
+            focus_ring(ui, &response, RADIUS_CONTROL);
+            response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::Role::DisclosureTriangle, ui.is_enabled(), &label)
+            });
+            ui.ctx()
+                .accesskit_node_builder(response.id, |node| node.set_expanded(state.is_open()));
+            state.show_body_unindented(ui, contents)
+        })
+        .inner
+    }
 }
 
 #[cfg(test)]
@@ -985,21 +1240,378 @@ pub fn select_value<T: PartialEq>(
     label: impl Into<egui::WidgetText>,
 ) -> egui::Response {
     let selected = *current == value;
-    let mut button = egui::Button::new(label.into())
-        .selected(selected)
-        .min_size(egui::vec2(ui.available_width(), 30.0))
-        .corner_radius(6)
-        .frame(false);
-    if selected {
-        button = button.right_text(
-            egui::RichText::new(icons::CHECK)
-                .font(FontId::new(16.0, FontFamily::Name("icons".into()))),
-        );
-    }
-    let mut response = ui.add(button);
+    let label = label.into();
+    let mut response = menu_item(ui, "", label.text(), false, selected);
     if response.clicked() && !selected {
         *current = value;
         response.mark_changed();
     }
     response
+}
+/// Icon, label and an optional trailing check share one keyboard target.
+pub fn menu_item(
+    ui: &mut egui::Ui,
+    icon: &str,
+    label: &str,
+    destructive: bool,
+    checked: bool,
+) -> egui::Response {
+    let p = Palette::of(ui);
+    let text = ui.painter().layout_no_wrap(
+        label.into(),
+        FontId::proportional(BUTTON),
+        Color32::PLACEHOLDER,
+    );
+    let width = ui.available_width().max(text.size().x + 64.0);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 30.0), egui::Sense::click());
+    let hover =
+        ui.ctx()
+            .animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
+    let down = ui.ctx().animate_bool_with_time(
+        response.id.with("press"),
+        response.is_pointer_button_down_on(),
+        0.12,
+    );
+    ui.painter().rect_filled(
+        rect,
+        RADIUS_CONTROL,
+        mix(mix(Color32::TRANSPARENT, p.hover, hover), p.selected, down),
+    );
+    let ink = if !ui.is_enabled() {
+        p.tertiary
+    } else if destructive {
+        p.red
+    } else {
+        p.text
+    };
+    if !icon.is_empty() {
+        paint_icon(
+            ui,
+            rect.left_center() + egui::vec2(16.0, 0.0),
+            icon,
+            16.0,
+            ink,
+        );
+    }
+    let inset = if icon.is_empty() { 12.0 } else { 30.0 };
+    ui.painter()
+        .with_clip_rect(rect.shrink2(egui::vec2(8.0, 0.0)))
+        .galley(
+            rect.left_center() + egui::vec2(inset, -text.size().y / 2.0),
+            text,
+            ink,
+        );
+    if checked {
+        paint_icon(
+            ui,
+            rect.right_center() - egui::vec2(16.0, 0.0),
+            icons::CHECK,
+            16.0,
+            ink,
+        );
+    }
+    focus_ring(ui, &response, RADIUS_CONTROL);
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), checked, label)
+    });
+    response
+}
+
+pub fn surface_shadow(p: Palette) -> egui::epaint::Shadow {
+    egui::epaint::Shadow {
+        offset: [0, 4],
+        blur: 16,
+        spread: 0,
+        color: Color32::from_black_alpha(if p.bg.r() < 128 { 102 } else { 31 }),
+    }
+}
+pub fn text_field(value: &mut dyn egui::TextBuffer) -> egui::TextEdit<'_> {
+    egui::TextEdit::singleline(value)
+        .font(FontId::proportional(BUTTON))
+        .margin(egui::Margin::symmetric(12, 7))
+        .min_size(egui::vec2(0.0, CONTROL_HEIGHT))
+}
+pub fn select(id: impl egui::AsIdSalt) -> egui::ComboBox<'static> {
+    egui::ComboBox::from_id_salt(id)
+        .icon(select_icon)
+        .truncate()
+}
+/// Returns whether the optional primary action was clicked.
+pub fn empty_state(
+    ui: &mut egui::Ui,
+    icon: &str,
+    title: &str,
+    hint: &str,
+    action: Option<(&str, bool)>,
+) -> bool {
+    let p = Palette::of(ui);
+    ui.vertical_centered(|ui| {
+        ui.add_space(SPACE[5]);
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(40.0, 40.0), egui::Sense::hover());
+        paint_icon(ui, rect.center(), icon, 28.0, p.muted);
+        ui.label(egui::RichText::new(title).font(semibold(16.0)));
+        ui.label(egui::RichText::new(hint).size(14.0).color(p.muted));
+        ui.add_space(SPACE[2]);
+        action.is_some_and(|(label, enabled)| {
+            ui.add_enabled(enabled, styled_button(p, label, ButtonStyle::Primary))
+                .clicked()
+        })
+    })
+    .inner
+}
+
+pub fn callout<R>(ui: &mut egui::Ui, icon: &str, contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let p = Palette::of(ui);
+    egui::Frame::new()
+        .fill(p.soft)
+        .corner_radius(RADIUS_SURFACE)
+        .inner_margin(12)
+        .show(ui, |ui| {
+            ui.horizontal_top(|ui| {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(16.0, 24.0), egui::Sense::hover());
+                paint_icon(ui, rect.center(), icon, 16.0, p.muted);
+                ui.vertical(contents).inner
+            })
+            .inner
+        })
+        .inner
+}
+
+/// Starts at zero on appearance; egui schedules frames only until the animation settles.
+pub fn appearance(ctx: &egui::Context, id: egui::Id) -> f32 {
+    let frame = ctx.cumulative_frame_nr();
+    let last = ctx.data_mut(|data| {
+        let last = data.get_temp::<u64>(id.with("seen"));
+        data.insert_temp(id.with("seen"), frame);
+        last
+    });
+    if last.is_none_or(|last| frame.saturating_sub(last) > 1) {
+        ctx.animate_value_with_time(id, 0.0, 0.0);
+    }
+    ctx.animate_value_with_time(id, 1.0, 0.18)
+}
+
+pub struct ToastResponse {
+    pub close: bool,
+    pub action: bool,
+}
+pub fn toast(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    level: ToastLevel,
+    text: &str,
+    action: Option<&str>,
+) -> ToastResponse {
+    let p = Palette::of(ui);
+    let alpha = appearance(ui.ctx(), id.with("fade"));
+    let hovered = ui
+        .ctx()
+        .data(|data| data.get_temp::<egui::Rect>(id))
+        .is_some_and(|rect| ui.rect_contains_pointer(rect));
+    let mut result = ToastResponse {
+        close: false,
+        action: false,
+    };
+    let frame = ui
+        .push_id(id, |ui| {
+            egui::Frame::new()
+                .fill(p.card)
+                .corner_radius(RADIUS_SURFACE)
+                .stroke(Stroke::new(1.0, p.border))
+                .shadow(surface_shadow(p))
+                .inner_margin(12)
+                .show(ui, |ui| {
+                    ui.multiply_opacity(alpha);
+                    ui.horizontal_top(|ui| {
+                        let glyph = match level {
+                            ToastLevel::Info => icons::INFO,
+                            ToastLevel::Success => icons::CHECK,
+                            ToastLevel::Warning => icons::TRIANGLE_ALERT,
+                            ToastLevel::Error => icons::CIRCLE_ALERT,
+                        };
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(16.0, 28.0), egui::Sense::hover());
+                        paint_icon(ui, rect.center(), glyph, 16.0, level.color(p));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                            ui.scope(|ui| {
+                                let focused = ui.memory(|mem| mem.has_focus(ui.next_auto_id()));
+                                if !hovered && !focused && !ui.input(|i| i.has_touch_screen()) {
+                                    ui.multiply_opacity(0.0);
+                                }
+                                result.close = icon_button(ui, icons::X, "Закрыть уведомление")
+                                    .on_hover_text("Закрыть уведомление")
+                                    .clicked();
+                            });
+                            ui.vertical(|ui| {
+                                ui.add(
+                                    egui::Label::new(egui::RichText::new(text).size(14.0)).wrap(),
+                                );
+                                if let Some(action) = action {
+                                    result.action =
+                                        button(ui, action, ButtonStyle::Ghost).clicked();
+                                }
+                            });
+                        });
+                    });
+                })
+                .response
+        })
+        .inner;
+    ui.ctx().data_mut(|data| data.insert_temp(id, frame.rect));
+    result
+}
+
+#[cfg(test)]
+mod interaction_tests {
+    use super::*;
+    fn enter() -> egui::Event {
+        egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+    #[test]
+    fn keyboard_activates_actions_and_disabled_actions_stay_inert() {
+        for enabled in [true, false] {
+            let ctx = egui::Context::default();
+            install(&ctx);
+            ctx.run_ui(Default::default(), |ui| {
+                ui.add_enabled(
+                    enabled,
+                    styled_button(Palette::of(ui), "Копировать", ButtonStyle::Secondary),
+                )
+                .request_focus();
+            })
+            .drop_without_applying_deltas();
+            let mut clicked = false;
+            ctx.run_ui(
+                egui::RawInput {
+                    events: vec![enter()],
+                    ..Default::default()
+                },
+                |ui| {
+                    clicked = ui
+                        .add_enabled(
+                            enabled,
+                            styled_button(Palette::of(ui), "Копировать", ButtonStyle::Secondary),
+                        )
+                        .clicked();
+                },
+            )
+            .drop_without_applying_deltas();
+            assert_eq!(clicked, enabled);
+        }
+    }
+    #[test]
+    fn escape_closes_modal_but_not_through_an_open_popup() {
+        for popup in [false, true] {
+            let ctx = egui::Context::default();
+            install(&ctx);
+            for _ in 0..2 {
+                ctx.run_pass(Default::default(), |ctx| {
+                    modal(ctx, "Подтверждение").show(ctx, |ui| {
+                        ui.label("Проверка");
+                    });
+                })
+                .drop_without_applying_deltas();
+            }
+            let mut closed = false;
+            ctx.run_pass(
+                egui::RawInput {
+                    events: vec![egui::Event::Key {
+                        key: egui::Key::Escape,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    }],
+                    ..Default::default()
+                },
+                |ctx| {
+                    if popup {
+                        egui::Popup::open_id(ctx, egui::Id::unique("test-popup"));
+                    }
+                    closed = modal(ctx, "Подтверждение").show(ctx, |ui| {
+                        ui.label("Проверка");
+                    });
+                },
+            )
+            .drop_without_applying_deltas();
+            assert_eq!(closed, !popup);
+        }
+    }
+    #[test]
+    fn toast_close_is_a_pointer_action() {
+        let ctx = egui::Context::default();
+        install(&ctx);
+        let id = egui::Id::unique("test-toast");
+        let render = |events| {
+            let mut closed = false;
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 300.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.set_max_width(340.0);
+                    closed = toast(ui, id, ToastLevel::Success, "Скопировано", None).close;
+                },
+            )
+            .drop_without_applying_deltas();
+            closed
+        };
+        render(vec![]);
+        render(vec![]);
+        let rect = ctx.data(|data| data.get_temp::<egui::Rect>(id)).unwrap();
+        let pos = egui::pos2(rect.right() - 26.0, rect.top() + 26.0);
+        render(vec![egui::Event::PointerMoved(pos)]);
+        assert!(!render(vec![egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE
+        }]));
+        assert!(render(vec![egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE
+        }]));
+    }
+}
+
+/// Dividers are reserved for settings groups, not ordinary forms or list rows.
+pub fn settings_row<R>(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    if ui.cursor().top() > ui.max_rect().top() + 1.0 {
+        ui.separator();
+    }
+    setting_row(ui, label, value)
+}
+
+pub fn row_background(ui: &egui::Ui, response: &egui::Response, selected: bool) {
+    let p = Palette::of(ui);
+    let t =
+        ui.ctx()
+            .animate_bool_with_time(response.id.with("row-hover"), response.hovered(), 0.12);
+    ui.painter().rect_filled(
+        response.rect,
+        RADIUS_CONTROL,
+        if selected {
+            p.selected
+        } else {
+            mix(Color32::TRANSPARENT, p.hover, t)
+        },
+    );
 }

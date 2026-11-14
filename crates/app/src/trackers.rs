@@ -126,11 +126,11 @@ impl Panel {
                 if local {
                     ui.colored_label(
                         ui.visuals().warn_fg_color,
-                        "Это Local-встреча. Задача и фрагмент конспекта покинут компьютер.",
+                        "Это Локально-встреча. Задача и фрагмент конспекта покинут компьютер.",
                     );
                     ui.checkbox(
                         &mut self.local_consent,
-                        "Подтверждаю отправку Local-данных в трекер",
+                        "Подтверждаю отправку Локально-данных в трекер",
                     );
                 }
                 if ui
@@ -141,7 +141,11 @@ impl Panel {
                             && !state.unsaved()
                             && !state.recording.busy()
                             && state.enhancing.is_none(),
-                        egui::Button::new("Отправить"),
+                        crate::theme::styled_button(
+                            crate::theme::Palette::of(ui),
+                            "Отправить",
+                            crate::theme::ButtonStyle::Secondary,
+                        ),
                     )
                     .clicked()
                 {

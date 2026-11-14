@@ -185,13 +185,27 @@ impl Panel {
         let mut edit_folder = None;
         ui.horizontal(|ui| {
             theme::section_caption(ui, "Папки");
-            if theme::icon_button(ui, theme::icons::PLUS, "Создать или настроить папку").clicked()
-            {
-                self.settings_open = true;
-                if let Some(s) = &self.snapshot {
-                    self.settings_revision = s.folders.revision;
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let row = egui::Rect::from_min_size(
+                    ui.min_rect().min,
+                    egui::vec2(ui.available_width(), 28.0),
+                );
+                let visible = ui.rect_contains_pointer(row)
+                    || ui.input(|i| i.has_touch_screen())
+                    || ui.ctx().content_rect().width() <= 760.0
+                    || ui.memory(|mem| mem.has_focus(ui.next_auto_id()));
+                if !visible {
+                    ui.multiply_opacity(0.0);
                 }
-            }
+                if theme::icon_button(ui, theme::icons::PLUS, "Создать или настроить папку")
+                    .clicked()
+                {
+                    self.settings_open = true;
+                    if let Some(s) = &self.snapshot {
+                        self.settings_revision = s.folders.revision;
+                    }
+                }
+            });
         });
         if let Some(s) = &self.snapshot {
             let mut names: BTreeSet<_> = s.folders.value.keys().cloned().collect();
@@ -219,12 +233,24 @@ impl Panel {
                     destination = Some(((*paths).clone(), name.clone()));
                 }
                 response.context_menu(|ui| {
-                    if !name.is_empty() && ui.button("Настройки папки").clicked() {
+                    if !name.is_empty()
+                        && crate::theme::button(
+                            ui,
+                            "Настройки папки",
+                            crate::theme::ButtonStyle::Ghost,
+                        )
+                        .clicked()
+                    {
                         edit_folder = Some(name.clone());
                         ui.close();
                     }
                     if !self.selected.is_empty()
-                        && ui.button("Переместить выбранные сюда").clicked()
+                        && crate::theme::button(
+                            ui,
+                            "Переместить выбранные сюда",
+                            crate::theme::ButtonStyle::Ghost,
+                        )
+                        .clicked()
                     {
                         destination = Some((self.selected.iter().cloned().collect(), name.clone()));
                         ui.close();
@@ -237,7 +263,8 @@ impl Panel {
                 "Выбрано: {}. Меню папки - переместить",
                 self.selected.len()
             ));
-            if ui.small_button("Снять выбор").clicked() {
+            if crate::theme::button(ui, "Снять выбор", crate::theme::ButtonStyle::Ghost).clicked()
+            {
                 self.selected.clear();
             }
         }
@@ -342,7 +369,7 @@ impl Panel {
         if self.snapshot.as_ref().is_some_and(|s| s.shared) && meta.mode == Mode::Local {
             ui.colored_label(
                 ui.visuals().warn_fg_color,
-                "Local: файлы этой встречи синхронизируются дисковым сервисом.",
+                "Локально: файлы этой встречи синхронизируются дисковым сервисом.",
             );
         }
         ui.add_enabled_ui(enabled, |ui| {
@@ -352,8 +379,7 @@ impl Panel {
                 ui.spacing_mut().icon_width = 10.0;
                 ui.visuals_mut().widgets.inactive.bg_stroke = egui::Stroke::NONE;
                 ui.visuals_mut().widgets.inactive.corner_radius = 12.into();
-                egui::ComboBox::from_id_salt("meeting_folder")
-                    .icon(crate::theme::select_icon)
+                crate::theme::select("meeting_folder")
                     .selected_text(
                         egui::RichText::new(meta.folder.as_deref().unwrap_or("Без папки"))
                             .size(theme::SMALL)
@@ -405,7 +431,13 @@ impl Panel {
                             ui.visuals().warn_fg_color,
                             "Найдена копия от синхронизации",
                         );
-                        if ui.button(format!("Сравнить: {}", copy.copy)).clicked() {
+                        if crate::theme::button(
+                            ui,
+                            &format!("Сравнить: {}", copy.copy),
+                            crate::theme::ButtonStyle::Ghost,
+                        )
+                        .clicked()
+                        {
                             self.compare = Some((m.clone(), copy.clone()));
                         }
                     });
@@ -480,8 +512,7 @@ impl Panel {
                     .as_ref()
                     .map(|s| s.folders.value.keys().cloned().collect::<Vec<_>>())
                     .unwrap_or_default();
-                egui::ComboBox::from_id_salt("edit_folder")
-                    .icon(crate::theme::select_icon)
+                crate::theme::select("edit_folder")
                     .selected_text(if self.folder_name.is_empty() {
                         "Новая папка"
                     } else {
@@ -497,7 +528,9 @@ impl Panel {
                             }
                         }
                     });
-                if ui.button("Новая папка").clicked() {
+                if crate::theme::button(ui, "Новая папка", crate::theme::ButtonStyle::Ghost)
+                    .clicked()
+                {
                     self.folder_name.clear();
                     self.edit_name.clear();
                     self.edit = Default::default();
@@ -508,14 +541,13 @@ impl Panel {
                     }
                 }
                 ui.label("Имя (client/project для дерева)");
-                ui.text_edit_singleline(&mut self.edit_name);
+                ui.add(crate::theme::text_field(&mut self.edit_name));
                 let mut template = self.edit.template.clone().unwrap_or_default();
                 ui.label("Шаблон по умолчанию");
-                if ui.text_edit_singleline(&mut template).changed() {
+                if ui.add(crate::theme::text_field(&mut template)).changed() {
                     self.edit.template = (!template.is_empty()).then_some(template);
                 }
-                egui::ComboBox::from_id_salt("folder_mode")
-                    .icon(crate::theme::select_icon)
+                crate::theme::select("folder_mode")
                     .selected_text(match self.edit.mode {
                         None => "Общий режим",
                         Some(Mode::Local) => "Локально",
@@ -554,13 +586,19 @@ impl Panel {
                     ui.push_id(index, |ui| {
                         ui.horizontal(|ui| {
                             ui.label("Название содержит");
-                            ui.text_edit_singleline(&mut rule.title_contains);
+                            ui.add(crate::theme::text_field(&mut rule.title_contains));
                         });
                         ui.horizontal(|ui| {
                             ui.label("Домен участника");
-                            ui.text_edit_singleline(&mut rule.attendee_domain);
+                            ui.add(crate::theme::text_field(&mut rule.attendee_domain));
                         });
-                        if ui.small_button("Удалить правило").clicked() {
+                        if crate::theme::button(
+                            ui,
+                            "Удалить правило",
+                            crate::theme::ButtonStyle::Ghost,
+                        )
+                        .clicked()
+                        {
                             remove = Some(index);
                         }
                     });
@@ -568,7 +606,9 @@ impl Panel {
                 if let Some(index) = remove {
                     self.edit.rules.remove(index);
                 }
-                if ui.button("Добавить правило").clicked() {
+                if crate::theme::button(ui, "Добавить правило", crate::theme::ButtonStyle::Ghost)
+                    .clicked()
+                {
                     self.edit.rules.push(CalendarRule::default());
                 }
                 tracker_settings(
@@ -586,7 +626,11 @@ impl Panel {
                     if ui
                         .add_enabled(
                             self.destinations_rx.is_none(),
-                            egui::Button::new("Загрузить / обновить структуру Kaiten"),
+                            crate::theme::styled_button(
+                                crate::theme::Palette::of(ui),
+                                "Загрузить / обновить структуру Kaiten",
+                                crate::theme::ButtonStyle::Secondary,
+                            ),
                         )
                         .clicked()
                     {
@@ -624,7 +668,13 @@ impl Panel {
                     || serde_json::from_str::<BTreeMap<String, u64>>(&self.owners_json).is_ok();
                 ui.add_enabled_ui(self.receiver.is_none() && valid_owners, |ui| {
                     ui.horizontal(|ui| {
-                        if ui.button("Сохранить папку").clicked() {
+                        if crate::theme::button(
+                            ui,
+                            "Сохранить папку",
+                            crate::theme::ButtonStyle::Ghost,
+                        )
+                        .clicked()
+                        {
                             let old = self.folder_name.clone();
                             let name = self.edit_name.trim_matches('/').trim().to_owned();
                             let settings = self.edit.clone();
@@ -669,7 +719,12 @@ impl Panel {
                             }
                         }
                         if !self.folder_name.is_empty()
-                            && ui.button("Удалить папку (встречи остаются)").clicked()
+                            && crate::theme::button(
+                                ui,
+                                "Удалить папку (встречи остаются)",
+                                crate::theme::ButtonStyle::Ghost,
+                            )
+                            .clicked()
                         {
                             let name = self.folder_name.clone();
                             self.launch(ctx, move |l| {
@@ -726,7 +781,9 @@ impl Panel {
                             ("Оставить копию", MergeChoice::Theirs),
                             ("Оставить обе (дописать)", MergeChoice::Both),
                         ] {
-                            if ui.button(label).clicked() {
+                            if crate::theme::button(ui, label, crate::theme::ButtonStyle::Ghost)
+                                .clicked()
+                            {
                                 let m = m.clone();
                                 let copy = copy.clone();
                                 self.launch(ctx, move |_| {
@@ -758,8 +815,7 @@ fn tracker_settings(
         }
     }
     let Some(c) = config else { return };
-    egui::ComboBox::from_id_salt("tracker_kind")
-        .icon(crate::theme::select_icon)
+    crate::theme::select("tracker_kind")
         .selected_text(format!("{:?}", c.kind))
         .show_ui(ui, |ui| {
             for kind in [
@@ -776,14 +832,14 @@ fn tracker_settings(
         ("Имя ключа в Credential Manager", &mut c.credential_id),
     ] {
         ui.label(label);
-        ui.text_edit_singleline(value);
+        ui.add(crate::theme::text_field(value));
     }
     ui.label("Новый ключ / секрет HMAC (пусто - сохранить прежний)");
-    ui.add(egui::TextEdit::singleline(secret).password(true));
+    ui.add(crate::theme::text_field(secret).password(true));
     match c.kind {
         TrackerKind::Webhook => {
             ui.label("Заголовок HMAC (пусто - X-Notetaker-Signature)");
-            ui.text_edit_singleline(&mut c.signature_header);
+            ui.add(crate::theme::text_field(&mut c.signature_header));
         }
         TrackerKind::Kaiten => {
             for (label, value) in [
@@ -793,10 +849,10 @@ fn tracker_settings(
                 ("ID дорожки", &mut c.lane_id),
             ] {
                 ui.label(label);
-                ui.text_edit_singleline(value);
+                ui.add(crate::theme::text_field(value));
             }
             ui.label("Ответственные: email -> числовой ID (JSON)");
-            if ui.text_edit_singleline(owners_json).changed()
+            if ui.add(crate::theme::text_field(owners_json)).changed()
                 && let Ok(value) = serde_json::from_str(owners_json)
             {
                 c.owners = value;
@@ -810,16 +866,16 @@ fn tracker_settings(
         }
         TrackerKind::Jira => {
             ui.label("Email для API token (пусто - PAT)");
-            ui.text_edit_singleline(&mut c.email);
+            ui.add(crate::theme::text_field(&mut c.email));
             ui.label("Ключ проекта");
-            ui.text_edit_singleline(&mut c.project);
+            ui.add(crate::theme::text_field(&mut c.project));
             ui.label("Тип задачи");
-            ui.text_edit_singleline(&mut c.issue_type);
+            ui.add(crate::theme::text_field(&mut c.issue_type));
             ui.checkbox(&mut c.jira_v3, "Jira Cloud REST v3 (иначе v2)");
         }
         TrackerKind::YouTrack => {
             ui.label("Внутренний id проекта (например 0-1)");
-            ui.text_edit_singleline(&mut c.project);
+            ui.add(crate::theme::text_field(&mut c.project));
         }
     }
 }
@@ -831,8 +887,7 @@ fn choose(
     choices: &[notetaker_llm::trackers::KaitenChoice],
 ) -> bool {
     let before = selected.clone();
-    egui::ComboBox::from_id_salt(label)
-        .icon(crate::theme::select_icon)
+    crate::theme::select(label)
         .selected_text(format!(
             "{label}: {}",
             choices

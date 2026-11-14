@@ -1,7 +1,7 @@
 //! Speaker controls and selection are kept separate from text editing.
 use std::collections::BTreeSet;
 
-use eframe::egui::{self, Color32, RichText};
+use eframe::egui::{self, RichText};
 use notetaker_core::{MeetingMeta, SpeakerEdit, SpeakerUndo, Transcript};
 use uuid::Uuid;
 
@@ -47,10 +47,6 @@ impl SpeakerUi {
     }
 }
 
-pub fn color(_id: &str) -> Color32 {
-    Color32::from_rgb(138, 135, 127)
-}
-
 fn label<'a>(text: &'a Transcript, id: &'a str) -> &'a str {
     match text.speaker_name(id) {
         "me" => "Я",
@@ -66,6 +62,7 @@ pub fn rename_menu(
     id: &str,
     voices: Option<&notetaker_core::VoiceLibrary>,
     global_allowed: bool,
+    show_actions: bool,
 ) -> Option<SpeakerEdit> {
     let mut edit = None;
     let title = transcript.speaker_suggestions.get(id).map_or_else(
@@ -74,12 +71,12 @@ pub fn rename_menu(
     );
     if ui
         .add(
-            egui::Button::new(
+            egui::Label::new(
                 RichText::new(title)
                     .font(crate::theme::medium(13.0))
                     .color(crate::theme::Palette::of(ui).text),
             )
-            .frame(false),
+            .sense(egui::Sense::click()),
         )
         .clicked()
     {
@@ -93,7 +90,19 @@ pub fn rename_menu(
         );
     }
     // Quiet, frameless: a framed 32px button outweighed the speaker name.
-    let more = crate::theme::icon_button(ui, crate::theme::icons::ELLIPSIS, "Действия собеседника");
+    let more = ui
+        .scope(|ui| {
+            let focused = ui.memory(|mem| mem.has_focus(ui.next_auto_id()));
+            if !show_actions
+                && !focused
+                && !ui.input(|i| i.has_touch_screen())
+                && !egui::Popup::is_any_open(ui.ctx())
+            {
+                ui.multiply_opacity(0.0);
+            }
+            crate::theme::icon_button(ui, crate::theme::icons::ELLIPSIS, "Действия собеседника")
+        })
+        .inner;
     egui::Popup::menu(&more).show(|ui| {
         let name_key = ui.make_persistent_id(("speaker-name", meta.id, id));
         let all_key = name_key.with("everywhere");
@@ -132,25 +141,41 @@ pub fn rename_menu(
             ui.close();
         };
         if let Some(suggestion) = transcript.speaker_suggestions.get(id)
-            && ui.button(format!("Подтвердить: {suggestion}")).clicked()
+            && crate::theme::button(
+                ui,
+                &format!("Подтвердить: {suggestion}"),
+                crate::theme::ButtonStyle::Ghost,
+            )
+            .clicked()
         {
             choose(ui, suggestion.clone(), false);
         }
         if let Some(event) = &meta.calendar_event {
             for attendee in &event.attendees {
-                if ui.button(attendee.label()).clicked() {
+                if crate::theme::button(ui, attendee.label(), crate::theme::ButtonStyle::Ghost)
+                    .clicked()
+                {
                     choose(ui, attendee.label().into(), false);
                 }
             }
         }
-        ui.text_edit_singleline(&mut name);
+        ui.add(crate::theme::text_field(&mut name));
         if ui
-            .add_enabled(!name.trim().is_empty(), egui::Button::new("Назвать"))
+            .add_enabled(
+                !name.trim().is_empty(),
+                crate::theme::styled_button(
+                    crate::theme::Palette::of(ui),
+                    "Назвать",
+                    crate::theme::ButtonStyle::Secondary,
+                ),
+            )
             .clicked()
         {
             choose(ui, name.clone(), false);
         }
-        if voices.is_some() && ui.button("Это я").clicked() {
+        if voices.is_some()
+            && crate::theme::button(ui, "Это я", crate::theme::ButtonStyle::Ghost).clicked()
+        {
             choose(
                 ui,
                 transcript
@@ -189,26 +214,36 @@ pub fn count_control(
     ui: &mut egui::Ui,
     document: &mut crate::state::Document,
     unavailable: Option<&str>,
-) -> Option<Option<u32>> {
+    editable: bool,
+) -> (Option<Option<u32>>, Option<SpeakerEdit>) {
     use crate::theme::{self, ButtonStyle, Palette};
     let mut apply = None;
+    let mut edit = None;
+    let timeline = document.data.transcript.speaker_timeline();
     ui.horizontal_wrapped(|ui| {
         let response = ui
             .add_enabled_ui(unavailable.is_none(), |ui| {
                 let label = format!("Собеседников: {}", remote_count(&document.data.transcript));
                 let button = theme::styled_button(Palette::of(ui), &label, ButtonStyle::Ghost)
                     .right_text(" ");
-                let (response, _) =
-                    egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
-                        ui.set_width(140.0);
-                        for count in std::iter::once(None).chain((1..=8).map(Some)) {
-                            let label = count.map_or_else(|| "Авто".into(), |n| n.to_string());
-                            if theme::nav_row(ui, &label, false).clicked() {
-                                document.speaker_ui.pending_count = Some(count);
-                                ui.close();
-                            }
+                let (response, _) = theme::menu_button(ui, button, |ui| {
+                    ui.set_width(140.0);
+                    for count in std::iter::once(None).chain((1..=8).map(Some)) {
+                        let label = count.map_or_else(|| "Авто".into(), |n| n.to_string());
+                        if theme::menu_item(
+                            ui,
+                            "",
+                            &label,
+                            false,
+                            count == Some(remote_count(&document.data.transcript) as u32),
+                        )
+                        .clicked()
+                        {
+                            document.speaker_ui.pending_count = Some(count);
+                            ui.close();
                         }
-                    });
+                    }
+                });
                 // Draw the chevron: the embedded text font has no ▾ glyph.
                 let c = response.rect.right_center() - egui::vec2(11.0, 0.0);
                 crate::theme::paint_icon(
@@ -223,6 +258,9 @@ pub fn count_control(
             .inner;
         if let Some(reason) = unavailable {
             response.on_disabled_hover_text(reason);
+        }
+        if timeline.speakers.len() >= 2 {
+            ui.add_enabled_ui(editable, |ui| merge_menu(ui, &timeline, &mut edit));
         }
         if document.speaker_ui.recalculating {
             ui.weak("Пересчитываю собеседников…");
@@ -249,7 +287,7 @@ pub fn count_control(
         });
     }
     ui.add_space(8.0);
-    apply
+    (apply, edit)
 }
 
 pub fn controls(
@@ -258,14 +296,8 @@ pub fn controls(
     meta: &MeetingMeta,
     state: &mut SpeakerUi,
 ) -> Option<SpeakerEdit> {
-    let mut edit = None;
+    let edit = None;
     let timeline = transcript.speaker_timeline();
-    // With a single speaker the menu would open empty.
-    if timeline.speakers.len() >= 2 {
-        ui.horizontal_wrapped(|ui| {
-            merge_menu(ui, &timeline, &mut edit);
-        });
-    }
     if state.undo.is_none() && state.selected.is_empty() {
         return edit;
     }
@@ -278,26 +310,36 @@ fn merge_menu(
     edit: &mut Option<SpeakerEdit>,
 ) {
     {
-        egui::containers::menu::MenuButton::from_button(crate::theme::styled_button(
-            crate::theme::Palette::of(ui),
-            "Объединить собеседников…",
-            crate::theme::ButtonStyle::Ghost,
-        ))
-        .ui(ui, |ui| {
-            for speaker in &timeline.speakers {
-                ui.menu_button(&speaker.name, |ui| {
-                    for other in &timeline.speakers {
-                        if other.id != speaker.id && ui.button(&other.name).clicked() {
-                            *edit = Some(SpeakerEdit::Merge {
-                                from: speaker.id.clone(),
-                                into: other.id.clone(),
-                            });
-                            ui.close();
+        crate::theme::menu_button(
+            ui,
+            crate::theme::styled_button(
+                crate::theme::Palette::of(ui),
+                "Объединить собеседников…",
+                crate::theme::ButtonStyle::Ghost,
+            ),
+            |ui| {
+                for speaker in &timeline.speakers {
+                    ui.menu_button(&speaker.name, |ui| {
+                        for other in &timeline.speakers {
+                            if other.id != speaker.id
+                                && crate::theme::button(
+                                    ui,
+                                    &other.name,
+                                    crate::theme::ButtonStyle::Ghost,
+                                )
+                                .clicked()
+                            {
+                                *edit = Some(SpeakerEdit::Merge {
+                                    from: speaker.id.clone(),
+                                    into: other.id.clone(),
+                                });
+                                ui.close();
+                            }
                         }
-                    }
-                });
-            }
-        });
+                    });
+                }
+            },
+        );
     }
 }
 
@@ -311,7 +353,8 @@ fn selection_controls(
 ) -> Option<SpeakerEdit> {
     ui.horizontal_wrapped(|ui| {
         if let Some(undo) = &state.undo
-            && ui.button("Отменить объединение").clicked()
+            && crate::theme::button(ui, "Отменить объединение", crate::theme::ButtonStyle::Ghost)
+                .clicked()
         {
             edit = Some(SpeakerEdit::Undo(Box::new(undo.clone())));
         }
@@ -330,21 +373,28 @@ fn selection_controls(
                     ui.close();
                 };
                 for speaker in &timeline.speakers {
-                    if ui
-                        .button(RichText::new(&speaker.name).color(color(&speaker.id)))
+                    if crate::theme::button(ui, &speaker.name, crate::theme::ButtonStyle::Ghost)
                         .clicked()
                     {
                         assign(ui, speaker.id.clone(), None);
                     }
                 }
-                if ui.button("Новый собеседник").clicked() {
+                if crate::theme::button(ui, "Новый собеседник", crate::theme::ButtonStyle::Ghost)
+                    .clicked()
+                {
                     assign(ui, transcript.new_speaker_id(), None);
                 }
                 if let Some(event) = &meta.calendar_event {
                     ui.separator();
                     ui.weak("Участники календаря");
                     for attendee in &event.attendees {
-                        if ui.button(attendee.label()).clicked() {
+                        if crate::theme::button(
+                            ui,
+                            attendee.label(),
+                            crate::theme::ButtonStyle::Ghost,
+                        )
+                        .clicked()
+                        {
                             let id = transcript
                                 .speaker_names
                                 .iter()
@@ -356,7 +406,8 @@ fn selection_controls(
                     }
                 }
             });
-            if ui.button("Снять выбор").clicked() {
+            if crate::theme::button(ui, "Снять выбор", crate::theme::ButtonStyle::Ghost).clicked()
+            {
                 state.selected.clear();
                 state.anchor = None;
             }
