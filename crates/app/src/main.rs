@@ -32,27 +32,38 @@ mod updates;
 mod virtual_rows;
 mod worker;
 
-// Deliberately does not construct AppState, workers, tray or diagnostics: the
-// installer smoke must never access profile data or start network activity.
+// Installer self-check. CI runners have no OpenGL, so it must not open a window; it
+// also never constructs AppState, workers or the tray, and touches no profile data.
 fn smoke_ui(ui: &mut eframe::egui::Ui) {
     ui.label("notetaker installer smoke");
 }
-struct SmokeApp;
-impl eframe::App for SmokeApp {
-    fn ui(&mut self, ui: &mut eframe::egui::Ui, _: &mut eframe::Frame) {
-        smoke_ui(ui);
-    }
-    fn logic(&mut self, ctx: &eframe::egui::Context, _: &mut eframe::Frame) {
-        #[cfg(any(windows, unix))]
-        if notetaker_runtime::platform::Instance::quit_requested() {
-            ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
+/// Lays out one frame with the embedded fonts and theme, then checks that the
+/// executables the app starts are installed next to it.
+fn smoke_check() -> Result<(), String> {
+    let ctx = eframe::egui::Context::default();
+    theme::install(&ctx);
+    ctx.run_ui(Default::default(), smoke_ui)
+        .drop_without_applying_deltas();
+    for name in ["notetaker", "notetaker-asr"] {
+        let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+        let path = notetaker_runtime::paths::current_sibling(&file).map_err(|e| e.to_string())?;
+        if !path.is_file() {
+            return Err(format!("missing {}", path.display()));
         }
-        ctx.request_repaint_after(std::time::Duration::from_millis(100));
     }
+    Ok(())
 }
 
 fn main() -> eframe::Result {
-    let smoke = std::env::var_os("NOTETAKER_SMOKE").is_some_and(|v| v == "1");
+    if std::env::var_os("NOTETAKER_SMOKE").is_some_and(|v| v == "1") {
+        std::process::exit(match smoke_check() {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("smoke check failed: {error}");
+                3
+            }
+        });
+    }
     #[cfg(any(windows, unix))]
     if std::env::args_os().skip(1).any(|arg| arg == "--quit") {
         std::process::exit(
@@ -72,17 +83,11 @@ fn main() -> eframe::Result {
             return Err(eframe::Error::AppCreation(error.into()));
         }
     };
-    if !smoke {
-        let _ = notetaker_runtime::diagnostics::init();
-    }
+    let _ = notetaker_runtime::diagnostics::init();
     #[cfg(any(windows, unix))]
-    if !smoke {
-        let _ = notetaker_runtime::platform::capture_app_stderr();
-    }
+    let _ = notetaker_runtime::platform::capture_app_stderr();
     #[cfg(windows)]
-    if !smoke {
-        updates::cleanup_finished();
-    }
+    updates::cleanup_finished();
     let result = eframe::run_native(
         "notetaker",
         eframe::NativeOptions {
@@ -92,16 +97,12 @@ fn main() -> eframe::Result {
                 .with_min_inner_size([720.0, 480.0]),
             ..Default::default()
         },
-        Box::new(move |cc| {
+        Box::new(|cc| {
             #[cfg(target_os = "macos")]
             macos::install_termination_handler(&cc.egui_ctx)?;
             theme::install(&cc.egui_ctx);
             egui_extras::install_image_loaders(&cc.egui_ctx);
-            if smoke {
-                Ok(Box::new(SmokeApp))
-            } else {
-                Ok(Box::new(ui::NotetakerApp::new()))
-            }
+            Ok(Box::new(ui::NotetakerApp::new()))
         }),
     );
     notetaker_runtime::diagnostics::event(if result.is_ok() {

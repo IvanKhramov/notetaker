@@ -1,4 +1,4 @@
-# Exercise the installed GUI and an upgrade from the latest published release.
+# Exercise the installed app's self-check and an upgrade from the latest published release.
 [CmdletBinding()]
 param([Parameter(Mandatory)][string]$SetupExe)
 $ErrorActionPreference = 'Stop'
@@ -32,49 +32,13 @@ function Get-InstalledVersion {
     return "$version".Trim()
 }
 function Test-InstalledGui {
-    $profileDir = Join-Path $root 'smoke-profile'
-    New-Item -ItemType Directory -Force $profileDir | Out-Null
-    $smokeEnvironment = @{
-        NOTETAKER_SMOKE = '1'
-        LOCALAPPDATA = $profileDir
-        APPDATA = $profileDir
-        USERPROFILE = $profileDir
-        HOME = $profileDir
-        XDG_CONFIG_HOME = $profileDir
-        XDG_DATA_HOME = $profileDir
-        XDG_CACHE_HOME = $profileDir
-    }
+    # CI runners have no OpenGL, so the app checks itself without opening a window:
+    # it loads, lays out one frame with its fonts and finds its sibling executables.
     $runId = [guid]::NewGuid()
     $stderr = Join-Path $root "gui-$runId-stderr.log"
     $stdout = Join-Path $root "gui-$runId-stdout.log"
-    $gui = Start-Process (Join-Path $install 'notetaker-app.exe') -Environment $smokeEnvironment -RedirectStandardError $stderr -RedirectStandardOutput $stdout -PassThru
-    try {
-        # Native renderer and IPC only, with no profile state or background network jobs.
-        for ($i = 0; $i -lt 10; $i++) {
-            Start-Sleep -Seconds 1
-            $gui.Refresh()
-            if ($gui.HasExited) { throw "GUI exited during startup: $($gui.ExitCode)" }
-        }
-        try {
-            $quit = Start-Process (Join-Path $install 'notetaker-app.exe') -ArgumentList '--quit' -Environment $smokeEnvironment -PassThru
-            Wait-SmokeProcess $quit 10
-            if (-not $gui.WaitForExit(10000)) {
-                Write-Warning 'GUI did not exit after polite shutdown; stopping the smoke process'
-            }
-        } catch {
-            # Startup health is the criterion; polite shutdown is best effort.
-            Write-Warning "GUI survived ten seconds but polite shutdown failed: $_"
-        }
-    } finally {
-        $gui.Refresh()
-        if (-not $gui.HasExited) {
-            try { Stop-Process -Id $gui.Id -Force } catch {
-                $gui.Refresh()
-                if (-not $gui.HasExited) { throw }
-            }
-            if (-not $gui.WaitForExit(5000)) { throw 'Cannot stop the smoke GUI process' }
-        }
-    }
+    $gui = Start-Process (Join-Path $install 'notetaker-app.exe') -Environment @{ NOTETAKER_SMOKE = '1' } -RedirectStandardError $stderr -RedirectStandardOutput $stdout -PassThru
+    Wait-SmokeProcess $gui 20
 }
 function Uninstall-Smoke([string]$Phase) {
     $log = Join-Path $root "$Phase.log"
@@ -129,7 +93,7 @@ try {
     if ((Get-ItemPropertyValue $run -Name notetaker) -ne "`"$install\notetaker-app.exe`"") { throw 'Autostart command mismatch' }
     Uninstall-Smoke 'uninstall'
     if (Get-ItemProperty $run -Name notetaker -ErrorAction SilentlyContinue) { throw 'Autostart value survived uninstall' }
-    Write-Host 'Installer and GUI smoke checks passed'
+    Write-Host 'Installer and app self-check passed'
 } catch {
     Get-ChildItem -LiteralPath $root -Recurse -File | Where-Object { $_.Extension -eq '.log' -or $_.Name -eq 'crash.flag' } | ForEach-Object {
         Write-Host "Smoke diagnostic log: $($_.FullName)"
