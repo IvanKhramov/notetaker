@@ -1,7 +1,2 @@
 [advisories]
-ignore = [
-    # rusqlite 0.38 pins libsqlite3-sys 0.36; cargo update -p cannot reach
-    # Exposure requires opening an attacker-controlled DB and sibling WAL.
-    # Fixed 0.39. Requires a separate rusqlite upgrade and SQLite compatibility review.
-    "RUSTSEC-2026-0459",
-]
+ignore = []

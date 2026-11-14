@@ -84,6 +84,10 @@ pub fn acknowledge_crash() {
 }
 
 pub fn redact(text: &str) -> &'static str {
+    // Static storage warning, safe to retain without paths or meeting content.
+    if text.trim() == "warning: file locking unsupported; using in-process meeting lock only" {
+        return "warning: file locking unsupported; using in-process meeting lock only";
+    }
     let lower = text.to_ascii_lowercase();
     if lower.contains("error") || lower.contains("failed") || lower.contains("panic") {
         "error [details redacted]"

@@ -5,7 +5,7 @@ use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 
 use crate::{
     Meeting, Result,
-    storage::{atomic_write, meeting_lock},
+    storage::{PreparedWrite, meeting_lock},
 };
 
 /// Markdown image source ranges and resolved destinations, excluding code blocks.
@@ -95,8 +95,6 @@ impl Meeting {
             )
             .into());
         }
-        let lock = meeting_lock(&self.path);
-        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         let folder = self.path.join("attachments");
         fs::create_dir_all(&folder)?;
         if !directory(&folder)? {
@@ -107,7 +105,12 @@ impl Meeting {
             .into());
         }
         let relative = format!("attachments/{}.{}", uuid::Uuid::now_v7(), extension);
-        atomic_write(&self.path.join(&relative), bytes)?;
+        let path = self.path.join(&relative);
+        let prepared = PreparedWrite::new(&self.path.join("attachment-staging"), bytes)?;
+        let lock = meeting_lock(&self.path);
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _file_guard = crate::storage::lock_meeting_files(&self.path)?;
+        prepared.persist(&path)?;
         Ok(relative)
     }
 
@@ -197,6 +200,7 @@ impl Meeting {
     pub(crate) fn purge_attachment_trash(&self, now: DateTime<Utc>) -> Result<Vec<PathBuf>> {
         let lock = meeting_lock(&self.path);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _file_guard = crate::storage::lock_meeting_files(&self.path)?;
         let folder = self.path.join("attachments");
         let trash = folder.join(".trash");
         if !directory(&folder)? || !directory(&trash)? {

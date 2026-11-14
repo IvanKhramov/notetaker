@@ -152,6 +152,17 @@ impl crate::Meeting {
         )
     }
     fn write_export(&self, suffix: &str, text: &str) -> Result<std::path::PathBuf> {
+        self.write_export_with(suffix, text, crate::storage::atomic_write)
+    }
+
+    fn write_export_with(
+        &self,
+        suffix: &str,
+        text: &str,
+        write: impl FnOnce(&std::path::Path, &[u8]) -> Result<()>,
+    ) -> Result<std::path::PathBuf> {
+        // The caller supplies an immutable snapshot. Export is an independent
+        // atomic file replacement and must not block recording metadata.
         // The folder name is immutable even when the meeting title changes.
         let folder = self
             .path()
@@ -160,7 +171,7 @@ impl crate::Meeting {
             .to_string_lossy();
         let slug = folder.splitn(3, '_').nth(2).unwrap_or(&folder);
         let path = self.path().join(format!("{slug}.{suffix}"));
-        crate::storage::atomic_write(&path, text.as_bytes())?;
+        write(&path, text.as_bytes())?;
         Ok(path)
     }
 }
@@ -193,5 +204,67 @@ mod file_tests {
                 .to_string_lossy()
                 .ends_with(".transcript.srt")
         );
+    }
+}
+
+#[cfg(test)]
+mod contention_tests {
+    #[test]
+    fn export_does_not_wait_for_meeting_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = crate::Library::open(dir.path()).unwrap();
+        let meeting = library
+            .create_meeting(crate::MeetingMeta::new("Export", chrono::Utc::now()))
+            .unwrap();
+        // A competing process can hold the metadata lock for the entire export.
+        // This deterministic check would fail if export acquired it even briefly.
+        let holder = crate::storage::lock_meeting_files(meeting.path())
+            .unwrap()
+            .unwrap();
+        let other = meeting.clone();
+        let export =
+            std::thread::spawn(move || other.export_summary(&"large export\n".repeat(100_000)));
+        let path = export.join().unwrap().unwrap();
+        assert!(std::fs::metadata(path).unwrap().len() > 1_000_000);
+        drop(holder);
+        meeting
+            .update_meta(|meta| meta.title = "Renamed during export work".into())
+            .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod slow_export_tests {
+    #[test]
+    fn metadata_save_succeeds_while_export_writer_is_blocked() {
+        use std::{io::Write, sync::mpsc, time::Duration};
+        let dir = tempfile::tempdir().unwrap();
+        let library = crate::Library::open(dir.path()).unwrap();
+        let meeting = library
+            .create_meeting(crate::MeetingMeta::new("Export", chrono::Utc::now()))
+            .unwrap();
+        let other = meeting.clone();
+        let (ready, started) = mpsc::channel();
+        let (resume, wait) = mpsc::channel();
+        let export = std::thread::spawn(move || {
+            other.write_export_with("summary.md", "snapshot", |path, bytes| {
+                let mut file = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
+                file.write_all(bytes)?;
+                ready.send(()).unwrap();
+                wait.recv_timeout(Duration::from_secs(10)).unwrap();
+                file.as_file().sync_all()?;
+                file.persist(path).map_err(|e| e.error)?;
+                Ok(())
+            })
+        });
+        started.recv_timeout(Duration::from_secs(10)).unwrap();
+        // The export's writer has not synced or published its temporary file.
+        let saved = meeting.update_meta_with_timeout(Duration::from_millis(100), |meta| {
+            meta.title = "Renamed".into()
+        });
+        resume.send(()).unwrap();
+        export.join().unwrap().unwrap();
+        saved.unwrap();
+        assert_eq!(meeting.read_meta().unwrap().title, "Renamed");
     }
 }

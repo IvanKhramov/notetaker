@@ -511,7 +511,7 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                     let result = (|| -> Result<_> {
                         meeting.update_transcript(|t| {
                             if let Some(bookmark) = t.bookmarks.iter_mut().find(|b| b.id == id) {
-                                bookmark.label = Some(label);
+                                bookmark.label = Some(label.clone());
                             }
                         })?;
                         Ok(meeting.load_transcript()?)
@@ -523,7 +523,7 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                     let path = meeting.path().to_owned();
                     let result = (|| -> Result<_> {
                         meeting.update_transcript(|t| {
-                            t.bookmarks.push(bookmark);
+                            t.bookmarks.push(bookmark.clone());
                         })?;
                         Ok(meeting.load_transcript()?)
                     })()

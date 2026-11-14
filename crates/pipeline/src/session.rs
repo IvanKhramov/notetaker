@@ -376,6 +376,7 @@ fn record(
         .spawn(move || run_asr(asr, &asr_meeting, jobs_rx, &asr_queue, &diarization))?;
     // Always join ASR, including disk/capture errors. Dropping jobs_tx cancels the
     // consumer rather than leaving a detached worker holding the model in RAM.
+    let mut pending_metadata = None;
     let captured = (|| -> Result<()> {
         let _sleep = match notetaker_runtime::recording::SleepGuard::acquire() {
             Ok(guard) => Some(guard),
@@ -510,9 +511,7 @@ fn record(
                 failure.get_or_insert(error);
             }
         }
-        let mut meta = meeting.read_meta()?;
-        meta.ended_at = Some(ended);
-        meta.audio_expires_at = config
+        let expires = config
             .retention
             .map(|r| -> Result<_> {
                 ended
@@ -520,19 +519,27 @@ fn record(
                     .context("retention timestamp out of range")
             })
             .transpose()?;
-        meeting.update_meta(|current| {
-            current.ended_at = meta.ended_at;
-            current.audio_expires_at = meta.audio_expires_at;
-        })?;
-        jobs_tx
-            .send(Job::Final(wavs.clone()))
-            .context("ASR thread stopped")?;
+        if queue_final(
+            meeting,
+            ended,
+            expires,
+            &jobs_tx,
+            wavs.clone(),
+            events,
+            Duration::from_secs(30),
+        )? {
+            pending_metadata = Some((ended, expires));
+        }
         failure.map_or(Ok(()), Err)
     })();
     drop(jobs_tx);
     let recognized = asr_handle
         .join()
         .map_err(|_| anyhow!("ASR thread panicked"))?;
+    // The final job must run even when metadata was temporarily locked.
+    if let Some((ended, expires)) = pending_metadata {
+        save_end_metadata(meeting, ended, expires, events, Duration::from_secs(30));
+    }
     captured?;
     recognized?;
     for wav in wavs {
@@ -640,6 +647,41 @@ fn capture(
     Ok(())
 }
 
+fn save_end_metadata(
+    meeting: &Meeting,
+    ended: chrono::DateTime<Utc>,
+    expires: Option<chrono::DateTime<Utc>>,
+    events: &Sender<PipelineEvent>,
+    timeout: Duration,
+) -> bool {
+    if let Err(error) = meeting.update_meta_with_timeout(timeout, |meta| {
+        meta.ended_at = Some(ended);
+        meta.audio_expires_at = expires;
+    }) {
+        notetaker_runtime::diagnostics::event("recording end metadata save failed");
+        let _ = events.send(PipelineEvent::Warning(format!(
+            "Не удалось сохранить время завершения записи: {error}. Чистовой проход не отменён."
+        )));
+        return false;
+    }
+    true
+}
+
+/// Return true when metadata needs one more attempt after the final job.
+fn queue_final(
+    meeting: &Meeting,
+    ended: chrono::DateTime<Utc>,
+    expires: Option<chrono::DateTime<Utc>>,
+    jobs: &Sender<Job>,
+    wavs: [PathBuf; 2],
+    events: &Sender<PipelineEvent>,
+    timeout: Duration,
+) -> Result<bool> {
+    let saved = save_end_metadata(meeting, ended, expires, events, timeout);
+    jobs.send(Job::Final(wavs)).context("ASR thread stopped")?;
+    Ok(!saved)
+}
+
 fn capture_issue(
     meeting: &Meeting,
     channel: Channel,
@@ -655,7 +697,15 @@ fn capture_issue(
         from_ms,
         reason,
     };
-    meeting.update_meta(|meta| meta.capture_issues.push(issue.clone()))?;
+    if let Err(error) = meeting.update_meta(|meta| meta.capture_issues.push(issue.clone())) {
+        if !matches!(&error, notetaker_core::Error::Io(e) if e.kind() == std::io::ErrorKind::TimedOut)
+        {
+            return Err(error.into());
+        }
+        notetaker_runtime::diagnostics::event("capture issue metadata lock timed out");
+        let _ = events.send(PipelineEvent::Warning(
+            "Не удалось сохранить сведения о сбое захвата: файлы встречи заняты. Запись продолжается.".into()));
+    }
     let _ = events.send(PipelineEvent::CaptureIssue(issue));
     Ok(())
 }
@@ -808,8 +858,10 @@ fn run_asr(
                 // Reload immediately before replacement to respect UI edits made
                 // during capture or while the full-file requests were running.
                 meeting.update_transcript(|transcript| {
-                    transcript.segments =
-                        replace_final(std::mem::take(&mut transcript.segments), final_segments);
+                    transcript.segments = replace_final(
+                        std::mem::take(&mut transcript.segments),
+                        final_segments.clone(),
+                    );
                     crate::echo::suppress_echo(&mut transcript.segments);
                 })?;
                 crate::diarization::final_pass(
@@ -1003,5 +1055,79 @@ mod tests {
                 retained
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod metadata_contention_tests {
+    use super::*;
+
+    fn fixture() -> (tempfile::TempDir, Meeting, fs::File) {
+        let dir = tempfile::tempdir().unwrap();
+        let library = Library::open(dir.path()).unwrap();
+        let meeting = library
+            .create_meeting(MeetingMeta::new("Locked", Utc::now()))
+            .unwrap();
+        let holder = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(meeting.path().join(".notetaker.lock"))
+            .unwrap();
+        holder.try_lock().unwrap();
+        (dir, meeting, holder)
+    }
+
+    #[test]
+    fn metadata_timeout_still_queues_final_and_retries_afterward() {
+        let (_dir, meeting, holder) = fixture();
+        let (jobs, rx) = mpsc::channel();
+        let (events, event_rx) = mpsc::channel();
+        let ended = Utc::now();
+        let wavs = [PathBuf::from("mic.wav"), PathBuf::from("system.wav")];
+        let pending = queue_final(
+            &meeting,
+            ended,
+            None,
+            &jobs,
+            wavs.clone(),
+            &events,
+            Duration::from_millis(50),
+        )
+        .unwrap();
+        assert!(pending);
+        assert!(matches!(rx.try_recv().unwrap(), Job::Final(paths) if paths == wavs));
+        assert!(
+            matches!(event_rx.try_recv().unwrap(), PipelineEvent::Warning(message)
+            if message.contains("Чистовой проход не отменён"))
+        );
+        assert!(meeting.read_meta().unwrap().ended_at.is_none());
+        // Simulate completion of the final job, then retry the pending update.
+        drop(holder);
+        assert!(save_end_metadata(
+            &meeting,
+            ended,
+            None,
+            &events,
+            Duration::from_secs(1)
+        ));
+        assert_eq!(meeting.read_meta().unwrap().ended_at, Some(ended));
+    }
+
+    #[test]
+    fn capture_issue_timeout_warns_and_keeps_recording() {
+        let (_dir, meeting, _holder) = fixture();
+        let (events, rx) = mpsc::channel();
+        capture_issue(&meeting, Channel::Mic, 42, "device lost".into(), &events).unwrap();
+        let events: Vec<_> = rx.try_iter().collect();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, PipelineEvent::Warning(_)))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, PipelineEvent::CaptureIssue(issue) if issue.from_ms == 42))
+        );
     }
 }

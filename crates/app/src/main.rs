@@ -32,7 +32,38 @@ mod updates;
 mod virtual_rows;
 mod worker;
 
+// Installer self-check. CI runners have no OpenGL, so it must not open a window; it
+// also never constructs AppState, workers or the tray, and touches no profile data.
+fn smoke_ui(ui: &mut eframe::egui::Ui) {
+    ui.label("notetaker installer smoke");
+}
+/// Lays out one frame with the embedded fonts and theme, then checks that the
+/// executables the app starts are installed next to it.
+fn smoke_check() -> Result<(), String> {
+    let ctx = eframe::egui::Context::default();
+    theme::install(&ctx);
+    ctx.run_ui(Default::default(), smoke_ui)
+        .drop_without_applying_deltas();
+    for name in ["notetaker", "notetaker-asr"] {
+        let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+        let path = notetaker_runtime::paths::current_sibling(&file).map_err(|e| e.to_string())?;
+        if !path.is_file() {
+            return Err(format!("missing {}", path.display()));
+        }
+    }
+    Ok(())
+}
+
 fn main() -> eframe::Result {
+    if std::env::var_os("NOTETAKER_SMOKE").is_some_and(|v| v == "1") {
+        std::process::exit(match smoke_check() {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("smoke check failed: {error}");
+                3
+            }
+        });
+    }
     #[cfg(any(windows, unix))]
     if std::env::args_os().skip(1).any(|arg| arg == "--quit") {
         std::process::exit(
@@ -80,4 +111,18 @@ fn main() -> eframe::Result {
         "app exit error"
     });
     result
+}
+
+#[cfg(test)]
+mod smoke_tests {
+    #[test]
+    fn smoke_ui_renders_without_application_state() {
+        let ctx = eframe::egui::Context::default();
+        let mut output = crate::test_ui::frame(&ctx, vec![], &mut super::smoke_ui);
+        // Headless renderer: acknowledge texture uploads without a GPU backend.
+        output.textures_delta.clear();
+        assert!(
+            crate::test_ui::text_rect(&output.shapes, "notetaker installer smoke").width() > 0.0
+        );
+    }
 }

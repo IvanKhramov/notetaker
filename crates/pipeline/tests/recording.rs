@@ -943,3 +943,82 @@ fn import_inherits_folder_template_and_explicit_local_mode_wins() {
         );
     }
 }
+
+#[test]
+fn final_pass_runs_after_metadata_lock_exceeds_normal_timeout() {
+    struct GatedSource {
+        source: FileSource,
+        gate: mpsc::Receiver<()>,
+    }
+    impl AudioSource for GatedSource {
+        fn start(
+            &mut self,
+            sender: mpsc::SyncSender<notetaker_capture::CaptureMessage>,
+        ) -> Result<()> {
+            self.gate.recv_timeout(Duration::from_secs(10))?;
+            self.source.start(sender)
+        }
+        fn stop(&mut self) -> Result<()> {
+            self.source.stop()
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    wav(&dir.path().join("mic.wav"), 6400);
+    wav(&dir.path().join("system.wav"), 3200);
+    let (go, gate) = mpsc::channel();
+    let stats = Arc::new(Mutex::new(Stats::default()));
+    let session = RecordingSession::start_with_asr(
+        Library::open(dir.path().join("library")).unwrap(),
+        MeetingMeta::new("Finalization contention", Utc::now()),
+        [
+            Box::new(GatedSource {
+                source: FileSource::new(
+                    dir.path().join("mic.wav"),
+                    Channel::Mic,
+                    PlaybackPace::Accelerated,
+                ),
+                gate,
+            }),
+            Box::new(FileSource::new(
+                dir.path().join("system.wav"),
+                Channel::System,
+                PlaybackPace::Accelerated,
+            )),
+        ],
+        Fake {
+            stats: stats.clone(),
+            crashes: vec![],
+            gate: None,
+        },
+        config(),
+    )
+    .unwrap();
+    let meeting = session.meeting().clone();
+    let holder = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(meeting.path().join(".notetaker.lock"))
+        .unwrap();
+    holder.try_lock().unwrap();
+    go.send(()).unwrap();
+    std::thread::sleep(Duration::from_secs(6));
+    drop(holder);
+    let events = drain(&session);
+    session.wait().unwrap();
+    assert!(meeting.read_meta().unwrap().ended_at.is_some());
+    assert_eq!(
+        stats
+            .lock()
+            .unwrap()
+            .calls
+            .iter()
+            .filter(|c| c.final_pass)
+            .count(),
+        2
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, PipelineEvent::Finished { .. }))
+    );
+}

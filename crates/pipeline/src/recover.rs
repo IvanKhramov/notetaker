@@ -67,8 +67,10 @@ pub(crate) fn run(
     }
     ensure!(!stop.is_stopped(), "Распознавание отменено");
     meeting.update_transcript(|transcript| {
-        transcript.segments =
-            crate::session::replace_final(std::mem::take(&mut transcript.segments), segments);
+        transcript.segments = crate::session::replace_final(
+            std::mem::take(&mut transcript.segments),
+            segments.clone(),
+        );
         crate::echo::suppress_echo(&mut transcript.segments);
     })?;
     let wav_of = |wanted: Channel| {
