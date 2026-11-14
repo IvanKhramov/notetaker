@@ -1150,6 +1150,92 @@ fn choose(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn folder_dialog_creates_renames_and_confirms_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = Library::open(dir.path()).unwrap();
+        let (mut state, _commands, _events) = crate::test_ui::state();
+        state.settings.library = dir.path().to_owned();
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut panel = Panel {
+            root: dir.path().to_owned(),
+            settings_open: true,
+            create_name: "Created".into(),
+            ..Default::default()
+        };
+        panel.apply_snapshot(Snapshot::read(&library).unwrap());
+        crate::test_ui::click(&ctx, &mut |ui| panel.windows(ui.ctx(), false), "Создать");
+        wait(&mut panel, &ctx, &mut state);
+        assert!(
+            library
+                .load_folders()
+                .unwrap()
+                .value
+                .contains_key("Created")
+        );
+        assert_eq!(panel.folder_name, "Created");
+        crate::test_ui::click(
+            &ctx,
+            &mut |ui| panel.windows(ui.ctx(), false),
+            theme::icons::PENCIL,
+        );
+        assert!(panel.rename_dialog.is_some());
+        crate::test_ui::replace_text(
+            &ctx,
+            &mut |ui| panel.windows(ui.ctx(), false),
+            "Created",
+            "Renamed",
+        );
+        crate::test_ui::click(&ctx, &mut |ui| panel.windows(ui.ctx(), false), "Сохранить");
+        wait(&mut panel, &ctx, &mut state);
+        assert_eq!(panel.folder_name, "Renamed");
+        let folders = library.load_folders().unwrap().value;
+        assert!(!folders.contains_key("Created"));
+        assert!(folders.contains_key("Renamed"));
+        crate::test_ui::click(
+            &ctx,
+            &mut |ui| panel.windows(ui.ctx(), false),
+            theme::icons::TRASH_2,
+        );
+        assert!(panel.delete_dialog.is_some());
+        assert!(
+            library
+                .load_folders()
+                .unwrap()
+                .value
+                .contains_key("Renamed")
+        );
+        crate::test_ui::click(&ctx, &mut |ui| panel.windows(ui.ctx(), false), "Отмена");
+        assert!(
+            library
+                .load_folders()
+                .unwrap()
+                .value
+                .contains_key("Renamed")
+        );
+        crate::test_ui::click(
+            &ctx,
+            &mut |ui| panel.windows(ui.ctx(), false),
+            theme::icons::TRASH_2,
+        );
+        crate::test_ui::click(&ctx, &mut |ui| panel.windows(ui.ctx(), false), "Удалить");
+        wait(&mut panel, &ctx, &mut state);
+        assert!(library.load_folders().unwrap().value.is_empty());
+        assert!(panel.folder_name.is_empty());
+    }
+    fn wait(panel: &mut Panel, ctx: &egui::Context, state: &mut AppState) {
+        for _ in 0..300 {
+            panel.poll(ctx, state);
+            if panel.receiver.is_none() {
+                assert!(panel.message.is_empty(), "{}", panel.message);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("folder operation timed out");
+    }
+
     fn snapshot(folders: Folders) -> Snapshot {
         Snapshot {
             names: folders.keys().cloned().collect(),

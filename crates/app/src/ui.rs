@@ -3610,6 +3610,340 @@ fn transcript_view(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn middle_jump_tracks_the_target_until_lazy_heights_settle() {
+        use super::*;
+        for size in [egui::vec2(1000.0, 600.0), egui::vec2(640.0, 427.0)] {
+            let (_dir, mut document, path) = synthetic_document(5000);
+            let target = document.data.transcript.segments[2499].id;
+            document.speaker_ui.scroll_to = Some(target);
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            let mut cache = TranscriptCache::default();
+            for frame in 0..40 {
+                ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                        time: Some(frame as f64 * 0.1),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        if size.y < 500.0 {
+                            ui.add_space(300.0);
+                        }
+                        transcript_view(ui, &mut cache, &mut document, false, None, true, true);
+                    },
+                )
+                .drop_without_applying_deltas();
+            }
+            assert!(
+                document.speaker_ui.scroll_to.is_none(),
+                "jump never settled at {size:?}"
+            );
+            let response = ctx
+                .read_response(transcript_text_id(&path, target))
+                .expect("target must be laid out");
+            assert!(
+                response.rect.intersects(ctx.content_rect()),
+                "jump landed on a different turn at {size:?}"
+            );
+            let (anchor, _) = cache.anchor.unwrap();
+            assert!((2480..=2499).contains(&cache.indices[&anchor]));
+        }
+    }
+    #[test]
+    fn document_blocks_and_note_galleys_are_reused_until_inputs_change() {
+        use super::*;
+        let (_dir, mut document, path) = synthetic_document(0);
+        document.data.enhanced = (0..5000).map(|index| format!("- Item {index}\n")).collect();
+        let mut prepared = DocumentPreview::default();
+        prepared.prepare(&document, &path);
+        assert_eq!(prepared.blocks.len(), 5000);
+        let revision = prepared.revision;
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut markdown_cache = CommonMarkCache::default();
+        let mut notes = NotesCache::default();
+        for _ in 0..3 {
+            prepared.prepare(&document, &path);
+            assert_eq!(prepared.revision, revision);
+            ctx.data_mut(|data| {
+                data.insert_temp(egui::Id::unique("document-layout-count"), 0_usize)
+            });
+            crate::test_ui::frame(&ctx, vec![], &mut |ui| {
+                let first = notes.layout(ui, "## Заголовок\n- [ ] Задача", 500.0);
+                let second = notes.layout(ui, "## Заголовок\n- [ ] Задача", 500.0);
+                assert!(std::sync::Arc::ptr_eq(&first, &second));
+                enhanced_document(ui, &mut markdown_cache, &mut prepared, &mut None);
+            })
+            .drop_without_applying_deltas();
+            let count = ctx
+                .data(|data| data.get_temp::<usize>(egui::Id::unique("document-layout-count")))
+                .unwrap();
+            assert!(
+                count > 0 && count < 64,
+                "Laid out {count} of 5000 document blocks"
+            );
+        }
+        document.data.enhanced = "## Changed".into();
+        document.changed();
+        prepared.prepare(&document, &path);
+        assert_ne!(prepared.revision, revision);
+        assert_eq!(prepared.blocks.len(), 1);
+        document.generation = Some(String::new());
+        prepared.prepare(&document, &path);
+        assert!(
+            prepared.blocks.is_empty(),
+            "an empty new generation must invalidate the previous summary"
+        );
+    }
+    #[test]
+    fn transcript_jump_copy_focus_and_live_tail_remain_available() {
+        use super::*;
+        let (_dir, mut document, path) = synthetic_document(5000);
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut cache = TranscriptCache::default();
+        let last = document.data.transcript.segments.last().unwrap().id;
+        document.speaker_ui.scroll_to = Some(last);
+        let mut draw = |ui: &mut egui::Ui| {
+            transcript_view(ui, &mut cache, &mut document, false, None, true, true);
+        };
+        for _ in 0..40 {
+            crate::test_ui::frame(&ctx, vec![], &mut draw).drop_without_applying_deltas();
+        }
+        assert!(ctx.read_response(transcript_text_id(&path, last)).is_some());
+        ctx.memory_mut(|mem| mem.request_focus(transcript_text_id(&path, last)));
+        crate::test_ui::frame(&ctx, vec![], &mut draw).drop_without_applying_deltas();
+        let output = crate::test_ui::frame(
+            &ctx,
+            vec![
+                egui::Event::Key {
+                    key: egui::Key::A,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers {
+                        ctrl: true,
+                        command: true,
+                        ..Default::default()
+                    },
+                },
+                egui::Event::Copy,
+            ],
+            &mut draw,
+        );
+        assert!(output.platform_output.commands.iter().any(|command| matches!(command, egui::OutputCommand::CopyText(text) if text.contains("Повторяемая реплика"))));
+        output.drop_without_applying_deltas();
+        assert!(document.speaker_ui.scroll_to.is_none());
+        document.speaker_ui.scroll_to = Some(document.data.transcript.segments[0].id);
+        for _ in 0..40 {
+            ctx.run_ui(Default::default(), |ui| {
+                transcript_view(ui, &mut cache, &mut document, false, None, true, true);
+            })
+            .drop_without_applying_deltas();
+        }
+        assert!(
+            ctx.read_response(transcript_text_id(&path, last)).is_some(),
+            "focused off-screen editor must remain alive"
+        );
+        assert!(document.speaker_ui.scroll_to.is_none());
+        let live_ctx = egui::Context::default();
+        theme::install(&live_ctx);
+        let mut live_cache = TranscriptCache::default();
+        for _ in 0..40 {
+            crate::test_ui::frame(&live_ctx, vec![], &mut |ui| {
+                transcript_view(ui, &mut live_cache, &mut document, true, None, false, false);
+            })
+            .drop_without_applying_deltas();
+        }
+        assert!(
+            live_cache
+                .anchor
+                .is_some_and(|(id, _)| live_cache.indices[&id] > 4900),
+            "live view must follow the tail"
+        );
+    }
+    #[test]
+    fn transcript_cache_invalidates_on_edits_and_preserves_anchor_when_resized() {
+        use super::*;
+        let (_dir, mut document, path) = synthetic_document(200);
+        let mut cache = TranscriptCache::default();
+        cache.sync(&document, &path, 900.0, 1.0, false);
+        let id = document.data.transcript.segments[100].id;
+        cache.anchor = Some((id, 0.25));
+        cache.rows.set_height(0, 200.0);
+        cache.sync(&document, &path, 400.0, 1.5, false);
+        assert_eq!(cache.scroll_override, Some(8020.0));
+        let old = crate::speakers::timeline(&mut document);
+        assert!(std::sync::Arc::ptr_eq(
+            &old,
+            &crate::speakers::timeline(&mut document)
+        ));
+        document.data.transcript.segments[100].edited = true;
+        document.changed();
+        cache.sync(&document, &path, 400.0, 1.5, false);
+        assert!(cache.times[100].contains("исправлено"));
+        assert!(!std::sync::Arc::ptr_eq(
+            &old,
+            &crate::speakers::timeline(&mut document)
+        ));
+        cache.rows.set_height(10, 150.0);
+        document.data.transcript.segments.swap(10, 11);
+        document.changed();
+        cache.sync(&document, &path, 400.0, 1.5, false);
+        assert_eq!(
+            cache.rows.height(11),
+            150.0,
+            "height follows the turn ID after reordering"
+        );
+        document.data.transcript.segments[11].text = "Changed text".into();
+        document.changed();
+        cache.sync(&document, &path, 400.0, 1.5, false);
+        assert_eq!(
+            cache.rows.height(11),
+            80.0,
+            "changed text invalidates its measured height"
+        );
+    }
+    #[test]
+    fn meetings_cache_filters_and_indexes_5000_rows_without_laying_them_out() {
+        use super::*;
+        let (_dir, document, _path) = synthetic_document(0);
+        let (mut state, _commands, _events) = crate::test_ui::state();
+        state.rows = (0..5000)
+            .map(|index| {
+                let mut meta = document.data.meta.clone();
+                meta.folder = (index % 2 == 0).then(|| "Team".into());
+                crate::worker::MeetingRow {
+                    meeting: document.data.meeting.clone(),
+                    meta,
+                    snippet: String::new(),
+                    anchor: None,
+                }
+            })
+            .collect();
+        let organization = crate::organization::Panel::default();
+        let mut cache = MeetingsCache::default();
+        cache.sync(&state, &organization);
+        assert_eq!(cache.count, 5000);
+        let range = cache.layout.visible(egui::Rect::from_min_size(
+            egui::pos2(0.0, 50000.0),
+            egui::vec2(900.0, 600.0),
+        ));
+        assert!(range.len() <= 18);
+        state.folder_filter = Some("Team".into());
+        cache.sync(&state, &organization);
+        assert_eq!(cache.count, 2500);
+        state.rows.clear();
+        state.view_revision += 1;
+        cache.sync(&state, &organization);
+        assert_eq!(cache.count, 0);
+    }
+    #[test]
+    fn idle_has_no_frame_timer_and_pending_edits_schedule_a_deadline() {
+        use super::*;
+        let (mut state, _commands, _events) = crate::test_ui::state();
+        assert_eq!(next_state_wake(&state, Instant::now()), None);
+        state.settings_autosave.pending = false;
+        state.ready = true;
+        state.quickstart.models = crate::quickstart::Models {
+            gigaam: crate::quickstart::Status::Ready,
+            parakeet: crate::quickstart::Status::Ready,
+            auto: crate::quickstart::Status::Ready,
+            diarization: crate::quickstart::Status::Ready,
+            semantic: crate::quickstart::Status::Ready,
+        };
+        crate::quickstart::auto_download(&mut state);
+        assert!(next_state_wake(&state, Instant::now()).unwrap() >= Duration::from_secs(59));
+        state.ready = false;
+        state.query_changed = Some(Instant::now());
+        assert!(next_state_wake(&state, Instant::now()).unwrap() <= Duration::from_millis(301));
+        state.query_changed = None;
+        state.settings_autosave.pending = true;
+        state.settings_autosave.error = Some("invalid".into());
+        assert_eq!(next_state_wake(&state, Instant::now()), None);
+    }
+    fn synthetic_document(count: u64) -> (tempfile::TempDir, super::Document, std::path::PathBuf) {
+        use super::*;
+        use notetaker_core::{Channel, Library, MeetingMeta, Segment, Source, SpeakerId};
+        let dir = tempfile::tempdir().unwrap();
+        let library = Library::open(dir.path()).unwrap();
+        let meeting = library
+            .create_meeting(MeetingMeta::new("Benchmark", chrono::Utc::now()))
+            .unwrap();
+        let path = meeting.path().to_owned();
+        let mut data = crate::worker::DocumentData::read(meeting).unwrap();
+        for index in 0..count {
+            data.transcript.segments.push(Segment {
+                id: uuid::Uuid::now_v7(), speaker: SpeakerId("s1".into()), channel: Channel::System,
+                start_ms: index * 1000, end_ms: (index + 1) * 1000,
+                text: "A realistic transcript turn with enough words to wrap on a narrow window. Повторяемая реплика для проверки виртуализации.".into(),
+                source: Source::Final, edited: false, lang: None,
+            });
+        }
+        let document = Document {
+            data,
+            speaker_ui: Default::default(),
+            attachments_pending: 0,
+            notes_cursor: None,
+            inserted_cursor: None,
+            dirty: Default::default(),
+            saving: false,
+            changed_at: Instant::now(),
+            generation: None,
+            template: "general".into(),
+            summary_status: None,
+        };
+        (dir, document, path)
+    }
+    #[test]
+    fn synthetic_5000_turns_layout_is_bounded_by_viewport() {
+        use super::*;
+        let (_dir, mut document, _path) = synthetic_document(5000);
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut samples = Vec::new();
+        let mut maximum = 0;
+        let mut layout = TranscriptCache::default();
+        for frame in 0..8 {
+            ctx.data_mut(|data| {
+                data.insert_temp(egui::Id::unique("transcript-layout-count"), 0_usize)
+            });
+            let start = Instant::now();
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1000.0, 600.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    transcript_view(ui, &mut layout, &mut document, false, None, true, true);
+                },
+            )
+            .drop_without_applying_deltas();
+            let count = ctx
+                .data(|data| data.get_temp::<usize>(egui::Id::unique("transcript-layout-count")))
+                .unwrap();
+            if frame >= 2 {
+                samples.push(start.elapsed().as_secs_f64() * 1000.0);
+            }
+            maximum = maximum.max(count);
+            assert!(count > 0 && count <= 32, "Laid out {count} of 5000 turns");
+            assert!(
+                ctx.data(|data| data.get_temp::<f32>(egui::Id::unique("transcript-viewport-width")))
+                    .unwrap() > 900.0,
+                "virtual content must retain the full viewport width"
+            );
+        }
+        samples.sort_by(f64::total_cmp);
+        eprintln!(
+            "5000-turn transcript median warm frame: {:.3} ms; max laid out: {maximum}/5000",
+            samples[samples.len() / 2]
+        );
+    }
+    #[test]
     fn recording_pill_empty_area_opens_and_drags_without_stopping() {
         use eframe::egui::{self, Event, Modifiers, PointerButton};
         let ctx = egui::Context::default();

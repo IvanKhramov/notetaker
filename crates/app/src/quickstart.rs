@@ -462,3 +462,52 @@ fn probe() -> anyhow::Result<[Status; 2]> {
         }
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn quickstart_advances_three_steps_preserving_name_and_reopens_at_start() {
+        let (mut state, _commands, _events) = crate::test_ui::state();
+        state.ready = true;
+        state.settings.onboarding_complete = Some(false);
+        state.settings_draft = state.settings.clone();
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut panel = Panel::default();
+        panel.reopen();
+        panel.tick(&mut state);
+        assert_eq!(state.settings_draft.onboarding_complete, Some(true));
+        state.settings_draft.user_name = "Before".into();
+        crate::test_ui::click(
+            &ctx,
+            &mut |ui| panel.show(ui.ctx(), &mut state),
+            "Пропустить",
+        );
+        assert_eq!(panel.step, 1);
+        crate::test_ui::replace_text(
+            &ctx,
+            &mut |ui| panel.show(ui.ctx(), &mut state),
+            "Before",
+            "After",
+        );
+        crate::test_ui::click(
+            &ctx,
+            &mut |ui| panel.show(ui.ctx(), &mut state),
+            "Продолжить",
+        );
+        assert_eq!(panel.step, 2);
+        assert_eq!(state.settings_draft.user_name, "After");
+        crate::test_ui::click(
+            &ctx,
+            &mut |ui| panel.show(ui.ctx(), &mut state),
+            "Начать работу",
+        );
+        assert!(!panel.open);
+        assert_eq!(state.settings_draft.user_name, "After");
+        panel.reopen();
+        assert!(panel.open);
+        assert_eq!(panel.step, 0);
+        assert_eq!(state.settings_draft.user_name, "After");
+    }
+}

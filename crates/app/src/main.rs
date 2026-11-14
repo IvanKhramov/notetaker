@@ -19,6 +19,8 @@ mod quickstart;
 mod settings;
 mod speakers;
 mod state;
+#[cfg(test)]
+mod test_ui;
 mod theme;
 mod trackers;
 mod ui;

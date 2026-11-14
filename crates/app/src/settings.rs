@@ -973,3 +973,59 @@ fn setting<R>(ui: &mut egui::Ui, label: &str, value: impl FnOnce(&mut egui::Ui) 
     };
     theme::settings_row_desc(ui, label, description, value)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn editing_profile_keeps_draft_until_saved_and_survives_worker_reply() {
+        let (mut state, commands, events) = crate::test_ui::state();
+        state.ready = true;
+        state.settings.user_name = "Before".into();
+        state.settings_draft = state.settings.clone();
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut panel = Panel::default();
+        let mut maintenance = crate::maintenance::Maintenance::default();
+        let mut organization = crate::organization::Panel::default();
+        let mut open = true;
+        {
+            let mut draw = |ui: &mut egui::Ui| {
+                panel.show(
+                    ui,
+                    &mut open,
+                    &mut state,
+                    &mut maintenance,
+                    &mut organization,
+                );
+            };
+            crate::test_ui::replace_text(&ctx, &mut draw, "Before", "After");
+        }
+        assert_eq!(state.settings_draft.user_name, "After");
+        assert_eq!(state.settings.user_name, "Before");
+        panel.blur(&mut state);
+        let (settings, llm, persist_llm) = commands
+            .try_iter()
+            .find_map(|command| match command {
+                Command::Settings {
+                    settings,
+                    llm,
+                    persist_llm,
+                    ..
+                } => Some((settings, llm, persist_llm)),
+                _ => None,
+            })
+            .expect("profile edit must schedule a settings save");
+        assert_eq!(settings.user_name, "After");
+        events
+            .send(crate::worker::Event::SettingsSaved(
+                Ok((settings, llm)),
+                persist_llm,
+            ))
+            .unwrap();
+        state.poll();
+        assert_eq!(state.settings.user_name, "After");
+        assert_eq!(state.settings_draft.user_name, "After");
+        assert!(!state.settings_pending);
+    }
+}

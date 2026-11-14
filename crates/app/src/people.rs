@@ -1080,3 +1080,67 @@ impl Panel {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn merge_confirmation_cancel_preserves_people_and_confirm_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = Library::open(dir.path()).unwrap();
+        let (mut state, _commands, _events) = crate::test_ui::state();
+        state.settings.library = dir.path().to_owned();
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let from = Person {
+            id: "from".into(),
+            name: "From".into(),
+            identities: ["from".into()].into(),
+            ..Default::default()
+        };
+        let to = Person {
+            id: "to".into(),
+            name: "To".into(),
+            identities: ["to".into()].into(),
+            ..Default::default()
+        };
+        let mut panel = Panel {
+            root: dir.path().to_owned(),
+            snapshot: Some(Snapshot::read(&state.settings).unwrap()),
+            pending_merge: Some((from.clone(), to.clone())),
+            ..Default::default()
+        };
+        crate::test_ui::click(
+            &ctx,
+            &mut |ui| panel.merge_confirmation(ui.ctx(), &state),
+            "Отмена",
+        );
+        assert!(panel.pending_merge.is_none());
+        assert!(panel.receiver.is_none());
+        assert!(library.read_people_edits().unwrap().merges.is_empty());
+        panel.pending_merge = Some((from, to));
+        crate::test_ui::click(
+            &ctx,
+            &mut |ui| panel.merge_confirmation(ui.ctx(), &state),
+            "Объединить",
+        );
+        assert!(panel.pending_merge.is_none());
+        for _ in 0..300 {
+            panel.poll(&ctx, &mut state);
+            if panel.receiver.is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(panel.receiver.is_none());
+        assert_eq!(
+            library
+                .read_people_edits()
+                .unwrap()
+                .merges
+                .get("from")
+                .map(String::as_str),
+            Some("to")
+        );
+    }
+}

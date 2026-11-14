@@ -342,6 +342,10 @@ pub struct AppState {
     rx: Receiver<Event>,
 }
 impl AppState {
+    #[cfg(test)]
+    pub(crate) fn test_channels(tx: Sender<Command>, rx: Receiver<Event>) -> Self {
+        Self::with_channels(tx, rx)
+    }
     pub fn new() -> Self {
         let (tx, rx) = worker::spawn();
         let mut state = Self::with_channels(tx, rx);

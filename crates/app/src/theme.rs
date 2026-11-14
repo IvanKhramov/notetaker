@@ -1639,6 +1639,29 @@ pub fn toast(
 #[cfg(test)]
 mod interaction_tests {
     use super::*;
+    #[test]
+    fn painted_submenu_opens_and_dispatches_its_child_action() {
+        let ctx = egui::Context::default();
+        install(&ctx);
+        let mut selected = false;
+        {
+            let mut draw = |ui: &mut egui::Ui| {
+                let anchor = ui.button("Menu");
+                egui::Popup::menu(&anchor).open(true).show(|ui| {
+                    ui.set_width(300.0);
+                    submenu(ui, icons::COPY, "Copy submenu", |ui| {
+                        if menu_item(ui, icons::COPY, "Child action", false, false).clicked() {
+                            selected = true;
+                            ui.close();
+                        }
+                    });
+                });
+            };
+            crate::test_ui::click(&ctx, &mut draw, "Copy submenu");
+            crate::test_ui::click(&ctx, &mut draw, "Child action");
+        }
+        assert!(selected);
+    }
     fn escape_input() -> egui::RawInput {
         egui::RawInput {
             events: vec![egui::Event::Key {
