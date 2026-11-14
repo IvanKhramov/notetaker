@@ -128,3 +128,15 @@ jobs:
             dist/notetaker-*-macos-arm64.dmg
             dist/notetaker-*-macos-arm64.dmg.sha256
           if-no-files-found: error
+
+  advisories:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Check dependency advisories
+        run: cargo audit
