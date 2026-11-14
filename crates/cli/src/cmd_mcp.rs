@@ -16,36 +16,10 @@ pub struct Options {
     #[arg(long)]
     library: Option<PathBuf>,
 }
-#[derive(Deserialize)]
-struct Preferences {
-    library: Option<PathBuf>,
-    #[serde(default = "exclude_local")]
-    mcp_exclude_local: bool,
-}
-fn exclude_local() -> bool {
-    true
-}
-
+type Preferences = notetaker_core::app_config::AppSettings;
 pub fn run(options: Options) -> Result<()> {
-    let settings = directories::ProjectDirs::from("", "", "notetaker")
-        .context("Нет каталога настроек")?
-        .config_dir()
-        .join("app.toml");
-    let prefs: Preferences = match fs::read_to_string(settings) {
-        Ok(text) => toml::from_str(&text).context("Некорректный app.toml; MCP не запущен")?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Preferences {
-            library: None,
-            mcp_exclude_local: true,
-        },
-        Err(error) => return Err(error.into()),
-    };
-    let root = options.library.or(prefs.library).unwrap_or_else(|| {
-        let home = directories::UserDirs::new();
-        home.as_ref()
-            .map(|d| d.document_dir().unwrap_or(d.home_dir()).to_owned())
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("notetaker")
-    });
+    let prefs = Preferences::load()?;
+    let root = options.library.unwrap_or(prefs.library);
     let server = Server {
         library: Library::open(root)?,
         exclude_local: prefs.mcp_exclude_local,

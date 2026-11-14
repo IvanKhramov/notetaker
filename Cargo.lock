@@ -2991,6 +2991,7 @@ dependencies = [
  "chrono-tz",
  "deunicode",
  "directories",
+ "notetaker-asr-proto",
  "percent-encoding",
  "pulldown-cmark",
  "rusqlite",
