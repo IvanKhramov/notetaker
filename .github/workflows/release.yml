@@ -92,6 +92,7 @@ jobs:
         shell: pwsh
         env:
           SETUP_EXE: ${{ steps.installer.outputs.setup }}
+          GH_TOKEN: ${{ github.token }}
         run: ./scripts/check-installer.ps1 -SetupExe $env:SETUP_EXE
       - name: Create draft release
         shell: pwsh
@@ -109,7 +110,16 @@ jobs:
           if ($LASTEXITCODE -eq 0) {
             if (-not ($release | ConvertFrom-Json).isDraft) { throw 'Refusing to overwrite a published release' }
           } else {
-            gh release create $env:RELEASE_TAG --verify-tag --draft --generate-notes --title "notetaker $env:RELEASE_TAG"
+            $version = [regex]::Escape($env:RELEASE_TAG.TrimStart('v'))
+            $changelog = Get-Content -Raw CHANGELOG.md
+            $section = [regex]::Match($changelog, "(?ms)^## \[$version\][^\r\n]*\r?\n(.*?)(?=^## |\z)")
+            $notesArgs = @('--generate-notes')
+            if ($section.Success -and $section.Groups[1].Value.Trim()) {
+              $notesFile = Join-Path $env:RUNNER_TEMP 'release-notes.md'
+              Set-Content -LiteralPath $notesFile -Value $section.Groups[1].Value.Trim() -Encoding utf8
+              $notesArgs = @('--notes-file', $notesFile)
+            }
+            gh release create $env:RELEASE_TAG --verify-tag --draft @notesArgs --title "notetaker $env:RELEASE_TAG"
             if ($LASTEXITCODE -ne 0) { throw 'GitHub Release creation failed' }
           }
           gh release upload $env:RELEASE_TAG $env:RELEASE_SETUP $env:SETUP_CHECKSUM $env:RELEASE_ZIP $env:RELEASE_CHECKSUM $env:EMBED_EXE $env:EMBED_CHECKSUM --clobber
