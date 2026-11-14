@@ -124,7 +124,14 @@ impl Maintenance {
                 "Проверить обновления"
             };
             if ui
-                .add_enabled(!checking, egui::Button::new(label))
+                .add_enabled(
+                    !checking,
+                    crate::theme::styled_button(
+                        crate::theme::Palette::of(ui),
+                        label,
+                        crate::theme::ButtonStyle::Secondary,
+                    ),
+                )
                 .clicked()
             {
                 self.check_updates_now();
@@ -137,14 +144,22 @@ impl Maintenance {
     }
     pub fn dialogs(&mut self, ctx: &egui::Context, busy: bool) {
         if self.crashed {
-            let close = crate::theme::window(ctx, "Прошлый запуск завершился ошибкой")
+            let close = crate::theme::modal(ctx, "Прошлый запуск завершился ошибкой")
                 .resizable(false)
                 .show(ctx, |ui| {
                     ui.label("Диагностика сохранена в папке логов.");
-                    if ui.button("Открыть папку логов").clicked() {
+                    if crate::theme::button(
+                        ui,
+                        "Открыть папку логов",
+                        crate::theme::ButtonStyle::Ghost,
+                    )
+                    .clicked()
+                    {
                         self.open_logs();
                     }
-                    if ui.button("Закрыть").clicked() {
+                    if crate::theme::button(ui, "Закрыть", crate::theme::ButtonStyle::Ghost)
+                        .clicked()
+                    {
                         self.crashed = false;
                         diagnostics::acknowledge_crash();
                     }
@@ -155,11 +170,13 @@ impl Maintenance {
             }
         }
         if let Some(message) = self.message.clone() {
-            let close = crate::theme::window(ctx, "Диагностика")
+            let close = crate::theme::modal(ctx, "Диагностика")
                 .default_width(460.0)
                 .show(ctx, |ui| {
                     ui.label(message);
-                    if ui.button("Закрыть").clicked() {
+                    if crate::theme::button(ui, "Закрыть", crate::theme::ButtonStyle::Ghost)
+                        .clicked()
+                    {
                         self.message = None;
                     }
                 });

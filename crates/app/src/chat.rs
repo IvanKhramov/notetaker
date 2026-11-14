@@ -87,18 +87,27 @@ impl Panel {
         }
         ui.horizontal(|ui| {
             if let Some(meeting) = &self.scope
-                && ui.button("К встрече").clicked()
+                && crate::theme::button(ui, "К встрече", crate::theme::ButtonStyle::Ghost).clicked()
             {
                 action = Some(Action::Open(meeting.clone(), None));
             }
             if ui
-                .add_enabled(!self.busy, egui::Button::new("Очистить диалог"))
+                .add_enabled(
+                    !self.busy,
+                    crate::theme::styled_button(
+                        crate::theme::Palette::of(ui),
+                        "Очистить диалог",
+                        crate::theme::ButtonStyle::Secondary,
+                    ),
+                )
                 .clicked()
             {
                 self.messages.clear();
                 self.error = None;
             }
-            if self.busy && ui.button("Отменить").clicked() {
+            if self.busy
+                && crate::theme::button(ui, "Отменить", crate::theme::ButtonStyle::Ghost).clicked()
+            {
                 self.cancel.cancel();
             }
         });

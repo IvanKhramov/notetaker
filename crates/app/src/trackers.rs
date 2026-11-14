@@ -101,7 +101,7 @@ impl Panel {
             }
         }
         let mut open = self.open;
-        crate::theme::window(ctx, "Отправить в трекер: предварительный просмотр")
+        crate::theme::modal(ctx, "Отправить в трекер: предварительный просмотр")
             .open(&mut open)
             .default_width(680.0)
             .show(ctx, |ui| {
@@ -113,7 +113,7 @@ impl Panel {
                         crate::theme::card(crate::theme::Palette::of(ui), false).show(ui, |ui| {
                             ui.strong(&p.task.text);
                             ui.label(&p.endpoint);
-                            ui.collapsing("Данные для отправки", |ui| {
+                            crate::theme::disclosure("Данные для отправки").show(ui, |ui| {
                                 ui.monospace(
                                     serde_json::to_string_pretty(&p.body).unwrap_or_default(),
                                 );
@@ -126,65 +126,71 @@ impl Panel {
                 if local {
                     ui.colored_label(
                         ui.visuals().warn_fg_color,
-                        "Это Local-встреча. Задача и фрагмент конспекта покинут компьютер.",
+                        "Это Локально-встреча. Задача и фрагмент конспекта покинут компьютер.",
                     );
-                    ui.checkbox(
+                    ui.add(crate::theme::Checkbox::new(
                         &mut self.local_consent,
-                        "Подтверждаю отправку Local-данных в трекер",
-                    );
+                        "Подтверждаю отправку Локально-данных в трекер",
+                    ));
                 }
-                if ui
-                    .add_enabled(
-                        self.receiver.is_none()
-                            && !self.previews.is_empty()
-                            && (!local || self.local_consent)
-                            && !state.unsaved()
-                            && !state.recording.busy()
-                            && state.enhancing.is_none(),
-                        egui::Button::new("Отправить"),
-                    )
-                    .clicked()
-                {
-                    let previews = self.previews.clone();
-                    let consent = self.local_consent;
-                    let root = state.settings.library.clone();
-                    self.launch(ctx, move || {
-                        let l = Library::open(root)?;
-                        let mut sent = Vec::new();
-                        for p in previews {
-                            // Earlier items in this batch only append issue links. Reload
-                            // revisions, but reject changes to any originally previewed task.
-                            l.reindex_incremental()?;
-                            let current = l
-                                .list_tasks(None, None, false)?
-                                .into_iter()
-                                .find(|t| {
-                                    t.meeting_id == p.task.meeting_id && t.line == p.task.line
-                                })
-                                .ok_or_else(|| anyhow::anyhow!("Задача больше не найдена"))?;
-                            anyhow::ensure!(
-                                current.completed == p.task.completed
-                                    && current.text == p.task.text
-                                    && current.owner == p.task.owner
-                                    && current.due_text == p.task.due_text,
-                                "Задача изменилась; обновите просмотр"
-                            );
-                            if current.issue_url.is_some() {
-                                continue;
+                crate::theme::footer(ui, |ui| {
+                    if ui
+                        .add_enabled(
+                            self.receiver.is_none()
+                                && !self.previews.is_empty()
+                                && (!local || self.local_consent)
+                                && !state.unsaved()
+                                && !state.recording.busy()
+                                && state.enhancing.is_none(),
+                            crate::theme::styled_button(
+                                crate::theme::Palette::of(ui),
+                                "Отправить",
+                                crate::theme::ButtonStyle::Primary,
+                            ),
+                        )
+                        .clicked()
+                    {
+                        let previews = self.previews.clone();
+                        let consent = self.local_consent;
+                        let root = state.settings.library.clone();
+                        self.launch(ctx, move || {
+                            let l = Library::open(root)?;
+                            let mut sent = Vec::new();
+                            for p in previews {
+                                // Earlier items in this batch only append issue links. Reload
+                                // revisions, but reject changes to any originally previewed task.
+                                l.reindex_incremental()?;
+                                let current = l
+                                    .list_tasks(None, None, false)?
+                                    .into_iter()
+                                    .find(|t| {
+                                        t.meeting_id == p.task.meeting_id && t.line == p.task.line
+                                    })
+                                    .ok_or_else(|| anyhow::anyhow!("Задача больше не найдена"))?;
+                                anyhow::ensure!(
+                                    current.completed == p.task.completed
+                                        && current.text == p.task.text
+                                        && current.owner == p.task.owner
+                                        && current.due_text == p.task.due_text,
+                                    "Задача изменилась; обновите просмотр"
+                                );
+                                if current.issue_url.is_some() {
+                                    continue;
+                                }
+                                let mut outgoing = p.clone();
+                                outgoing.task = current;
+                                let url = trackers::send(
+                                    &l,
+                                    &outgoing,
+                                    consent,
+                                    &notetaker_llm::OsCredentialStore,
+                                )?;
+                                sent.push((outgoing.task.path, url));
                             }
-                            let mut outgoing = p.clone();
-                            outgoing.task = current;
-                            let url = trackers::send(
-                                &l,
-                                &outgoing,
-                                consent,
-                                &notetaker_llm::OsCredentialStore,
-                            )?;
-                            sent.push((outgoing.task.path, url));
-                        }
-                        Ok(Response::Sent(sent))
-                    });
-                }
+                            Ok(Response::Sent(sent))
+                        });
+                    }
+                });
                 ui.label(&self.message);
             });
         self.open = open;

@@ -82,6 +82,7 @@ pub struct Panel {
     query: String,
     rename: String,
     merge_into: String,
+    pending_merge: Option<(Person, Person)>,
     show_hidden: bool,
     recent: usize,
     period: usize,
@@ -110,6 +111,7 @@ impl Default for Panel {
             query: String::new(),
             rename: String::new(),
             merge_into: String::new(),
+            pending_merge: None,
             show_hidden: false,
             recent: 10,
             period: 0,
@@ -341,7 +343,14 @@ impl Panel {
                 ),
             ] {
                 if ui
-                    .add_enabled(next.is_some(), egui::Button::new(label))
+                    .add_enabled(
+                        next.is_some(),
+                        crate::theme::styled_button(
+                            crate::theme::Palette::of(ui),
+                            label,
+                            crate::theme::ButtonStyle::Secondary,
+                        ),
+                    )
                     .clicked()
                     && let Some(meeting) = next.and_then(|m| snapshot.meetings.get(&m.path))
                 {
@@ -364,13 +373,20 @@ impl Panel {
                     .cloned()
                     .collect(),
             };
-            ui.collapsing("С прошлой встречи", |ui| {
+            crate::theme::disclosure("С прошлой встречи").show(ui, |ui| {
                 ui.label(carry.markdown());
                 if meta.mode == Mode::Hybrid && previous.meta.mode == Mode::Local {
-                    ui.weak("Источник Local: при вставке встреча станет Local");
+                    ui.weak("Источник Локально: при вставке встреча станет Локально");
                 }
                 if ui
-                    .add_enabled(editable, egui::Button::new("Вставить в заметки"))
+                    .add_enabled(
+                        editable,
+                        crate::theme::styled_button(
+                            crate::theme::Palette::of(ui),
+                            "Вставить в заметки",
+                            crate::theme::ButtonStyle::Secondary,
+                        ),
+                    )
                     .clicked()
                 {
                     action = Some(HeaderAction::Insert(previous.meta.id));
@@ -384,35 +400,95 @@ impl Panel {
             return;
         };
         ui.horizontal(|ui| {
-            if ui.button("К встрече").clicked() {
+            if theme::icon_button(ui, theme::icons::CHEVRON_LEFT, "Назад к встречам").clicked()
+                || theme::button(ui, "Встречи", theme::ButtonStyle::Ghost).clicked()
+            {
                 self.close();
             }
-            if ui
-                .add_enabled(self.receiver.is_none(), egui::Button::new("Обновить"))
-                .clicked()
-            {
-                self.refresh(ui.ctx(), &state.settings);
-            }
-            if self.receiver.is_some() {
-                ui.spinner();
-            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_enabled_ui(self.receiver.is_none(), |ui| {
+                        theme::icon_button(ui, theme::icons::REFRESH_CW, "Обновить")
+                    })
+                    .inner
+                    .clicked()
+                {
+                    self.refresh(ui.ctx(), &state.settings);
+                }
+                if self.receiver.is_some() {
+                    ui.spinner();
+                }
+            });
         });
+        ui.add_space(16.0);
         if let Some(message) = &self.message {
             ui.colored_label(ui.visuals().warn_fg_color, message);
         }
+        let width = ui.available_width();
         egui::ScrollArea::vertical()
             .id_salt("people-screen")
-            .show(ui, |ui| match view {
-                View::People => self.people_screen(ui),
-                View::Person(_) => self.person_screen(ui, state),
-                View::Series(id) => self.series_screen(ui, state, &id),
-                View::Digest => self.digest_screen(ui, state),
+            .max_width(width)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.set_max_width(width);
+                match view {
+                    View::People => self.people_screen(ui),
+                    View::Person(_) => self.person_screen(ui, state),
+                    View::Series(id) => self.series_screen(ui, state, &id),
+                    View::Digest => self.digest_screen(ui, state),
+                }
             });
+        self.merge_confirmation(ui.ctx(), state);
+    }
+    fn merge_confirmation(&mut self, ctx: &egui::Context, state: &AppState) {
+        let Some((from, to)) = self.pending_merge.clone() else {
+            return;
+        };
+        let mut confirm = false;
+        let mut cancel = false;
+        let closed = theme::modal(ctx, "Объединить людей?")
+            .default_width(420.0)
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "Объединить «{}» с «{}»? Имена и связи будут объединены.",
+                    from.name, to.name
+                ));
+                theme::footer(ui, |ui| {
+                    confirm =
+                        theme::button(ui, "Объединить", theme::ButtonStyle::DangerFilled).clicked();
+                    cancel = theme::button(ui, "Отмена", theme::ButtonStyle::Ghost).clicked();
+                });
+            });
+        if confirm {
+            let mut edits = self.snapshot.as_ref().expect("loaded people").edits.clone();
+            edits.merge(&from, &to);
+            self.view = Some(View::Person(to.id));
+            let mut settings = state.settings.clone();
+            settings.folder = self.folder.clone();
+            self.launch(ctx, move || {
+                let library = Library::open(&settings.library)?;
+                library.write_people_edits(&edits)?;
+                Ok(Response::Loaded(Box::new(Snapshot::read(&settings)?)))
+            });
+        }
+        if confirm || cancel || closed {
+            self.pending_merge = None;
+        }
     }
     fn people_screen(&mut self, ui: &mut egui::Ui) {
         theme::page_heading(ui, "Люди");
-        ui.add(egui::TextEdit::singleline(&mut self.query).hint_text("Поиск по имени или почте…"));
-        ui.checkbox(&mut self.show_hidden, "Показать скрытых");
+        ui.scope(|ui| {
+            ui.set_max_width(ui.available_width().min(480.0));
+            theme::search_input(
+                ui,
+                &mut self.query,
+                "people-search",
+                "Поиск по имени или почте…",
+                None,
+            );
+        });
+        theme::toggle_chip(ui, &mut self.show_hidden, "Показать скрытых");
+        ui.spacing_mut().item_spacing.y = 0.0;
         let mut selected = None;
         if let Some(snapshot) = &self.snapshot {
             let mut shown = 0;
@@ -426,45 +502,55 @@ impl Panel {
                         || person.matches(&self.query))
                 {
                     shown += 1;
-                    theme::card(theme::Palette::of(ui), false).show(ui, |ui| {
-                        ui.set_width((ui.available_width() - 2.0).max(1.0));
-                        ui.horizontal(|ui| {
-                            let (rect, _) = ui
-                                .allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
-                            let p = theme::Palette::of(ui);
-                            ui.painter().circle_filled(rect.center(), 16.0, p.selected);
+                    ui.push_id(&person.id, |ui| {
+                        let p = theme::Palette::of(ui);
+                        let (rect, response) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), 48.0),
+                            egui::Sense::click(),
+                        );
+                        theme::row_background(ui, &response, false);
+                        let center = rect.left_center() + egui::vec2(22.0, 0.0);
+                        ui.painter().circle_filled(center, 14.0, p.selected);
+                        ui.painter().text(
+                            center,
+                            egui::Align2::CENTER_CENTER,
+                            person.name.chars().next().unwrap_or('?').to_uppercase(),
+                            theme::medium(13.0),
+                            p.muted,
+                        );
+                        let meta = person.emails.iter().cloned().collect::<Vec<_>>().join(", ");
+                        let title = format!(
+                            "{}{}",
+                            person.name,
+                            if person.hidden { " (скрыт)" } else { "" }
+                        );
+                        ui.painter().text(
+                            rect.left_center()
+                                + egui::vec2(48.0, if meta.is_empty() { 0.0 } else { -8.0 }),
+                            egui::Align2::LEFT_CENTER,
+                            title,
+                            theme::medium(14.0),
+                            p.text,
+                        );
+                        if !meta.is_empty() {
                             ui.painter().text(
-                                rect.center(),
-                                egui::Align2::CENTER_CENTER,
-                                person
-                                    .name
-                                    .chars()
-                                    .next()
-                                    .unwrap_or('?')
-                                    .to_uppercase()
-                                    .to_string(),
-                                theme::semibold(theme::BODY),
+                                rect.left_center() + egui::vec2(48.0, 10.0),
+                                egui::Align2::LEFT_CENTER,
+                                meta,
+                                egui::FontId::proportional(12.0),
                                 p.muted,
                             );
-                            ui.vertical(|ui| {
-                                if ui
-                                    .link(
-                                        egui::RichText::new(format!(
-                                            "{}{}",
-                                            person.name,
-                                            if person.hidden { " (скрыт)" } else { "" }
-                                        ))
-                                        .font(theme::semibold(theme::BODY)),
-                                    )
-                                    .clicked()
-                                {
-                                    selected = Some(person.clone());
-                                }
-                                ui.small(
-                                    person.emails.iter().cloned().collect::<Vec<_>>().join(", "),
-                                );
-                            });
+                        }
+                        response.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::Role::Button,
+                                ui.is_enabled(),
+                                &person.name,
+                            )
                         });
+                        if response.clicked() {
+                            selected = Some(person.clone());
+                        }
                     });
                 }
             }
@@ -483,54 +569,72 @@ impl Panel {
             return;
         };
         theme::page_heading(ui, &page.person.name);
-        ui.label(
-            page.person
-                .emails
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
-        ui.label(format!(
-            "Алиасы: {}",
-            page.person
-                .aliases
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
+        if !page.person.emails.is_empty() {
+            ui.label(
+                egui::RichText::new(
+                    page.person
+                        .emails
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                )
+                .size(12.0)
+                .color(theme::Palette::of(ui).muted),
+            );
+        }
+        if !page.person.aliases.is_empty() {
+            ui.label(
+                egui::RichText::new(format!(
+                    "Алиасы: {}",
+                    page.person
+                        .aliases
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+                .size(12.0)
+                .color(theme::Palette::of(ui).muted),
+            );
+        }
         let mut changed = None;
         ui.add_enabled_ui(self.receiver.is_none(), |ui| {
-            ui.collapsing("Изменить человека", |ui| {
-                ui.text_edit_singleline(&mut self.rename);
+            crate::theme::disclosure("Изменить человека").show(ui, |ui| {
+                ui.add(crate::theme::text_field(&mut self.rename));
                 let mut edits = self
                     .snapshot
                     .as_ref()
                     .map(|s| s.edits.clone())
                     .unwrap_or_default();
-                if ui.button("Переименовать").clicked() {
+                if crate::theme::button(ui, "Переименовать", crate::theme::ButtonStyle::Ghost)
+                    .clicked()
+                {
                     edits.rename(&page.person, &self.rename);
                     changed = Some(edits.clone());
                 }
-                if ui
-                    .button(if page.person.hidden {
+                if crate::theme::button(
+                    ui,
+                    if page.person.hidden {
                         "Показать"
                     } else {
                         "Скрыть"
-                    })
-                    .clicked()
+                    },
+                    crate::theme::ButtonStyle::Ghost,
+                )
+                .clicked()
                 {
                     edits.set_hidden(&page.person, !page.person.hidden);
                     changed = Some(edits.clone());
                 }
-                egui::ComboBox::from_id_salt("merge-person")
+                crate::theme::select("merge-person")
                     .selected_text("Объединить с...")
                     .show_ui(ui, |ui| {
                         if let Some(snapshot) = &self.snapshot {
                             for other in &snapshot.people {
                                 if other.id != page.person.id {
-                                    ui.selectable_value(
+                                    crate::theme::select_value(
+                                        ui,
                                         &mut self.merge_into,
                                         other.id.clone(),
                                         format!(
@@ -551,7 +655,11 @@ impl Panel {
                 if ui
                     .add_enabled(
                         !self.merge_into.is_empty(),
-                        egui::Button::new("Объединить выбранных людей"),
+                        crate::theme::styled_button(
+                            crate::theme::Palette::of(ui),
+                            "Объединить выбранных людей",
+                            crate::theme::ButtonStyle::Secondary,
+                        ),
                     )
                     .clicked()
                     && let Some(other) = self
@@ -559,9 +667,7 @@ impl Panel {
                         .as_ref()
                         .and_then(|s| s.people.iter().find(|p| p.id == self.merge_into))
                 {
-                    edits.merge(&page.person, other);
-                    self.view = Some(View::Person(other.id.clone()));
-                    changed = Some(edits);
+                    self.pending_merge = Some((page.person.clone(), other.clone()));
                 }
             });
         });
@@ -583,13 +689,19 @@ impl Panel {
             generate = ui
                 .add_enabled(
                     self.receiver.is_none(),
-                    egui::Button::new("Сводка по человеку"),
+                    crate::theme::styled_button(
+                        crate::theme::Palette::of(ui),
+                        "Сводка по человеку",
+                        crate::theme::ButtonStyle::Secondary,
+                    ),
                 )
                 .clicked();
         });
         if !self.brief.is_empty() {
             ui.label(&self.brief);
-            if ui.button("Копировать сводку").clicked() {
+            if crate::theme::button(ui, "Копировать сводку", crate::theme::ButtonStyle::Ghost)
+                .clicked()
+            {
                 ui.ctx().copy_text(self.brief.clone());
                 state
                     .notices
@@ -725,12 +837,12 @@ impl Panel {
         if self.period == 2 {
             ui.horizontal(|ui| {
                 ui.label("С (YYYY-MM-DD):");
-                ui.text_edit_singleline(&mut self.start);
+                ui.add(crate::theme::text_field(&mut self.start));
                 ui.label("До (не включая):");
-                ui.text_edit_singleline(&mut self.end);
+                ui.add(crate::theme::text_field(&mut self.end));
             });
         }
-        egui::ComboBox::from_id_salt("digest-person")
+        crate::theme::select("digest-person")
             .selected_text(
                 self.snapshot
                     .as_ref()
@@ -738,10 +850,11 @@ impl Panel {
                     .map_or("Все люди", |p| p.name.as_str()),
             )
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.filter_person, String::new(), "Все люди");
+                crate::theme::select_value(ui, &mut self.filter_person, String::new(), "Все люди");
                 if let Some(snapshot) = &self.snapshot {
                     for person in snapshot.people.iter().filter(|p| !p.hidden) {
-                        ui.selectable_value(
+                        crate::theme::select_value(
+                            ui,
                             &mut self.filter_person,
                             person.id.clone(),
                             &person.name,
@@ -749,7 +862,7 @@ impl Panel {
                     }
                 }
             });
-        egui::ComboBox::from_id_salt("digest-series")
+        crate::theme::select("digest-series")
             .selected_text(
                 self.snapshot
                     .as_ref()
@@ -757,10 +870,11 @@ impl Panel {
                     .map_or("Все серии", |s| s.title.as_str()),
             )
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.filter_series, String::new(), "Все серии");
+                crate::theme::select_value(ui, &mut self.filter_series, String::new(), "Все серии");
                 if let Some(snapshot) = &self.snapshot {
                     for series in &snapshot.series {
-                        ui.selectable_value(
+                        crate::theme::select_value(
+                            ui,
                             &mut self.filter_series,
                             series.id.clone(),
                             &series.title,
@@ -769,12 +883,24 @@ impl Panel {
                 }
             });
         if self.digest.is_none() && self.receiver.is_none() {
-            ui.weak("Выберите период и участников, чтобы собрать итоги встреч.");
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(
+                        "Выберите период и участников, чтобы собрать итоги встреч.",
+                    )
+                    .color(theme::Palette::of(ui).muted),
+                )
+                .wrap(),
+            );
         }
         if ui
             .add_enabled(
                 self.receiver.is_none(),
-                egui::Button::new("Создать дайджест"),
+                crate::theme::styled_button(
+                    crate::theme::Palette::of(ui),
+                    "Создать дайджест",
+                    crate::theme::ButtonStyle::Secondary,
+                ),
             )
             .clicked()
         {
@@ -815,13 +941,17 @@ impl Panel {
         }
         if let Some((digest, path)) = &self.digest {
             ui.horizontal(|ui| {
-                if ui.button("Копировать").clicked() {
+                if crate::theme::button(ui, "Копировать", crate::theme::ButtonStyle::Ghost)
+                    .clicked()
+                {
                     ui.ctx().copy_text(digest.markdown.clone());
                     state
                         .notices
                         .push((theme::ToastLevel::Success, "Дайджест скопирован".into()));
                 }
-                if ui.button("Показать в папке").clicked() {
+                if crate::theme::button(ui, "Показать в папке", crate::theme::ButtonStyle::Ghost)
+                    .clicked()
+                {
                     state.send(Command::Reveal(path.clone()));
                 }
             });
