@@ -313,23 +313,12 @@ impl Meeting {
         update: impl FnOnce(&mut MeetingMeta),
     ) -> Result<()> {
         let started = std::time::Instant::now();
+        // Threads of this process hold the mutex only for a short metadata write, so
+        // waiting for it is safe. Polling it with a timeout starves under contention:
+        // a thread that re-locks in a loop wins every time. The timeout applies to the
+        // file lock, whose holder is another process.
         let lock = meeting_lock(&self.path);
-        let _guard = loop {
-            match lock.try_lock() {
-                Ok(guard) => break guard,
-                Err(std::sync::TryLockError::Poisoned(error)) => break error.into_inner(),
-                Err(std::sync::TryLockError::WouldBlock) if started.elapsed() < timeout => {
-                    std::thread::sleep(std::time::Duration::from_millis(25));
-                }
-                Err(std::sync::TryLockError::WouldBlock) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "meeting metadata mutex timed out",
-                    )
-                    .into());
-                }
-            }
-        };
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         let _file_guard =
             lock_meeting_files_for(&self.path, timeout.saturating_sub(started.elapsed()))?;
         let loaded = load_text(&self.source_path("meta.yaml")?)?;
