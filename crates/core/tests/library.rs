@@ -113,7 +113,22 @@ fn roundtrip_and_atomic_replacement() {
         meeting.path().join("audio/system.opus")
     );
     assert!(!meeting.mic_audio_path().exists());
-    assert_eq!(fs::read_dir(meeting.path()).unwrap().count(), 5);
+    let mut files = fs::read_dir(meeting.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect::<Vec<_>>();
+    files.sort();
+    assert_eq!(
+        files,
+        [
+            ".notetaker.lock",
+            "audio",
+            "enhanced.md",
+            "meta.yaml",
+            "notes.md",
+            "transcript.json"
+        ]
+    );
 }
 
 #[test]
