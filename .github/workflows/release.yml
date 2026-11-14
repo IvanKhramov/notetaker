@@ -146,7 +146,13 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
           RELEASE_DMG: ${{ steps.package.outputs.dmg }}
           RELEASE_CHECKSUM: ${{ steps.package.outputs.checksum }}
-        run: gh release upload "$RELEASE_TAG" "$RELEASE_DMG" "$RELEASE_CHECKSUM" --clobber
+        run: |
+          # A published release is final: a re-run must not replace its files.
+          if [ "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" != "true" ]; then
+            echo "Release $RELEASE_TAG is already published; refusing to replace its assets." >&2
+            exit 1
+          fi
+          gh release upload "$RELEASE_TAG" "$RELEASE_DMG" "$RELEASE_CHECKSUM" --clobber
 
   # Signs the installer checksum with a key that never leaves this job. It uses no
   # third-party actions: see docs/release-signing.md.
