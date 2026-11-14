@@ -142,8 +142,7 @@ impl Panel {
         let mut quickstart = false;
         let previous_section = self.section;
         let mut close = false;
-        close |= !egui::Popup::is_any_open(&ctx)
-            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        close |= theme::escape_to_close(&ctx);
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()

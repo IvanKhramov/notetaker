@@ -233,7 +233,7 @@ pub fn count_control(
         if let Some(reason) = unavailable {
             response.on_hover_text(reason);
         }
-        if remote_count(&document.data.transcript) >= 2 {
+        if can_merge(&timeline) {
             ui.add_enabled_ui(editable, |ui| merge_menu(ui, &timeline, &mut edit));
         }
         if document.speaker_ui.recalculating {
@@ -262,6 +262,10 @@ pub fn count_control(
     }
     ui.add_space(8.0);
     (apply, edit)
+}
+
+fn can_merge(timeline: &notetaker_core::SpeakerTimeline) -> bool {
+    timeline.speakers.len() >= 2
 }
 
 pub fn controls(
@@ -394,6 +398,27 @@ fn selection_controls(
 mod tests {
     use super::*;
     use notetaker_core::{Channel, Segment, Source, SpeakerId};
+    #[test]
+    fn microphone_and_one_system_speaker_can_be_merged() {
+        let mut transcript = Transcript::default();
+        for (speaker, channel) in [("me", Channel::Mic), ("s1", Channel::System)] {
+            transcript.segments.push(Segment {
+                id: Uuid::now_v7(),
+                speaker: SpeakerId(speaker.into()),
+                channel,
+                start_ms: 0,
+                end_ms: 100,
+                text: String::new(),
+                source: Source::Final,
+                edited: false,
+                lang: None,
+            });
+        }
+        assert_eq!(remote_count(&transcript), 1);
+        assert!(can_merge(&transcript.speaker_timeline()));
+        transcript.segments.pop();
+        assert!(!can_merge(&transcript.speaker_timeline()));
+    }
     #[test]
     fn selection_supports_click_shift_and_ctrl_ranges() {
         let mut transcript = Transcript::default();

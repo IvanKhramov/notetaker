@@ -365,7 +365,7 @@ impl Panel {
                     if theme::button(ui, "Пропустить", crate::theme::ButtonStyle::Ghost).clicked() { next = true; }
                 });
             });
-        if modal.should_close() {
+        if theme::modal_should_close(&modal) {
             open = false;
         }
         if next {

@@ -131,6 +131,45 @@ pub fn sync_zoom(ctx: &egui::Context, applied: &mut Option<f32>, desired: &mut f
 }
 
 pub fn install(ctx: &egui::Context) {
+    // egui clears focus on Esc before UI code runs. Keep the text edit that
+    // owned focus at the previous pass end, scoped to each viewport.
+    ctx.on_begin_pass(
+        "notetaker-escape-focus",
+        std::sync::Arc::new(|ctx| {
+            if ctx.current_pass_index() == 0 {
+                let id = escape_focus_id(ctx);
+                let previous = ctx
+                    .data(|data| data.get_temp::<EscapeFocus>(id))
+                    .unwrap_or_default();
+                let at_start = previous
+                    .last_text_edit
+                    .is_some_and(|id| ctx.memory(|mem| mem.had_focus_last_frame(id)));
+                ctx.data_mut(|data| {
+                    data.insert_temp(
+                        id,
+                        EscapeFocus {
+                            at_start,
+                            ..previous
+                        },
+                    )
+                });
+            }
+        }),
+    );
+    ctx.on_end_pass(
+        "notetaker-escape-focus",
+        std::sync::Arc::new(|ctx| {
+            let last_text_edit = ctx
+                .memory(|mem| mem.focused())
+                .filter(|id| egui::text_edit::TextEditState::load(ctx, *id).is_some());
+            let id = escape_focus_id(ctx);
+            ctx.data_mut(|data| {
+                let mut focus = data.get_temp::<EscapeFocus>(id).unwrap_or_default();
+                focus.last_text_edit = last_text_edit;
+                data.insert_temp(id, focus);
+            });
+        }),
+    );
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
         "Inter".into(),
@@ -267,6 +306,33 @@ pub fn install(ctx: &egui::Context) {
         v.widgets.open.bg_fill = p.selected;
         ctx.set_style_of(theme, style);
     }
+}
+
+#[derive(Clone, Copy, Default)]
+struct EscapeFocus {
+    last_text_edit: Option<egui::Id>,
+    at_start: bool,
+}
+
+fn escape_focus_id(ctx: &egui::Context) -> egui::Id {
+    egui::Id::unique(("escape-text-focus", ctx.viewport_id()))
+}
+
+pub fn escape_to_close(ctx: &egui::Context) -> bool {
+    let text_edit_had_focus = ctx
+        .data(|data| data.get_temp::<EscapeFocus>(escape_focus_id(ctx)))
+        .is_some_and(|focus| focus.at_start);
+    !text_edit_had_focus
+        && !egui::Popup::is_any_open(ctx)
+        && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+}
+
+pub fn modal_should_close<T>(response: &egui::ModalResponse<T>) -> bool {
+    response.backdrop_response.clicked()
+        || response.response.should_close()
+        || (response.is_top_modal
+            && !response.any_popup_open
+            && escape_to_close(&response.response.ctx))
 }
 
 /// Shared document-style dialog header, with a quiet title and a close action.
@@ -419,13 +485,10 @@ impl<'a> Dialog<'a> {
                         }),
                 )
                 .show(ctx, body);
-            close |= response.should_close();
+            close |= modal_should_close(&response);
         }
         // Esc closes the dialog unless a menu or combo box is open and takes it first.
-        close |= self.anchored
-            && !popup_was_open
-            && !egui::Popup::is_any_open(ctx)
-            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        close |= self.anchored && !popup_was_open && escape_to_close(ctx);
         if close && let Some(open) = self.open {
             *open = false;
         }
@@ -921,7 +984,7 @@ pub fn switch(ui: &mut egui::Ui, value: &mut bool, label: &str) -> egui::Respons
     response
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToastLevel {
     Info,
     Success,
@@ -1498,6 +1561,7 @@ pub fn toast(
     id: egui::Id,
     level: ToastLevel,
     text: &str,
+    count: u64,
     action: Option<&str>,
 ) -> ToastResponse {
     let p = Palette::of(ui);
@@ -1541,9 +1605,19 @@ pub fn toast(
                                     .clicked();
                             });
                             ui.vertical(|ui| {
-                                ui.add(
-                                    egui::Label::new(egui::RichText::new(text).size(14.0)).wrap(),
-                                );
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.add(
+                                        egui::Label::new(egui::RichText::new(text).size(14.0))
+                                            .wrap(),
+                                    );
+                                    if count > 1 {
+                                        ui.label(
+                                            egui::RichText::new(format!("×{count}"))
+                                                .size(12.0)
+                                                .color(p.tertiary),
+                                        );
+                                    }
+                                });
                                 if let Some(action) = action {
                                     result.action =
                                         button(ui, action, ButtonStyle::Ghost).clicked();
@@ -1562,6 +1636,113 @@ pub fn toast(
 #[cfg(test)]
 mod interaction_tests {
     use super::*;
+    fn escape_input() -> egui::RawInput {
+        egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn escape_first_leaves_text_edit_then_closes_page() {
+        for check_before_field in [true, false] {
+            let ctx = egui::Context::default();
+            install(&ctx);
+            let mut draft = "Draft".to_owned();
+            ctx.run_ui(Default::default(), |ui| {
+                ui.text_edit_singleline(&mut draft).request_focus();
+            })
+            .drop_without_applying_deltas();
+            assert!(ctx.text_edit_focused());
+            ctx.run_ui(escape_input(), |ui| {
+                if check_before_field {
+                    assert!(!escape_to_close(ui.ctx()));
+                }
+                ui.text_edit_singleline(&mut draft);
+                if !check_before_field {
+                    assert!(!escape_to_close(ui.ctx()));
+                }
+                if ui.ctx().current_pass_index() == 0 {
+                    ui.ctx()
+                        .request_discard("Check the focus guard across layout passes");
+                }
+            })
+            .drop_without_applying_deltas();
+            assert!(!ctx.text_edit_focused());
+            ctx.run_ui(escape_input(), |ui| {
+                assert!(escape_to_close(ui.ctx()));
+                ui.text_edit_singleline(&mut draft);
+            })
+            .drop_without_applying_deltas();
+            assert_eq!(draft, "Draft");
+        }
+    }
+    #[test]
+    fn escape_first_unfocuses_rename_field_without_closing_modal() {
+        let ctx = egui::Context::default();
+        install(&ctx);
+        let mut draft = "New name".to_owned();
+        let mut open = true;
+        for _ in 0..2 {
+            ctx.run_pass(Default::default(), |ctx| {
+                modal(ctx, "Rename").open(&mut open).show(ctx, |ui| {
+                    ui.text_edit_singleline(&mut draft).request_focus();
+                });
+            })
+            .drop_without_applying_deltas();
+        }
+        assert!(ctx.text_edit_focused());
+        ctx.run_pass(escape_input(), |ctx| {
+            assert!(!modal(ctx, "Rename").open(&mut open).show(ctx, |ui| {
+                ui.text_edit_singleline(&mut draft);
+            }));
+        })
+        .drop_without_applying_deltas();
+        assert!(open);
+        assert!(!ctx.text_edit_focused());
+        assert_eq!(draft, "New name");
+        ctx.run_pass(escape_input(), |ctx| {
+            assert!(modal(ctx, "Rename").open(&mut open).show(ctx, |ui| {
+                ui.text_edit_singleline(&mut draft);
+            }));
+        })
+        .drop_without_applying_deltas();
+        assert!(!open);
+    }
+    #[test]
+    fn escape_guard_also_protects_direct_modals() {
+        let ctx = egui::Context::default();
+        install(&ctx);
+        let mut draft = "Name".to_owned();
+        let mut draw = |ctx: &egui::Context, focus: bool| {
+            let response = egui::Modal::new(egui::Id::unique("onboarding-test")).show(ctx, |ui| {
+                let response = ui.text_edit_singleline(&mut draft);
+                if focus {
+                    response.request_focus();
+                }
+            });
+            modal_should_close(&response)
+        };
+        for _ in 0..2 {
+            ctx.run_pass(Default::default(), |ctx| {
+                draw(ctx, true);
+            })
+            .drop_without_applying_deltas();
+        }
+        ctx.run_pass(escape_input(), |ctx| {
+            assert!(!draw(ctx, false));
+        })
+        .drop_without_applying_deltas();
+        ctx.run_pass(escape_input(), |ctx| {
+            assert!(draw(ctx, false));
+        })
+        .drop_without_applying_deltas();
+    }
     fn enter() -> egui::Event {
         egui::Event::Key {
             key: egui::Key::Enter,
@@ -1659,7 +1840,7 @@ mod interaction_tests {
                 },
                 |ui| {
                     ui.set_max_width(340.0);
-                    closed = toast(ui, id, ToastLevel::Success, "Скопировано", None).close;
+                    closed = toast(ui, id, ToastLevel::Success, "Скопировано", 1, None).close;
                 },
             )
             .drop_without_applying_deltas();

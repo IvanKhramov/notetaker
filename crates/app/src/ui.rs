@@ -27,6 +27,7 @@ struct Toast {
     path: Option<std::path::PathBuf>,
     retry_settings: bool,
     level: ToastLevel,
+    count: u64,
     focused_for: Duration,
     last_tick: Instant,
     was_focused: bool,
@@ -1590,46 +1591,38 @@ impl NotetakerApp {
             .map(|text| (ToastLevel::Warning, text))
             .chain(self.state.notices.drain(..))
         {
-            if self.toasts.len() >= 5
-                && let Some(index) = self
-                    .toasts
-                    .iter()
-                    .position(|t| matches!(t.level, ToastLevel::Info | ToastLevel::Success))
-            {
-                self.toasts.remove(index);
-            }
-            self.toasts.push_back(Toast {
-                at: Instant::now(),
-                text: notetaker_core::display_text(&text),
-                path: None,
-                retry_settings: matches!(level, ToastLevel::Error)
-                    && self.state.settings_autosave.error.as_deref() == Some(text.as_str()),
-                level,
-                focused_for: Duration::ZERO,
-                last_tick: Instant::now(),
-                was_focused: focused,
-            });
+            push_toast(
+                &mut self.toasts,
+                Toast {
+                    at: Instant::now(),
+                    text: notetaker_core::display_text(&text),
+                    path: None,
+                    retry_settings: matches!(level, ToastLevel::Error)
+                        && self.state.settings_autosave.error.as_deref() == Some(text.as_str()),
+                    level,
+                    count: 1,
+                    focused_for: Duration::ZERO,
+                    last_tick: Instant::now(),
+                    was_focused: focused,
+                },
+            );
         }
         for path in self.state.exported.drain(..) {
-            if self.toasts.len() >= 5
-                && let Some(index) = self
-                    .toasts
-                    .iter()
-                    .position(|t| matches!(t.level, ToastLevel::Info | ToastLevel::Success))
-            {
-                self.toasts.remove(index);
-            }
             let name = path.file_name().unwrap_or_default().to_string_lossy();
-            self.toasts.push_back(Toast {
-                at: Instant::now(),
-                text: format!("Файл обновлён: {name}"),
-                path: Some(path),
-                retry_settings: false,
-                level: ToastLevel::Success,
-                focused_for: Duration::ZERO,
-                last_tick: Instant::now(),
-                was_focused: focused,
-            });
+            push_toast(
+                &mut self.toasts,
+                Toast {
+                    at: Instant::now(),
+                    text: format!("Файл обновлён: {name}"),
+                    path: Some(path),
+                    retry_settings: false,
+                    level: ToastLevel::Success,
+                    count: 1,
+                    focused_for: Duration::ZERO,
+                    last_tick: Instant::now(),
+                    was_focused: focused,
+                },
+            );
         }
         self.advance_toasts(ctx);
         if self.toasts.is_empty() && self.state.error.is_none() {
@@ -1657,6 +1650,7 @@ impl NotetakerApp {
                         egui::Id::unique(("toast", toast.at)),
                         toast.level,
                         &toast.text,
+                        toast.count,
                         if toast.retry_settings {
                             Some("Повторить")
                         } else {
@@ -3343,6 +3337,28 @@ impl Toast {
     }
 }
 
+fn push_toast(queue: &mut VecDeque<Toast>, toast: Toast) {
+    if let Some(existing) = queue
+        .iter_mut()
+        .find(|t| t.level == toast.level && t.text == toast.text)
+    {
+        existing.count = existing.count.saturating_add(toast.count);
+        existing.retry_settings |= toast.retry_settings;
+        if toast.path.is_some() {
+            existing.path = toast.path;
+        }
+        return;
+    }
+    queue.push_back(toast);
+    while queue.len() > 5 {
+        let oldest = queue
+            .iter()
+            .position(|t| t.level != ToastLevel::Error)
+            .unwrap_or(0);
+        queue.remove(oldest);
+    }
+}
+
 #[cfg(test)]
 mod toast_lifetime_tests {
     use super::*;
@@ -3353,6 +3369,7 @@ mod toast_lifetime_tests {
             path: None,
             retry_settings: false,
             level,
+            count: 1,
             focused_for: Duration::ZERO,
             last_tick: now,
             was_focused: false,
@@ -3392,5 +3409,51 @@ mod toast_lifetime_tests {
         let success = toast(start, ToastLevel::Success);
         assert!(!success.expired(start + Duration::from_secs(5)));
         assert!(success.expired(start + Duration::from_secs(6)));
+    }
+    #[test]
+    fn identical_toasts_collapse_by_level_and_text() {
+        let now = Instant::now();
+        let mut queue = VecDeque::new();
+        for _ in 0..1000 {
+            push_toast(&mut queue, toast(now, ToastLevel::Warning));
+        }
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].count, 1000);
+        assert_eq!(queue[0].focused_for, Duration::ZERO);
+        push_toast(&mut queue, toast(now, ToastLevel::Error));
+        assert_eq!(queue.len(), 2);
+        let mut retry = toast(now, ToastLevel::Error);
+        retry.retry_settings = true;
+        push_toast(&mut queue, retry);
+        assert_eq!(queue[1].count, 2);
+        assert!(queue[1].retry_settings);
+        assert!(!queue[1].expired(now + Duration::from_secs(60)));
+    }
+    #[test]
+    fn toast_queue_is_bounded_and_evicts_non_errors_before_errors() {
+        let now = Instant::now();
+        let mut queue = VecDeque::new();
+        for index in 0..100 {
+            let mut error = toast(now, ToastLevel::Error);
+            error.text = format!("error {index}");
+            push_toast(&mut queue, error);
+            assert!(queue.len() <= 5);
+        }
+        assert_eq!(queue[0].text, "error 95");
+        push_toast(&mut queue, toast(now, ToastLevel::Warning));
+        assert_eq!(queue.len(), 5);
+        assert_eq!(queue[0].text, "error 95");
+        assert!(queue.iter().all(|t| t.level == ToastLevel::Error));
+        queue.pop_front();
+        push_toast(&mut queue, toast(now, ToastLevel::Warning));
+        assert_eq!(queue[0].text, "error 96");
+        for index in 0..100 {
+            let mut warning = toast(now, ToastLevel::Warning);
+            warning.text = format!("warning {index}");
+            push_toast(&mut queue, warning);
+            assert_eq!(queue.len(), 5);
+            assert_eq!(queue[0].text, "error 96");
+        }
+        assert_eq!(queue[4].text, "warning 99");
     }
 }

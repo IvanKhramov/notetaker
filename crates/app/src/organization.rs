@@ -120,13 +120,7 @@ impl Panel {
                         state.semantic_progress = None;
                         state.semantic_note = None;
                     }
-                    if let Some(name) = self.pending_folder_name.take() {
-                        self.folder_name = name.clone();
-                        self.edit_name = name;
-                        self.secret.clear();
-                    }
-                    self.settings_revision = snapshot.folders.revision;
-                    self.snapshot = Some(snapshot);
+                    self.apply_snapshot(snapshot);
                     if !state.unsaved() && !state.recording.busy() && state.enhancing.is_none() {
                         let current = state
                             .selected
@@ -332,12 +326,30 @@ impl Panel {
         self.selected.clear();
     }
     fn edit_folder(&mut self, name: &str) {
+        self.load_folder_editor(name);
+        self.settings_open = true;
+    }
+    fn apply_snapshot(&mut self, snapshot: Snapshot) {
+        self.settings_revision = snapshot.folders.revision;
+        self.snapshot = Some(snapshot);
+        if let Some(name) = self.pending_folder_name.take() {
+            self.load_folder_editor(&name);
+        }
+    }
+    fn load_folder_editor(&mut self, name: &str) {
         self.folder_name = name.into();
         self.edit_name = name.into();
-        if let Some(s) = &self.snapshot {
-            self.edit = s.folders.value.get(name).cloned().unwrap_or_default();
-            self.settings_revision = s.folders.revision;
-        }
+        self.edit = self
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.folders.value.get(name))
+            .cloned()
+            .unwrap_or_default();
+        self.settings_revision = self
+            .snapshot
+            .as_ref()
+            .map(|s| s.folders.revision)
+            .unwrap_or_default();
         self.secret.clear();
         self.owners_json = serde_json::to_string(
             &self
@@ -349,7 +361,7 @@ impl Panel {
         )
         .unwrap_or_default();
         self.destinations = Default::default();
-        self.settings_open = true;
+        self.destinations_rx = None;
     }
     pub fn meeting(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
         let Some(path) = state.selected.clone() else {
@@ -600,8 +612,6 @@ impl Panel {
                         self.message = "Укажите имя папки".into();
                     } else if let Some(revision) = revision {
                         self.pending_folder_name = Some(name.clone());
-                        self.edit = Default::default();
-                        self.secret.clear();
                         self.create_name.clear();
                         self.launch(ctx, move |library| {
                             let mut folders = library.load_folders()?;
@@ -1117,4 +1127,110 @@ fn choose(
             }
         });
     before != *selected
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snapshot(folders: Folders) -> Snapshot {
+        Snapshot {
+            folders: Versioned {
+                value: folders,
+                revision: Default::default(),
+            },
+            metas: Default::default(),
+            conflicts: Default::default(),
+            shared: false,
+        }
+    }
+
+    #[test]
+    fn renaming_another_folder_reloads_its_entire_editor() {
+        let settings = FolderSettings {
+            mode: Some(Mode::Local),
+            template: Some("project".into()),
+            vocabulary: "folder B".into(),
+            speaker_hint: Some(3),
+            rules: vec![CalendarRule {
+                title_contains: "B".into(),
+                ..Default::default()
+            }],
+            tracker: Some(TrackerConfig {
+                base_url: "https://tracker.example".into(),
+                owners: BTreeMap::from([("b@example.com".into(), 42)]),
+                ..Default::default()
+            }),
+        };
+        let mut panel = Panel::default();
+        panel.apply_snapshot(snapshot(BTreeMap::from([
+            (
+                "A".into(),
+                FolderSettings {
+                    mode: Some(Mode::Hybrid),
+                    ..Default::default()
+                },
+            ),
+            ("B".into(), settings.clone()),
+        ])));
+        panel.edit_folder("A");
+        panel.secret = "unsaved draft".into();
+        let (_tx, rx) = mpsc::channel();
+        panel.destinations_rx = Some(rx);
+        panel.pending_folder_name = Some("C".into());
+        panel.apply_snapshot(snapshot(BTreeMap::from([("C".into(), settings.clone())])));
+        assert_eq!(panel.folder_name, "C");
+        assert_eq!(panel.edit_name, "C");
+        assert_eq!(
+            serde_json::to_value(&panel.edit).unwrap(),
+            serde_json::to_value(&settings).unwrap()
+        );
+        assert_eq!(
+            serde_json::from_str::<BTreeMap<String, u64>>(&panel.owners_json).unwrap(),
+            settings.tracker.unwrap().owners
+        );
+        assert!(panel.secret.is_empty());
+        assert!(panel.destinations_rx.is_none());
+    }
+
+    #[test]
+    fn selecting_creating_and_deleting_folders_reset_editor_fields() {
+        let mut panel = Panel::default();
+        panel.apply_snapshot(snapshot(BTreeMap::from([
+            (
+                "A".into(),
+                FolderSettings {
+                    vocabulary: "A".into(),
+                    ..Default::default()
+                },
+            ),
+            (
+                "B".into(),
+                FolderSettings {
+                    vocabulary: "B".into(),
+                    ..Default::default()
+                },
+            ),
+        ])));
+        panel.edit_folder("A");
+        panel.edit_folder("B");
+        assert_eq!(panel.edit.vocabulary, "B");
+        panel.pending_folder_name = Some("new".into());
+        panel.apply_snapshot(snapshot(BTreeMap::from([(
+            "new".into(),
+            Default::default(),
+        )])));
+        assert_eq!(panel.folder_name, "new");
+        assert!(panel.edit.vocabulary.is_empty());
+        panel.edit.vocabulary = "unsaved".into();
+        panel.pending_folder_name = Some(String::new());
+        panel.apply_snapshot(snapshot(Default::default()));
+        assert!(panel.folder_name.is_empty());
+        assert!(panel.edit_name.is_empty());
+        assert!(panel.edit.vocabulary.is_empty());
+        panel.edit.vocabulary = "stale".into();
+        panel.snapshot = None;
+        panel.edit_folder("missing");
+        assert!(panel.edit.vocabulary.is_empty());
+    }
 }
