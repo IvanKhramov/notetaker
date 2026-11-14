@@ -97,6 +97,7 @@ impl Meeting {
         }
         let lock = meeting_lock(&self.path);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _file_guard = crate::storage::lock_meeting_files(&self.path)?;
         let folder = self.path.join("attachments");
         fs::create_dir_all(&folder)?;
         if !directory(&folder)? {
@@ -197,6 +198,7 @@ impl Meeting {
     pub(crate) fn purge_attachment_trash(&self, now: DateTime<Utc>) -> Result<Vec<PathBuf>> {
         let lock = meeting_lock(&self.path);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _file_guard = crate::storage::lock_meeting_files(&self.path)?;
         let folder = self.path.join("attachments");
         let trash = folder.join(".trash");
         if !directory(&folder)? || !directory(&trash)? {

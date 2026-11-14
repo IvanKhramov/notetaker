@@ -152,6 +152,9 @@ impl crate::Meeting {
         )
     }
     fn write_export(&self, suffix: &str, text: &str) -> Result<std::path::PathBuf> {
+        let lock = crate::storage::meeting_lock(&self.path);
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _file_guard = crate::storage::lock_meeting_files(&self.path)?;
         // The folder name is immutable even when the meeting title changes.
         let folder = self
             .path()

@@ -122,6 +122,7 @@ impl Library {
         fs::create_dir_all(path.parent().expect("state parent"))?;
         let lock = meeting_lock(&path);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _file_guard = crate::storage::lock_meeting_files(path.parent().expect("state parent"))?;
         checked_write(&path, text.as_bytes(), expected)
     }
 }

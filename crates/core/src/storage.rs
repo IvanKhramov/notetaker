@@ -44,6 +44,50 @@ pub(crate) fn meeting_lock(path: &Path) -> Arc<Mutex<()>> {
     lock
 }
 
+// Keep this inode permanently: removing/replacing it would split lock holders.
+// Only known content names/extensions are indexed, exported or reconciled.
+pub(crate) fn lock_meeting_files(path: &Path) -> Result<Option<fs::File>> {
+    lock_meeting_files_for(path, std::time::Duration::from_secs(5))
+}
+
+fn lock_meeting_files_for(path: &Path, timeout: std::time::Duration) -> Result<Option<fs::File>> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path.join(".notetaker.lock"))?;
+    let started = std::time::Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(Some(file)),
+            Err(fs::TryLockError::WouldBlock) if started.elapsed() < timeout => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(fs::TryLockError::WouldBlock) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!(
+                        "meeting lock timed out after {timeout:?}: {}",
+                        path.display()
+                    ),
+                )
+                .into());
+            }
+            Err(fs::TryLockError::Error(error))
+                if error.kind() == std::io::ErrorKind::Unsupported =>
+            {
+                tracing::warn!(path = %path.display(), %error,
+                    "file locking unsupported; using in-process meeting lock only");
+                // CLI has no tracing subscriber; the GUI captures stderr in its log.
+                eprintln!("warning: file locking unsupported; using in-process meeting lock only");
+                return Ok(None);
+            }
+            Err(fs::TryLockError::Error(error)) => return Err(error.into()),
+        }
+    }
+}
+
 /// A library root. All returned meeting paths are absolute.
 #[derive(Debug, Clone)]
 pub struct Library {
@@ -245,6 +289,7 @@ impl Meeting {
     pub fn update_meta(&self, update: impl FnOnce(&mut MeetingMeta)) -> Result<()> {
         let lock = meeting_lock(&self.path);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _file_guard = crate::storage::lock_meeting_files(&self.path)?;
         let loaded = load_text(&self.source_path("meta.yaml")?)?;
         let mut meta: MeetingMeta = serde_yaml::from_str(&loaded.value)?;
         update(&mut meta);
@@ -257,6 +302,9 @@ impl Meeting {
     }
 
     pub fn write_meta(&self, meta: &MeetingMeta) -> Result<()> {
+        let lock = meeting_lock(&self.path);
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _file_guard = lock_meeting_files(&self.path)?;
         atomic_write(
             &self.path.join("meta.yaml"),
             serde_yaml::to_string(meta)?.as_bytes(),
@@ -269,6 +317,7 @@ impl Meeting {
     pub fn write_notes(&self, notes: &str) -> Result<()> {
         let lock = meeting_lock(&self.path);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _file_guard = crate::storage::lock_meeting_files(&self.path)?;
         atomic_write(&self.path.join("notes.md"), notes.as_bytes())?;
         self.clean_attachments_after_save();
         Ok(())
@@ -279,6 +328,7 @@ impl Meeting {
     pub fn write_enhanced(&self, enhanced: &str) -> Result<()> {
         let lock = meeting_lock(&self.path);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _file_guard = crate::storage::lock_meeting_files(&self.path)?;
         atomic_write(&self.path.join("enhanced.md"), enhanced.as_bytes())?;
         self.clean_attachments_after_save();
         Ok(())
@@ -295,6 +345,7 @@ impl Meeting {
     pub fn write_transcript(&self, transcript: &Transcript) -> Result<()> {
         let lock = meeting_lock(&self.path);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _file_guard = crate::storage::lock_meeting_files(&self.path)?;
         if transcript.version != crate::SCHEMA_VERSION {
             return Err(crate::Error::UnsupportedVersion(transcript.version));
         }
@@ -340,17 +391,19 @@ impl Meeting {
     fn save_checked(&self, name: &str, bytes: &[u8], expected: Revision) -> Result<Revision> {
         let lock = meeting_lock(&self.path);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _file_guard = crate::storage::lock_meeting_files(&self.path)?;
         let revision = checked_write(&self.path.join(name), bytes, expected)?;
         if matches!(name, "notes.md" | "enhanced.md") {
             self.clean_attachments_after_save();
         }
         Ok(revision)
     }
-    /// Serialize read-modify-write across every handle in this process. External
+    /// Serialize read-modify-write across cooperating processes. External
     /// edits made during the closure are detected by the content revision too.
     pub fn update_transcript(&self, update: impl FnOnce(&mut Transcript)) -> Result<()> {
         let lock = meeting_lock(&self.path);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _file_guard = crate::storage::lock_meeting_files(&self.path)?;
         let mut loaded = self.load_transcript()?;
         update(&mut loaded.value);
         if loaded.value.version != crate::SCHEMA_VERSION {
@@ -462,5 +515,63 @@ fn read_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
         Ok(bytes) => Ok(Some(bytes)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.into()),
+    }
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+
+    #[test]
+    fn independent_lock_holder_preserves_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = Library::open(dir.path()).unwrap();
+        let meeting = library
+            .create_meeting(MeetingMeta::new("Original", Utc::now()))
+            .unwrap();
+        // This holder bypasses meeting_lock, like a separate GUI process.
+        let holder = lock_meeting_files(meeting.path()).unwrap().unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (updated_tx, updated_rx) = std::sync::mpsc::channel();
+        let other = meeting.clone();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result = other.update_meta(|m| {
+                updated_tx.send(()).unwrap();
+                m.ended_at = Some(m.started_at);
+            });
+            result.unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(
+            updated_rx
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err()
+        );
+        let mut renamed = meeting.read_meta().unwrap();
+        renamed.title = "Renamed".into();
+        atomic_write(
+            &meeting.path.join("meta.yaml"),
+            serde_yaml::to_string(&renamed).unwrap().as_bytes(),
+        )
+        .unwrap();
+        drop(holder);
+        worker.join().unwrap();
+        let saved = meeting.read_meta().unwrap();
+        assert_eq!(saved.title, "Renamed");
+        assert_eq!(saved.ended_at, Some(saved.started_at));
+        assert_eq!(library.list_meetings().unwrap().len(), 1);
+        assert!(meeting.sync_conflicts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn independent_lock_holder_times_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let _holder = lock_meeting_files(dir.path()).unwrap().unwrap();
+        let error =
+            lock_meeting_files_for(dir.path(), std::time::Duration::from_millis(50)).unwrap_err();
+        assert!(
+            matches!(error, crate::Error::Io(ref e) if e.kind() == std::io::ErrorKind::TimedOut)
+        );
     }
 }
