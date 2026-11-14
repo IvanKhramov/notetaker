@@ -625,3 +625,72 @@ mod retrieval_tests {
         assert!(library.retrieve("\" OR *", 10, false).unwrap().is_empty());
     }
 }
+
+#[cfg(test)]
+mod legacy_compatibility {
+    use super::*;
+
+    #[test]
+    fn opens_0241_index_without_rebuilding_or_changing_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.sqlite");
+        fs::write(
+            &path,
+            include_bytes!("../tests/fixtures/index-0.24.1.sqlite"),
+        )
+        .unwrap();
+        let schema = |c: &Connection| -> Vec<(String, Option<String>)> {
+            c.prepare("SELECT name,sql FROM sqlite_master ORDER BY name")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        let before = schema(&Connection::open(&path).unwrap());
+        let c = connect_index(&path).unwrap();
+        assert_eq!(schema(&c), before);
+        assert_eq!(
+            c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            c.query_row(
+                "SELECT title FROM meetings WHERE meetings MATCH 'compatibility'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "Legacy title"
+        );
+        assert_eq!(
+            c.query_row("SELECT vector FROM semantic_chunks", [], |r| r
+                .get::<_, Vec<u8>>(0))
+                .unwrap(),
+            [0, 0, 128, 63]
+        );
+        for table in ["tasks", "people_sources", "semantic_sources"] {
+            assert_eq!(
+                c.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+        }
+        c.execute("UPDATE meetings SET notes='updated token'", [])
+            .unwrap();
+        drop(c);
+        let reopened = connect_index(&path).unwrap();
+        assert_eq!(
+            reopened
+                .query_row(
+                    "SELECT count(*) FROM meetings WHERE meetings MATCH 'updated'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+    }
+}
