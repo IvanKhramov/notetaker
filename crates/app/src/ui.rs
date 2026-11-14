@@ -47,6 +47,8 @@ pub struct NotetakerApp {
     confirm_regenerate: bool,
     /// New title being typed in the rename dialog.
     rename: Option<String>,
+    /// The rename field takes focus once, when its dialog opens.
+    rename_focus: bool,
     confirm_delete: bool,
     import_picker: Option<std::sync::mpsc::Receiver<Option<std::path::PathBuf>>>,
     enhanced_preview: bool,
@@ -103,6 +105,7 @@ impl NotetakerApp {
             image_viewer: None,
             confirm_regenerate: false,
             rename: None,
+            rename_focus: false,
             confirm_delete: false,
             import_picker: None,
             enhanced_preview: true,
@@ -1108,7 +1111,10 @@ impl NotetakerApp {
                     text: document.data.enhanced.clone(),
                 })
             }
-            Some(DocumentAction::Rename) => self.rename = Some(document.data.meta.title.clone()),
+            Some(DocumentAction::Rename) => {
+                self.rename = Some(document.data.meta.title.clone());
+                self.rename_focus = true;
+            }
             Some(DocumentAction::Delete) => self.confirm_delete = true,
             None => {}
         }
@@ -1479,7 +1485,8 @@ impl NotetakerApp {
                             .desired_width(f32::INFINITY)
                             .hint_text("Название встречи"),
                     );
-                    if !field.has_focus() && !field.lost_focus() {
+                    // Only once: refocusing later would make Esc leave the field forever.
+                    if std::mem::take(&mut self.rename_focus) {
                         field.request_focus();
                     }
                     save = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
