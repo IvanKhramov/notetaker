@@ -35,8 +35,10 @@ pub fn available_space(path: &Path) -> io::Result<u64> {
     Ok(free)
 }
 
+/// Refuses only when the volume is known to be nearly full: a failed query
+/// must not block a recording.
 pub fn check_space(path: &Path) -> io::Result<()> {
-    if available_space(path)? < MIN_FREE_BYTES {
+    if available_space(path).is_ok_and(|free| free < MIN_FREE_BYTES) {
         return Err(io::Error::other(
             "Недостаточно места для записи. Освободите хотя бы 500 МБ в папке библиотеки.",
         ));
@@ -98,9 +100,10 @@ impl Drop for SleepGuard {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn space_check_reports_missing_directory() {
+    fn failed_space_query_does_not_block_recording() {
         let dir = tempfile::tempdir().unwrap();
         assert!(super::available_space(dir.path()).unwrap() > 0);
-        assert!(super::check_space(&dir.path().join("missing")).is_err());
+        assert!(super::available_space(&dir.path().join("missing")).is_err());
+        assert!(super::check_space(&dir.path().join("missing")).is_ok());
     }
 }

@@ -610,6 +610,16 @@ fn capture(
                 } else {
                     format!("{name}: устройство недоступно. Пробуем подключиться снова.")
                 };
+                if !*restored {
+                    // Keep the gap in the meeting metadata, as an interruption always was.
+                    capture_issue(
+                        meeting,
+                        *channel,
+                        tracks[channel_index(*channel)].position() * 1000 / u64::from(SAMPLE_RATE),
+                        "устройство отключилось, запись канала прерывалась".into(),
+                        &queue.events,
+                    )?;
+                }
                 let _ = queue.events.send(PipelineEvent::Warning(message));
             }
             if let CaptureEvent::Error { channel, message } = &event {
