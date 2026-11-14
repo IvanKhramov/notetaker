@@ -250,9 +250,9 @@ pub(crate) fn final_pass(
     }
     if let Err(error) = meeting.update_transcript(|transcript| {
         assign(transcript, &result);
-        transcript.speaker_suggestions.extend(suggestions);
-        transcript.speaker_names.extend(names);
-        transcript.speaker_voice_ids.extend(voice_ids);
+        transcript.speaker_suggestions.extend(suggestions.clone());
+        transcript.speaker_names.extend(names.clone());
+        transcript.speaker_voice_ids.extend(voice_ids.clone());
     }) {
         warning(error.into());
     }

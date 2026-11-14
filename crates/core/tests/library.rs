@@ -487,19 +487,51 @@ fn transcript_updates_serialize_across_separately_opened_meeting_handles() {
         thread.join().unwrap();
     }
     assert_eq!(meeting.read_transcript().unwrap().segments.len(), 80);
+    // Another process saves between the load and the save: the update is reapplied
+    // to its version and no conflict copy is left behind.
     let external = transcript("external");
+    let mut interfered = false;
+    meeting
+        .update_transcript(|local| {
+            local.segments.push(transcript("mine").segments.remove(0));
+            if !std::mem::replace(&mut interfered, true) {
+                fs::write(
+                    meeting.path().join("transcript.json"),
+                    serde_json::to_vec(&external).unwrap(),
+                )
+                .unwrap();
+            }
+        })
+        .unwrap();
+    let saved = meeting.read_transcript().unwrap();
+    assert_eq!(saved.segments.len(), external.segments.len() + 1);
+    assert_eq!(saved.segments[0], external.segments[0]);
+    let conflicts = || {
+        fs::read_dir(meeting.path())
+            .unwrap()
+            .filter(|entry| {
+                let name = entry.as_ref().unwrap().file_name();
+                name.to_string_lossy().contains(".conflict-")
+            })
+            .count()
+    };
+    assert_eq!(conflicts(), 0);
+    // A writer that interferes on every attempt still ends in a conflict.
+    let mut round = 0;
     let error = meeting
         .update_transcript(|local| {
             local.segments.clear();
+            round += 1;
             fs::write(
                 meeting.path().join("transcript.json"),
-                serde_json::to_vec(&external).unwrap(),
+                serde_json::to_vec(&transcript(&format!("external {round}"))).unwrap(),
             )
             .unwrap();
         })
         .unwrap_err();
     assert!(matches!(error, Error::Conflict { .. }));
-    assert_eq!(meeting.read_transcript().unwrap(), external);
+    assert_eq!(round, 3);
+    assert_eq!(conflicts(), 1);
 }
 
 #[test]

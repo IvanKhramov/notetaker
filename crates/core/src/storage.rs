@@ -444,18 +444,29 @@ impl Meeting {
     }
     /// Serialize local transcript edits; concurrent process edits are revision-checked.
     /// Stage large transcript writes without holding the meeting file lock.
-    pub fn update_transcript(&self, update: impl FnOnce(&mut Transcript)) -> Result<()> {
+    /// Another process may save between the load and the save: the update is then
+    /// applied again to the fresh transcript instead of failing with a conflict.
+    pub fn update_transcript(&self, mut update: impl FnMut(&mut Transcript)) -> Result<()> {
         let transcript_lock = meeting_lock(&self.path.join("transcript.json"));
         let _transcript_guard = transcript_lock.lock().unwrap_or_else(|e| e.into_inner());
-        let mut loaded = {
-            let lock = meeting_lock(&self.path);
-            let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-            let _file_guard = lock_meeting_files(&self.path)?;
-            self.load_transcript()?
-        };
-        update(&mut loaded.value);
-        self.save_transcript(&loaded.value, loaded.revision)?;
-        Ok(())
+        let mut attempts = 0;
+        loop {
+            let mut loaded = {
+                let lock = meeting_lock(&self.path);
+                let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+                let _file_guard = lock_meeting_files(&self.path)?;
+                self.load_transcript()?
+            };
+            update(&mut loaded.value);
+            attempts += 1;
+            match self.save_transcript(&loaded.value, loaded.revision) {
+                Err(crate::Error::Conflict { local, .. }) if attempts < 3 => {
+                    // The update is reapplied, so the copy of the lost attempt is not needed.
+                    let _ = fs::remove_file(local);
+                }
+                result => return result.map(|_| ()),
+            }
+        }
     }
 
     pub fn mic_audio_path(&self) -> PathBuf {

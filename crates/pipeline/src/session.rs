@@ -858,8 +858,10 @@ fn run_asr(
                 // Reload immediately before replacement to respect UI edits made
                 // during capture or while the full-file requests were running.
                 meeting.update_transcript(|transcript| {
-                    transcript.segments =
-                        replace_final(std::mem::take(&mut transcript.segments), final_segments);
+                    transcript.segments = replace_final(
+                        std::mem::take(&mut transcript.segments),
+                        final_segments.clone(),
+                    );
                     crate::echo::suppress_echo(&mut transcript.segments);
                 })?;
                 crate::diarization::final_pass(

@@ -96,7 +96,7 @@ pub(crate) fn run(
     meeting.update_transcript(|transcript| {
         transcript.segments = crate::session::replace_final(
             std::mem::take(&mut transcript.segments),
-            convert(segments, Channel::System, Source::Final),
+            convert(segments.clone(), Channel::System, Source::Final),
         );
     })?;
     crate::diarization::final_pass(meeting, &mut asr, &wav, None, &config.diarization, events);
