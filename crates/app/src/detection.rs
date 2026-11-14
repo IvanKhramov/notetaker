@@ -46,6 +46,7 @@ pub fn proposal(
 
 #[derive(Default)]
 pub struct Monitor {
+    apps_input: String,
     #[cfg(any(windows, target_os = "macos"))]
     channels: Option<(
         std::sync::mpsc::Sender<Command>,
@@ -101,6 +102,7 @@ impl Monitor {
                 let provider = notetaker_detect::MacosSnapshot;
                 let mut detector = CallDetector::new(provider, DetectConfig::default());
                 let mut next_poll = Instant::now();
+                let mut previous = None;
                 loop {
                     match commands.recv_timeout(next_poll.saturating_duration_since(Instant::now()))
                     {
@@ -125,8 +127,15 @@ impl Monitor {
                                 events: detector.poll(origin.elapsed()),
                                 calls: detector.current_calls(),
                             };
-                            if events.send(update).is_err() {
-                                return;
+                            if !update.events.is_empty()
+                                || previous.as_ref()
+                                    != Some(&(update.generation, update.calls.clone()))
+                            {
+                                previous = Some((update.generation, update.calls.clone()));
+                                if events.send(update).is_err() {
+                                    return;
+                                }
+                                crate::worker::wake_ui();
                             }
                             for warning in detector.take_warnings() {
                                 eprintln!("Call detection: {warning}");
@@ -139,6 +148,14 @@ impl Monitor {
         }
     }
     pub fn configure(&mut self, enabled: bool, browsers: bool, any_microphone: bool, apps: &str) {
+        if self.apps_input == apps
+            && self.settings.as_ref().is_some_and(|s| {
+                s.enabled == enabled && s.browsers == browsers && s.any_microphone == any_microphone
+            })
+        {
+            return;
+        }
+        self.apps_input = apps.to_owned();
         let settings = DetectionSettings {
             enabled,
             browsers,

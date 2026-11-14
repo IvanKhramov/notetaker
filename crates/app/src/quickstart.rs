@@ -94,6 +94,28 @@ pub fn auto_download(state: &mut AppState) {
         state.quickstart.checked_at.get_or_insert_with(Instant::now);
     }
 }
+pub fn wake_after(state: &AppState, now: Instant) -> Option<Duration> {
+    if !state.ready
+        || state.downloading
+        || state.recording.busy()
+        || state.settings_pending
+        || state.settings_autosave.pending
+        || state.exit_requested
+    {
+        return None;
+    }
+    let due = if state
+        .quickstart
+        .models
+        .missing(&state.settings.model)
+        .is_some()
+    {
+        state.quickstart.retry_at?
+    } else {
+        state.quickstart.checked_at? + Duration::from_secs(60)
+    };
+    Some(due.saturating_duration_since(now))
+}
 
 pub fn check_models() -> Models {
     let check = |model| -> Status {
@@ -387,6 +409,7 @@ impl Panel {
 pub enum ProbeEvent {
     Done(Result<[Status; 2], String>),
 }
+
 fn probe() -> anyhow::Result<[Status; 2]> {
     use notetaker_capture::{
         AudioSource, CaptureEvent, CaptureMessage, Channel, LevelMeter, LiveOptions, live_sources,

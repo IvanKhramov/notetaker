@@ -7,6 +7,10 @@ use uuid::Uuid;
 
 #[derive(Default)]
 pub struct SpeakerUi {
+    timeline: Option<(
+        (std::time::Instant, notetaker_core::Revision, usize),
+        std::sync::Arc<CachedTimeline>,
+    )>,
     pub selected: BTreeSet<Uuid>,
     pub anchor: Option<usize>,
     pub scroll_to: Option<Uuid>,
@@ -14,6 +18,28 @@ pub struct SpeakerUi {
     pub busy: bool,
     pub recalculating: bool,
     pub pending_count: Option<Option<u32>>,
+}
+pub struct CachedTimeline {
+    pub timeline: notetaker_core::SpeakerTimeline,
+    pub remote_count: usize,
+}
+pub fn timeline(document: &mut crate::state::Document) -> std::sync::Arc<CachedTimeline> {
+    let key = (
+        document.changed_at,
+        document.data.revisions.transcript,
+        document.data.transcript.segments.len(),
+    );
+    if let Some((old, cached)) = &document.speaker_ui.timeline
+        && old == &key
+    {
+        return cached.clone();
+    }
+    let cached = std::sync::Arc::new(CachedTimeline {
+        timeline: document.data.transcript.speaker_timeline(),
+        remote_count: remote_count(&document.data.transcript),
+    });
+    document.speaker_ui.timeline = Some((key, cached.clone()));
+    cached
 }
 impl SpeakerUi {
     pub fn select(&mut self, transcript: &Transcript, index: usize, shift: bool, ctrl: bool) {
@@ -183,20 +209,18 @@ pub fn count_control(
     use crate::theme::{self, ButtonStyle, Palette};
     let mut apply = None;
     let mut edit = None;
-    let timeline = document.data.transcript.speaker_timeline();
+    let cached = timeline(document);
+    let timeline = &cached.timeline;
     ui.horizontal_wrapped(|ui| {
         let response = if unavailable.is_some() {
             ui.label(
-                egui::RichText::new(format!(
-                    "Собеседников: {}",
-                    remote_count(&document.data.transcript)
-                ))
-                .size(12.0)
-                .color(Palette::of(ui).tertiary),
+                egui::RichText::new(format!("Собеседников: {}", cached.remote_count))
+                    .size(12.0)
+                    .color(Palette::of(ui).tertiary),
             )
         } else {
             ui.add_enabled_ui(true, |ui| {
-                let label = format!("Собеседников: {}", remote_count(&document.data.transcript));
+                let label = format!("Собеседников: {}", cached.remote_count);
                 let button = theme::styled_button(Palette::of(ui), &label, ButtonStyle::Ghost)
                     .right_text(" ");
                 let (response, _) = theme::menu_button(ui, button, |ui| {
@@ -233,8 +257,8 @@ pub fn count_control(
         if let Some(reason) = unavailable {
             response.on_hover_text(reason);
         }
-        if can_merge(&timeline) {
-            ui.add_enabled_ui(editable, |ui| merge_menu(ui, &timeline, &mut edit));
+        if can_merge(timeline) {
+            ui.add_enabled_ui(editable, |ui| merge_menu(ui, timeline, &mut edit));
         }
         if document.speaker_ui.recalculating {
             ui.weak("Пересчитываю собеседников…");
@@ -273,13 +297,13 @@ pub fn controls(
     transcript: &Transcript,
     meta: &MeetingMeta,
     state: &mut SpeakerUi,
+    timeline: &notetaker_core::SpeakerTimeline,
 ) -> Option<SpeakerEdit> {
     let edit = None;
-    let timeline = transcript.speaker_timeline();
     if state.undo.is_none() && state.selected.is_empty() {
         return edit;
     }
-    selection_controls(ui, transcript, meta, state, &timeline, edit)
+    selection_controls(ui, transcript, meta, state, timeline, edit)
 }
 
 fn merge_menu(

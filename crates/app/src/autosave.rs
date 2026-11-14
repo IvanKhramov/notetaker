@@ -9,6 +9,12 @@ pub struct Autosave {
     due: Option<Instant>,
 }
 impl Autosave {
+    pub fn wake_after(&self, now: Instant) -> Option<Duration> {
+        (self.pending && self.error.is_none())
+            .then_some(self.due)
+            .flatten()
+            .map(|due| due.saturating_duration_since(now))
+    }
     pub fn edit(&mut self, now: Instant, delayed: bool, llm: bool) {
         self.pending = true;
         self.llm |= llm;

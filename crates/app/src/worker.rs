@@ -48,6 +48,7 @@ pub struct DocumentData {
     pub revisions: Revisions,
     /// The recording or its final pass did not finish and the audio is still on disk.
     pub unfinished: bool,
+    pub system_audio: bool,
 }
 impl DocumentData {
     pub fn read(meeting: Meeting) -> Result<Self> {
@@ -59,6 +60,7 @@ impl DocumentData {
         let unfinished = (meta.ended_at.is_none() || meeting.path().join("audio/.work").is_dir())
             && (meeting.mic_audio_path().is_file() || meeting.system_audio_path().is_file());
         Ok(Self {
+            system_audio: meeting.system_audio_path().is_file(),
             meta,
             unfinished,
             notes: notes.value,
@@ -413,6 +415,11 @@ static WAKER: std::sync::OnceLock<eframe::egui::Context> = std::sync::OnceLock::
 /// Lets worker results repaint the window at once instead of on the next poll tick.
 pub fn set_waker(ctx: &eframe::egui::Context) {
     let _ = WAKER.set(ctx.clone());
+}
+pub fn wake_ui() {
+    if let Some(ctx) = WAKER.get() {
+        ctx.request_repaint();
+    }
 }
 /// The worker's event channel; every event wakes the UI.
 #[derive(Clone)]

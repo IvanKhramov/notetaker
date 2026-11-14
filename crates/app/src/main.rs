@@ -27,6 +27,7 @@ mod updates;
 #[cfg(target_os = "macos")]
 #[path = "updates_macos.rs"]
 mod updates;
+mod virtual_rows;
 mod worker;
 
 fn main() -> eframe::Result {
