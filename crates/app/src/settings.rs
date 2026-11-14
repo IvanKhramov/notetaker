@@ -59,8 +59,8 @@ struct Edits {
 }
 impl Edits {
     fn text(&mut self, ui: &mut egui::Ui, label: &str, value: &mut String) {
-        let response = theme::settings_row(ui, label, |ui| {
-            ui.add(crate::theme::text_field(value).desired_width(240.0))
+        let response = setting(ui, label, |ui| {
+            ui.add(crate::theme::text_field(value).desired_width(ui.available_width().min(240.0)))
         });
         self.typing |= response.changed();
         self.blur |= response.lost_focus();
@@ -70,12 +70,13 @@ impl Edits {
         self.blur |= response.lost_focus();
     }
     fn multiline(&mut self, ui: &mut egui::Ui, label: &str, value: &mut String) {
-        ui.label(label);
-        let response = ui.add(
-            egui::TextEdit::multiline(value)
-                .desired_rows(2)
-                .desired_width(f32::INFINITY),
-        );
+        let response = setting(ui, label, |ui| {
+            ui.add(
+                egui::TextEdit::multiline(value)
+                    .desired_rows(2)
+                    .desired_width(ui.available_width()),
+            )
+        });
         self.typing |= response.changed();
         self.blur |= response.lost_focus();
     }
@@ -147,28 +148,24 @@ impl Panel {
             .frame(
                 egui::Frame::new()
                     .fill(Palette::for_dark(ctx.global_style().visuals.dark_mode).bg)
-                    .inner_margin(32),
+                    .inner_margin(0),
             )
             .show(ui, |ui| {
-                ui.set_max_width(ui.available_width().min(680.0));
                 ui.style_mut()
                     .text_styles
                     .insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
-                ui.heading(self.section.label())
-                    .on_hover_text(state.settings_status());
-                ui.add_space(24.0);
                 egui::ScrollArea::vertical()
-                    .id_salt(("settings_section", self.section as u8))
+                    .id_salt(("settings-page", self.section as u8))
                     .auto_shrink([false, false])
-                    .max_width(680.0)
                     .show(ui, |ui| {
-                        egui::Frame::new()
-                            .corner_radius(8)
-                            .stroke(egui::Stroke::new(1.0, Palette::of(ui).border))
-                            .inner_margin(16)
-                            .show(ui, |ui| {
-                                quickstart = self.body(ui, state, maintenance, organization);
-                            });
+                        egui::Frame::new().inner_margin(32).show(ui, |ui| {
+                            ui.set_max_width(ui.available_width().min(680.0));
+                            ui.spacing_mut().item_spacing.y = 0.0;
+                            ui.heading(self.section.label())
+                                .on_hover_text(state.settings_status());
+                            ui.add_space(24.0);
+                            quickstart = self.body(ui, state, maintenance, organization);
+                        });
                     });
             });
         if close {
@@ -219,212 +216,236 @@ impl Panel {
         match self.section {
             Section::General => {
                 let settings = &mut state.settings_draft;
-                theme::settings_row(ui, "Тема", |ui| {
-                    crate::theme::select("theme")
-                        .selected_text(settings.theme.label())
-                        .show_ui(ui, |ui| {
-                            for theme in [
-                                theme::Theme::Light,
-                                theme::Theme::Dark,
-                                theme::Theme::System,
-                            ] {
-                                crate::theme::select_value(
-                                    ui,
-                                    &mut settings.theme,
-                                    theme,
-                                    theme.label(),
-                                );
-                            }
-                        });
-                });
-                theme::settings_row(ui, "Масштаб интерфейса", |ui| {
-                    crate::theme::select("ui_zoom")
-                        .selected_text(format!("{:.0}%", settings.ui_zoom * 100.0))
-                        .show_ui(ui, |ui| {
-                            for value in [0.9, 1.0, 1.1, 1.25, 1.5] {
-                                crate::theme::select_value(
-                                    ui,
-                                    &mut settings.ui_zoom,
-                                    value,
-                                    format!("{:.0}%", value * 100.0),
-                                );
-                            }
-                        });
-                });
-                hint(
-                    ui,
-                    if cfg!(target_os = "macos") {
-                        "Cmd+= / Cmd+- / Cmd+0: изменить или сбросить масштаб."
-                    } else {
-                        "Ctrl+= / Ctrl+- / Ctrl+0: изменить или сбросить масштаб."
-                    },
-                );
-                edits.text(ui, "Ваше имя", &mut settings.user_name);
-                edits.text(ui, "Другие варианты имени", &mut settings.user_aliases);
-                ui.add_enabled_ui(cfg!(any(windows, target_os = "macos")), |ui| {
-                    edits.text(ui, "Горячая клавиша записи", &mut settings.hotkey);
-                    error(ui, crate::config::validate_hotkey(&settings.hotkey));
-                });
-                theme::settings_row(ui, "Быстрый старт", |ui| {
-                    quickstart = theme::button(ui, "Открыть ›", ButtonStyle::Ghost).clicked();
-                });
-                maintenance.windows_settings(ui);
-                toggle(
-                    ui,
-                    &mut settings.digest_reminder,
-                    "Напоминать о дайджесте по пятницам",
-                );
-                ui.add_enabled_ui(cfg!(any(windows, target_os = "macos")), |ui| {
-                    toggle(ui, &mut settings.check_updates, "Проверять обновления");
-                    hint(ui, "Раз в час и при запуске.");
-                    theme::settings_row(
-                        ui,
-                        &format!("Версия {}", env!("CARGO_PKG_VERSION")),
-                        |ui| {
-                            maintenance.check_updates_button(ui);
-                        },
-                    );
-                });
-            }
-            Section::Recording => {
-                let settings = &mut state.settings_draft;
-                theme::settings_row(ui, "Режим новых встреч", |ui| {
-                    crate::theme::select("settings_mode")
-                        .selected_text(if settings.mode == notetaker_core::Mode::Local {
-                            "Локально"
-                        } else {
-                            "Гибрид"
-                        })
-                        .show_ui(ui, |ui| {
-                            crate::theme::select_value(
-                                ui,
-                                &mut settings.mode,
-                                notetaker_core::Mode::Local,
-                                "Локально",
-                            );
-                            crate::theme::select_value(
-                                ui,
-                                &mut settings.mode,
-                                notetaker_core::Mode::Hybrid,
-                                "Гибрид",
-                            );
-                        });
-                });
-                hint(
-                    ui,
-                    "Локально: локальный AI. Гибрид: текст может отправляться провайдеру. Аудио остаётся на компьютере.",
-                );
-                ui.add_enabled_ui(cfg!(any(windows, target_os = "macos")), |ui| {
-                    toggle(ui, &mut settings.detect_calls, "Предлагать запись звонков");
-                });
-                toggle(
-                    ui,
-                    &mut settings.auto_summary,
-                    "Создавать конспект после встречи",
-                );
-                toggle(ui, &mut settings.voice_library, "Запоминать голоса");
-                hint(ui, "Голосовые отпечатки хранятся только локально.");
-                theme::settings_row(ui, "Автостоп по тишине", |ui| {
-                    edits.number(
-                        ui.add(
-                            egui::DragValue::new(&mut settings.auto_stop_minutes)
-                                .range(0..=u32::MAX)
-                                .suffix(" мин"),
-                        ),
-                    );
-                });
-                hint(
-                    ui,
-                    "0 минут: выключен. Завершение звонка не останавливает запись.",
-                );
-                crate::theme::disclosure("Распознавание и обнаружение звонков").show(ui, |ui| {
-                    toggle(ui, &mut settings.diarize, "Разделять собеседников");
-                    theme::settings_row(ui, "Число собеседников", |ui| {
-                        crate::theme::select("speakers")
-                            .selected_text(
-                                settings.speakers.map_or("Авто".into(), |n| n.to_string()),
-                            )
+                theme::settings_group(ui, "Оформление", |ui| {
+                    setting(ui, "Тема", |ui| {
+                        crate::theme::select("theme")
+                            .selected_text(settings.theme.label())
                             .show_ui(ui, |ui| {
-                                crate::theme::select_value(
-                                    ui,
-                                    &mut settings.speakers,
-                                    None,
-                                    "Авто",
-                                );
-                                for n in 1..=32 {
+                                for theme in [
+                                    theme::Theme::Light,
+                                    theme::Theme::Dark,
+                                    theme::Theme::System,
+                                ] {
                                     crate::theme::select_value(
                                         ui,
-                                        &mut settings.speakers,
-                                        Some(n),
-                                        n.to_string(),
+                                        &mut settings.theme,
+                                        theme,
+                                        theme.label(),
                                     );
                                 }
                             });
                     });
-                    theme::settings_row(ui, "Потоков ASR (0: авто)", |ui| {
-                        edits.number(
-                            ui.add(egui::DragValue::new(&mut settings.asr_threads).range(0..=8)),
+                    setting(ui, "Масштаб интерфейса", |ui| {
+                        crate::theme::select("ui_zoom")
+                            .selected_text(format!("{:.0}%", settings.ui_zoom * 100.0))
+                            .show_ui(ui, |ui| {
+                                for value in [0.9, 1.0, 1.1, 1.25, 1.5] {
+                                    crate::theme::select_value(
+                                        ui,
+                                        &mut settings.ui_zoom,
+                                        value,
+                                        format!("{:.0}%", value * 100.0),
+                                    );
+                                }
+                            });
+                    });
+                });
+                theme::settings_group(ui, "Профиль", |ui| {
+                    edits.text(ui, "Ваше имя", &mut settings.user_name);
+                    edits.text(ui, "Другие варианты имени", &mut settings.user_aliases);
+                });
+                theme::settings_group(ui, "Запуск и клавиши", |ui| {
+                    ui.add_enabled_ui(cfg!(any(windows, target_os = "macos")), |ui| {
+                        edits.text(ui, "Горячая клавиша записи", &mut settings.hotkey);
+                        error(ui, crate::config::validate_hotkey(&settings.hotkey));
+                    });
+                    maintenance.windows_settings(ui);
+                    setting(ui, "Быстрый старт", |ui| {
+                        quickstart = ui
+                            .add(
+                                theme::styled_button(
+                                    Palette::of(ui),
+                                    "Открыть",
+                                    ButtonStyle::Ghost,
+                                )
+                                .right_text(theme::icons::CHEVRON_RIGHT),
+                            )
+                            .clicked();
+                    });
+                });
+                theme::settings_group(ui, "Уведомления и обновления", |ui| {
+                    toggle(
+                        ui,
+                        &mut settings.digest_reminder,
+                        "Напоминать о дайджесте по пятницам",
+                    );
+                    ui.add_enabled_ui(cfg!(any(windows, target_os = "macos")), |ui| {
+                        toggle(ui, &mut settings.check_updates, "Проверять обновления");
+
+                        setting(
+                            ui,
+                            &format!("Версия {}", env!("CARGO_PKG_VERSION")),
+                            |ui| {
+                                maintenance.check_updates_button(ui);
+                            },
                         );
                     });
-                    theme::settings_row(ui, "Ускорение ASR", |ui| {
-                        crate::theme::select("acceleration")
-                            .selected_text(format!("{:?}", settings.asr_acceleration))
+                });
+            }
+            Section::Recording => {
+                #[cfg(not(any(windows, target_os = "macos")))]
+                theme::callout(ui, theme::icons::INFO, |ui| {
+                    ui.small("Захват звука, трей и глобальная клавиша недоступны на Linux.");
+                });
+                #[cfg(target_os = "macos")]
+                theme::callout(ui, theme::icons::INFO, |ui| {
+                    ui.small("macOS: системный звук целиком, кроме notetaker. Нужны разрешения Microphone и System Audio Recording.");
+                });
+                ui.add_space(24.0);
+                let settings = &mut state.settings_draft;
+                theme::settings_group(ui, "Запись", |ui| {
+                    setting(ui, "Режим новых встреч", |ui| {
+                        crate::theme::select("settings_mode")
+                            .selected_text(if settings.mode == notetaker_core::Mode::Local {
+                                "Локально"
+                            } else {
+                                "Гибрид"
+                            })
                             .show_ui(ui, |ui| {
                                 crate::theme::select_value(
                                     ui,
-                                    &mut settings.asr_acceleration,
-                                    notetaker_asr_proto::Provider::Auto,
-                                    "Авто",
+                                    &mut settings.mode,
+                                    notetaker_core::Mode::Local,
+                                    "Локально",
                                 );
                                 crate::theme::select_value(
                                     ui,
-                                    &mut settings.asr_acceleration,
-                                    notetaker_asr_proto::Provider::Cpu,
-                                    "CPU",
-                                );
-                                #[cfg(windows)]
-                                crate::theme::select_value(
-                                    ui,
-                                    &mut settings.asr_acceleration,
-                                    notetaker_asr_proto::Provider::Directml,
-                                    "GPU (DirectML)",
+                                    &mut settings.mode,
+                                    notetaker_core::Mode::Hybrid,
+                                    "Гибрид",
                                 );
                             });
                     });
-                    edits.multiline(
-                        ui,
-                        "Словарь (один термин на строку)",
-                        &mut settings.vocabulary,
-                    );
-                    hint(ui, "Алиасы: werf = верф, вёрф.");
+
                     ui.add_enabled_ui(cfg!(any(windows, target_os = "macos")), |ui| {
-                        toggle(ui, &mut settings.detect_browsers, "Учитывать браузеры");
-                        toggle(
-                            ui,
-                            &mut settings.detect_any_microphone,
-                            "Любое приложение с микрофоном",
-                        );
-                        edits.multiline(ui, "Свои приложения для звонков", &mut settings.call_apps);
-                        let candidate = crate::config::Settings {
-                            call_apps: settings.call_apps.clone(),
-                            ..Default::default()
-                        };
-                        error(ui, candidate.validate());
+                        toggle(ui, &mut settings.detect_calls, "Предлагать запись звонков");
                     });
                 });
-                crate::theme::disclosure("Для опытных").show(ui, |ui| {
-                    theme::settings_row(ui, "Модель распознавания", |ui| {
+                theme::settings_group(ui, "Обработка", |ui| {
+                    toggle(
+                        ui,
+                        &mut settings.auto_summary,
+                        "Создавать конспект после встречи",
+                    );
+                    toggle(ui, &mut settings.voice_library, "Запоминать голоса");
+
+                    setting(ui, "Автостоп по тишине", |ui| {
+                        edits.number(
+                            ui.add(
+                                egui::DragValue::new(&mut settings.auto_stop_minutes)
+                                    .range(0..=u32::MAX)
+                                    .suffix(" мин"),
+                            ),
+                        );
+                    });
+                });
+                theme::settings_disclosure(
+                    ui,
+                    "Распознавание и обнаружение звонков",
+                    |ui| {
+                        toggle(ui, &mut settings.diarize, "Разделять собеседников");
+                        setting(ui, "Число собеседников", |ui| {
+                            crate::theme::select("speakers")
+                                .selected_text(
+                                    settings.speakers.map_or("Авто".into(), |n| n.to_string()),
+                                )
+                                .show_ui(ui, |ui| {
+                                    crate::theme::select_value(
+                                        ui,
+                                        &mut settings.speakers,
+                                        None,
+                                        "Авто",
+                                    );
+                                    for n in 1..=32 {
+                                        crate::theme::select_value(
+                                            ui,
+                                            &mut settings.speakers,
+                                            Some(n),
+                                            n.to_string(),
+                                        );
+                                    }
+                                });
+                        });
+                        setting(ui, "Потоков ASR (0: авто)", |ui| {
+                            edits.number(
+                                ui.add(
+                                    egui::DragValue::new(&mut settings.asr_threads).range(0..=8),
+                                ),
+                            );
+                        });
+                        setting(ui, "Ускорение ASR", |ui| {
+                            crate::theme::select("acceleration")
+                                .selected_text(format!("{:?}", settings.asr_acceleration))
+                                .show_ui(ui, |ui| {
+                                    crate::theme::select_value(
+                                        ui,
+                                        &mut settings.asr_acceleration,
+                                        notetaker_asr_proto::Provider::Auto,
+                                        "Авто",
+                                    );
+                                    crate::theme::select_value(
+                                        ui,
+                                        &mut settings.asr_acceleration,
+                                        notetaker_asr_proto::Provider::Cpu,
+                                        "CPU",
+                                    );
+                                    #[cfg(windows)]
+                                    crate::theme::select_value(
+                                        ui,
+                                        &mut settings.asr_acceleration,
+                                        notetaker_asr_proto::Provider::Directml,
+                                        "GPU (DirectML)",
+                                    );
+                                });
+                        });
+                        edits.multiline(
+                            ui,
+                            "Словарь (один термин на строку)",
+                            &mut settings.vocabulary,
+                        );
+
+                        ui.add_enabled_ui(cfg!(any(windows, target_os = "macos")), |ui| {
+                            toggle(ui, &mut settings.detect_browsers, "Учитывать браузеры");
+                            toggle(
+                                ui,
+                                &mut settings.detect_any_microphone,
+                                "Любое приложение с микрофоном",
+                            );
+                            edits.multiline(
+                                ui,
+                                "Свои приложения для звонков",
+                                &mut settings.call_apps,
+                            );
+                            let candidate = crate::config::Settings {
+                                call_apps: settings.call_apps.clone(),
+                                ..Default::default()
+                            };
+                            error(ui, candidate.validate());
+                        });
+                    },
+                );
+                theme::settings_disclosure(ui, "Для опытных", |ui| {
+                    setting(ui, "Модель распознавания", |ui| {
                         crate::ui::model_selector(ui, "settings_model", &mut settings.model);
                     });
-                    hint(ui, "Выбранная модель загрузится автоматически.");
                 });
-                crate::theme::disclosure("Сохранённые голоса").show(ui, |ui| {
+                theme::settings_disclosure(ui, "Сохранённые голоса", |ui| {
                     if state.voices.voices.is_empty() {
                         hint(ui, "Голосов пока нет. Назовите участника в транскрипте.");
                     }
                     let mut delete = None;
                     for voice in &state.voices.voices {
-                        theme::settings_row(ui, &voice.name, |ui| {
+                        setting(ui, &voice.name, |ui| {
                             if crate::theme::button(ui, "Удалить", crate::theme::ButtonStyle::Ghost)
                                 .clicked()
                             {
@@ -439,144 +460,140 @@ impl Panel {
                         });
                     }
                 });
-                #[cfg(target_os = "macos")]
-                hint(
-                    ui,
-                    "macOS: системный звук целиком, кроме notetaker. Нужны разрешения Microphone и System Audio Recording.",
-                );
-                #[cfg(not(any(windows, target_os = "macos")))]
-                hint(
-                    ui,
-                    "Захват звука, трей и глобальная клавиша недоступны на Linux.",
-                );
             }
             Section::Calendars => {
-                hint(
-                    ui,
-                    if cfg!(target_os = "macos") {
+                theme::callout(ui, theme::icons::INFO, |ui| {
+                    ui.small(if cfg!(target_os = "macos") {
                         "Приватные ICS-подписки. URL хранится в macOS Keychain."
                     } else if cfg!(windows) {
                         "Приватные ICS-подписки. URL хранится в Windows Credential Manager."
                     } else {
                         "Хранение приватных URL недоступно на Linux."
-                    },
-                );
-                edits.text(
-                    ui,
-                    "Часовой пояс без TZID",
-                    &mut state.settings_draft.calendar_timezone,
-                );
-                error(
-                    ui,
-                    notetaker_core::calendar::timezone(&state.settings_draft.calendar_timezone)
-                        .map(|_| ())
-                        .map_err(Into::into),
-                );
-                let mut remove = None;
-                let mut secret_changed = false;
-                for calendar in &mut state.settings_draft.calendars {
-                    ui.push_id(calendar.id.clone(), |ui| {
-                        ui.add_space(12.0);
-                        edits.text(ui, "Название календаря", &mut calendar.name);
-                        error(ui, calendar.validate());
-                        let input = self.calendar_inputs.entry(calendar.id.clone()).or_default();
-                        ui.add_enabled_ui(cfg!(any(windows, target_os = "macos")), |ui| {
-                            let response = ui.add(
-                                crate::theme::text_field(input)
-                                    .password(true)
-                                    .desired_width(f32::INFINITY)
-                                    .hint_text("HTTPS URL ICS (пусто: сохранённый)"),
-                            );
-                            if response.lost_focus() && !input.trim().is_empty() {
-                                match validate_calendar_secret(&calendar.id, input) {
-                                    Ok(()) => {
-                                        self.calendar_errors.remove(&calendar.id);
-                                        state
-                                            .calendar_secrets
-                                            .insert(calendar.id.clone(), input.trim().to_owned());
-                                        input.clear();
-                                        secret_changed = true;
-                                    }
-                                    Err(error) => {
-                                        self.calendar_errors
-                                            .insert(calendar.id.clone(), error.to_string());
+                    });
+                });
+                ui.add_space(24.0);
+                theme::settings_group(ui, "Подписки", |ui| {
+                    edits.text(
+                        ui,
+                        "Часовой пояс без TZID",
+                        &mut state.settings_draft.calendar_timezone,
+                    );
+                    error(
+                        ui,
+                        notetaker_core::calendar::timezone(&state.settings_draft.calendar_timezone)
+                            .map(|_| ())
+                            .map_err(Into::into),
+                    );
+                    let mut remove = None;
+                    let mut secret_changed = false;
+                    for calendar in &mut state.settings_draft.calendars {
+                        ui.push_id(calendar.id.clone(), |ui| {
+                            ui.add_space(12.0);
+                            edits.text(ui, "Название календаря", &mut calendar.name);
+                            error(ui, calendar.validate());
+                            let input =
+                                self.calendar_inputs.entry(calendar.id.clone()).or_default();
+                            ui.add_enabled_ui(cfg!(any(windows, target_os = "macos")), |ui| {
+                                let response = setting(ui, "URL календаря", |ui| {
+                                    ui.add(
+                                        crate::theme::text_field(input)
+                                            .password(true)
+                                            .desired_width(f32::INFINITY)
+                                            .hint_text("HTTPS URL ICS (пусто: сохранённый)"),
+                                    )
+                                });
+                                if response.lost_focus() && !input.trim().is_empty() {
+                                    match validate_calendar_secret(&calendar.id, input) {
+                                        Ok(()) => {
+                                            self.calendar_errors.remove(&calendar.id);
+                                            state.calendar_secrets.insert(
+                                                calendar.id.clone(),
+                                                input.trim().to_owned(),
+                                            );
+                                            input.clear();
+                                            secret_changed = true;
+                                        }
+                                        Err(error) => {
+                                            self.calendar_errors
+                                                .insert(calendar.id.clone(), error.to_string());
+                                        }
                                     }
                                 }
+                            });
+                            if let Some(message) = self.calendar_errors.get(&calendar.id) {
+                                ui.colored_label(Palette::of(ui).red, message);
+                            }
+                            if crate::theme::button(
+                                ui,
+                                "Удалить календарь",
+                                crate::theme::ButtonStyle::Ghost,
+                            )
+                            .clicked()
+                            {
+                                remove = Some(calendar.id.clone());
                             }
                         });
-                        if let Some(message) = self.calendar_errors.get(&calendar.id) {
-                            ui.colored_label(Palette::of(ui).red, message);
-                        }
-                        if !state
-                            .settings
+                    }
+                    if let Some(id) = remove {
+                        state
+                            .settings_draft
                             .calendars
-                            .iter()
-                            .any(|saved| saved.id == calendar.id)
-                            && !state.calendar_secrets.contains_key(&calendar.id)
+                            .retain(|calendar| calendar.id != id);
+                        state.calendar_secrets.remove(&id);
+                        self.calendar_inputs.remove(&id);
+                        self.calendar_errors.remove(&id);
+                    }
+                    ui.add_space(12.0);
+                    setting(ui, "Подписки", |ui| {
+                        if ui
+                            .add_enabled(
+                                cfg!(any(windows, target_os = "macos"))
+                                    && state.settings_draft.calendars.len() < 16,
+                                crate::theme::styled_button(
+                                    crate::theme::Palette::of(ui),
+                                    "Добавить календарь",
+                                    crate::theme::ButtonStyle::Secondary,
+                                ),
+                            )
+                            .clicked()
                         {
-                            hint(ui, "Укажите URL, затем перейдите к другому полю.");
-                        }
-                        if crate::theme::button(
-                            ui,
-                            "Удалить календарь",
-                            crate::theme::ButtonStyle::Ghost,
-                        )
-                        .clicked()
-                        {
-                            remove = Some(calendar.id.clone());
+                            state.settings_draft.calendars.push(
+                                notetaker_llm::calendar::Subscription {
+                                    id: format!("calendar-{}", uuid::Uuid::now_v7()),
+                                    name: "Календарь".into(),
+                                },
+                            );
                         }
                     });
-                }
-                if let Some(id) = remove {
-                    state
-                        .settings_draft
-                        .calendars
-                        .retain(|calendar| calendar.id != id);
-                    state.calendar_secrets.remove(&id);
-                    self.calendar_inputs.remove(&id);
-                    self.calendar_errors.remove(&id);
-                }
-                ui.add_space(12.0);
-                if ui
-                    .add_enabled(
-                        cfg!(any(windows, target_os = "macos"))
-                            && state.settings_draft.calendars.len() < 16,
-                        crate::theme::styled_button(
-                            crate::theme::Palette::of(ui),
-                            "Добавить календарь",
-                            crate::theme::ButtonStyle::Secondary,
-                        ),
-                    )
-                    .clicked()
-                {
-                    state
-                        .settings_draft
-                        .calendars
-                        .push(notetaker_llm::calendar::Subscription {
-                            id: format!("calendar-{}", uuid::Uuid::now_v7()),
-                            name: "Календарь".into(),
-                        });
-                }
-                if ui
-                    .add_enabled(
-                        !state.calendar_busy,
-                        crate::theme::styled_button(
-                            crate::theme::Palette::of(ui),
-                            "Обновить календари",
-                            crate::theme::ButtonStyle::Secondary,
-                        ),
-                    )
-                    .clicked()
-                {
-                    state.refresh_calendar();
-                }
-                hint(ui, &state.calendar_status);
-                hint(ui, "Обновление при запуске и каждые 10 минут.");
-                if secret_changed {
-                    state
-                        .settings_autosave
-                        .edit(std::time::Instant::now(), false, false);
-                }
+                    let description = if state.calendar_status.is_empty() {
+                        "Обновление при запуске и каждые 10 минут.".to_owned()
+                    } else {
+                        format!(
+                            "Обновление при запуске и каждые 10 минут.\n{}",
+                            state.calendar_status
+                        )
+                    };
+                    theme::settings_row_desc(ui, "Обновление", Some(&description), |ui| {
+                        if ui
+                            .add_enabled(
+                                !state.calendar_busy,
+                                crate::theme::styled_button(
+                                    crate::theme::Palette::of(ui),
+                                    "Обновить календари",
+                                    crate::theme::ButtonStyle::Secondary,
+                                ),
+                            )
+                            .clicked()
+                        {
+                            state.refresh_calendar();
+                        }
+                    });
+                    if secret_changed {
+                        state
+                            .settings_autosave
+                            .edit(std::time::Instant::now(), false, false);
+                    }
+                });
             }
             Section::Ai => {
                 let actions =
@@ -586,37 +603,73 @@ impl Panel {
                 for action in actions {
                     state.send(Command::Ai(action));
                 }
-                crate::theme::disclosure("Для опытных").show(ui, |ui| {
+                theme::settings_disclosure(ui, "Для опытных", |ui| {
                     scenarios(ui, &mut state.llm_draft, &mut edits);
                     ui.separator();
                     providers(ui, &mut state.llm_draft, &mut edits);
                 });
             }
             Section::Search => {
-                ui.label("Поиск по словам и по смыслу");
-                hint(
-                    ui,
-                    "Локальная модель загружается автоматически. До её загрузки работает поиск по словам. Тексты остаются на компьютере.",
-                );
-                crate::quickstart::model_status(ui, state);
-                organization.shared_step(ui, !state.semantic_running && state.can_save_settings());
-                toggle(
-                    ui,
-                    &mut state.settings_draft.mcp_exclude_local,
-                    "MCP: не отдавать Локально-встречи",
-                );
-                crate::theme::disclosure("Удалённый поиск по смыслу").show(ui, |ui| {
-                    hint(ui, "Только Гибрид и только без локальной модели. Локально-встречи остаются в поиске по словам.");
-                    let llm = &mut state.llm_draft;
-                    theme::settings_row(ui, "Провайдер", |ui| {
-                        crate::theme::select("embedding_provider").selected_text(if llm.embeddings.provider.is_empty() { "Выключено" } else { &llm.embeddings.provider }).show_ui(ui, |ui| {
-                            crate::theme::select_value(ui, &mut llm.embeddings.provider, String::new(), "Выключено");
-                            for provider in &llm.providers { if provider.kind == "openai" { crate::theme::select_value(ui, &mut llm.embeddings.provider, provider.id.clone(), &provider.id); } }
-                        });
-                    });
-                    edits.text(ui, "Модель embeddings", &mut llm.embeddings.model);
-                    error(ui, llm.validate().map(|_| ()));
+                theme::settings_group(ui, "Локальный поиск", |ui| {
+                    theme::settings_row_desc(
+                        ui,
+                        "Поиск по словам и по смыслу",
+                        Some(
+                            "Локальная модель загружается автоматически. До её загрузки работает поиск по словам. Тексты остаются на компьютере.",
+                        ),
+                        |ui| crate::quickstart::model_status(ui, state),
+                    );
                 });
+                theme::settings_group(ui, "Библиотека", |ui| {
+                    organization
+                        .shared_step(ui, !state.semantic_running && state.can_save_settings());
+                });
+                theme::settings_group(ui, "MCP", |ui| {
+                    toggle(
+                        ui,
+                        &mut state.settings_draft.mcp_exclude_local,
+                        "MCP: не отдавать Локально-встречи",
+                    );
+                });
+                theme::settings_disclosure(
+                    ui,
+                    "Удалённый поиск по смыслу",
+                    |ui| {
+                        hint(
+                            ui,
+                            "Только Гибрид и только без локальной модели. Локально-встречи остаются в поиске по словам.",
+                        );
+                        let llm = &mut state.llm_draft;
+                        setting(ui, "Провайдер", |ui| {
+                            crate::theme::select("embedding_provider")
+                                .selected_text(if llm.embeddings.provider.is_empty() {
+                                    "Выключено"
+                                } else {
+                                    &llm.embeddings.provider
+                                })
+                                .show_ui(ui, |ui| {
+                                    crate::theme::select_value(
+                                        ui,
+                                        &mut llm.embeddings.provider,
+                                        String::new(),
+                                        "Выключено",
+                                    );
+                                    for provider in &llm.providers {
+                                        if provider.kind == "openai" {
+                                            crate::theme::select_value(
+                                                ui,
+                                                &mut llm.embeddings.provider,
+                                                provider.id.clone(),
+                                                &provider.id,
+                                            );
+                                        }
+                                    }
+                                });
+                        });
+                        edits.text(ui, "Модель embeddings", &mut llm.embeddings.model);
+                        error(ui, llm.validate().map(|_| ()));
+                    },
+                );
             }
             Section::Storage => {
                 let paths = (state.settings.library.clone(), state.settings.models_path());
@@ -640,43 +693,49 @@ impl Panel {
                     self.usage = Some(usage);
                     self.disk_usage = None;
                 }
-                for (models, title, path) in [
-                    (
-                        false,
-                        "Папка для встреч",
-                        state.settings_draft.library.clone(),
-                    ),
-                    (
-                        true,
-                        "Папка для моделей",
-                        state.settings_draft.models_path(),
-                    ),
-                ] {
-                    theme::settings_row(ui, title, |ui| {
-                        if ui
-                            .add_enabled(
-                                self.folder_picker.is_none(),
-                                crate::theme::styled_button(
-                                    crate::theme::Palette::of(ui),
-                                    "Выбрать…",
-                                    crate::theme::ButtonStyle::Secondary,
-                                ),
-                            )
-                            .clicked()
-                        {
-                            let (tx, rx) = std::sync::mpsc::channel();
-                            self.folder_picker = Some(rx);
-                            let directory = path.clone();
-                            std::thread::spawn(move || {
-                                let result = rfd::FileDialog::new()
-                                    .set_directory(directory)
-                                    .pick_folder();
-                                let _ = tx.send((models, result));
-                            });
-                        }
-                    });
-                    hint(ui, &notetaker_core::display_path(&path));
-                }
+                theme::settings_group(ui, "Папки", |ui| {
+                    for (models, title, path) in [
+                        (
+                            false,
+                            "Папка для встреч",
+                            state.settings_draft.library.clone(),
+                        ),
+                        (
+                            true,
+                            "Папка для моделей",
+                            state.settings_draft.models_path(),
+                        ),
+                    ] {
+                        theme::settings_row_desc(
+                            ui,
+                            title,
+                            Some(&notetaker_core::display_path(&path)),
+                            |ui| {
+                                if ui
+                                    .add_enabled(
+                                        self.folder_picker.is_none(),
+                                        crate::theme::styled_button(
+                                            crate::theme::Palette::of(ui),
+                                            "Выбрать…",
+                                            crate::theme::ButtonStyle::Secondary,
+                                        ),
+                                    )
+                                    .clicked()
+                                {
+                                    let (tx, rx) = std::sync::mpsc::channel();
+                                    self.folder_picker = Some(rx);
+                                    let directory = path.clone();
+                                    std::thread::spawn(move || {
+                                        let result = rfd::FileDialog::new()
+                                            .set_directory(directory)
+                                            .pick_folder();
+                                        let _ = tx.send((models, result));
+                                    });
+                                }
+                            },
+                        );
+                    }
+                });
                 if let Some((library, models)) = self.usage {
                     hint(
                         ui,
@@ -694,14 +753,14 @@ impl Panel {
                 crate::quickstart::model_status(ui, state);
                 ui.add_space(12.0);
                 let settings = &mut state.settings_draft;
-                crate::theme::disclosure("Для опытных").show(ui, |ui| {
+                theme::settings_disclosure(ui, "Для опытных", |ui| {
                     let mut forever = settings.retention_days.is_none();
                     if toggle(ui, &mut forever, "Хранить аудио всегда").changed()
                     {
                         settings.retention_days = if forever { None } else { Some(7) };
                     }
                     if let Some(days) = &mut settings.retention_days {
-                        theme::settings_row(ui, "Хранить аудио", |ui| {
+                        setting(ui, "Хранить аудио", |ui| {
                             edits.number(
                                 ui.add(
                                     egui::DragValue::new(days).range(0..=36_500).suffix(" дней"),
@@ -735,7 +794,7 @@ fn scenarios(ui: &mut egui::Ui, llm: &mut LlmSettings, edits: &mut Edits) {
         ("Чат", &mut llm.scenarios.chat),
     ] {
         ui.push_id(label, |ui| {
-            theme::settings_row(ui, label, |ui| {
+            setting(ui, label, |ui| {
                 crate::theme::select("provider")
                     .selected_text(if choice.provider.is_empty() {
                         "По умолчанию"
@@ -786,7 +845,7 @@ fn providers(ui: &mut egui::Ui, llm: &mut LlmSettings, edits: &mut Edits) {
         ui.push_id(index, |ui| {
             ui.separator();
             edits.text(ui, "id", &mut provider.id);
-            theme::settings_row(ui, "Тип", |ui| {
+            setting(ui, "Тип", |ui| {
                 crate::theme::select("kind")
                     .selected_text(&provider.kind)
                     .show_ui(ui, |ui| {
@@ -797,7 +856,7 @@ fn providers(ui: &mut egui::Ui, llm: &mut LlmSettings, edits: &mut Edits) {
             });
             edits.text(ui, "base_url", &mut provider.base_url);
             edits.text(ui, "model", &mut provider.model);
-            theme::settings_row(ui, "key_source", |ui| {
+            setting(ui, "key_source", |ui| {
                 crate::theme::select("key_source")
                     .selected_text(&provider.key_source)
                     .show_ui(ui, |ui| {
@@ -824,7 +883,7 @@ fn providers(ui: &mut egui::Ui, llm: &mut LlmSettings, edits: &mut Edits) {
                 );
             }
             provider.api_key_env = (!env.is_empty()).then_some(env);
-            theme::settings_row(ui, "context_tokens", |ui| {
+            setting(ui, "context_tokens", |ui| {
                 edits.number(
                     ui.add(egui::DragValue::new(&mut provider.context_tokens).range(1..=2_000_000)),
                 );
@@ -873,8 +932,33 @@ fn directory_bytes(path: &std::path::Path) -> u64 {
 }
 
 fn toggle(ui: &mut egui::Ui, value: &mut bool, label: &str) -> egui::Response {
-    if ui.cursor().top() > ui.max_rect().top() + 1.0 {
-        ui.separator();
-    }
-    theme::toggle(ui, value, label)
+    setting(ui, label, |ui| theme::switch(ui, value, label))
+}
+fn setting<R>(ui: &mut egui::Ui, label: &str, value: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let description = match label {
+        "Режим новых встреч" => Some(
+            "Локально: локальный AI. Гибрид: текст может отправляться провайдеру. Аудио остаётся на компьютере.",
+        ),
+        "Запоминать голоса" => {
+            Some("Голосовые отпечатки хранятся только локально.")
+        }
+        "Автостоп по тишине" => {
+            Some("0 минут: выключен. Завершение звонка не останавливает запись.")
+        }
+        "Модель распознавания" => {
+            Some("Выбранная модель загрузится автоматически.")
+        }
+        "Проверять обновления" => Some("Раз в час и при запуске."),
+        "Словарь (один термин на строку)" => {
+            Some("Алиасы: werf = верф, вёрф.")
+        }
+        "URL календаря" => Some("Укажите URL, затем перейдите к другому полю."),
+        "Масштаб интерфейса" => Some(if cfg!(target_os = "macos") {
+            "Cmd+= / Cmd+- / Cmd+0: изменить или сбросить масштаб."
+        } else {
+            "Ctrl+= / Ctrl+- / Ctrl+0: изменить или сбросить масштаб."
+        }),
+        _ => None,
+    };
+    theme::settings_row_desc(ui, label, description, value)
 }

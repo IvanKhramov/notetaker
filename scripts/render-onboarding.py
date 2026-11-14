@@ -41,6 +41,7 @@ for path in sorted((root / "crates/app/src").glob("*.rs")):
     if path.stem == "people":
         text += """
 impl Panel {
+    pub fn fixture_merge(&mut self) {let people=&self.snapshot.as_ref().unwrap().people;assert!(people.len()>=2);self.pending_merge=Some((people[0].clone(),people[1].clone()));}
     pub fn fixture(&mut self, settings: &crate::config::Settings, screen: usize) {
         let snapshot=Snapshot::read(settings).unwrap();
         self.root=settings.library.clone();
@@ -56,7 +57,10 @@ impl Panel {
 """
     if path.stem == "organization":
         text += """
-impl Panel { pub fn fixture(&mut self,settings:&crate::config::Settings) {
+impl Panel {
+    pub fn fixture_delete(&mut self){self.delete_dialog=Some("Команда".into());}
+    pub fn fixture_select(&mut self){self.edit_folder("Команда");}
+    pub fn fixture(&mut self,settings:&crate::config::Settings) {
     self.root=settings.library.clone(); self.snapshot=Some(Snapshot::read(&Library::open(&self.root).unwrap()).unwrap()); self.settings_open=true;
 } }
 """
@@ -77,12 +81,13 @@ impl Panel { pub fn fixture(&mut self,state:&AppState) {
         text=text.replace('"../assets/',f'"{root / "crates/app/assets"}/')
         text=text.replace('#[path = "icons.rs"]',f'#[path = "{root / "crates/app/src/icons.rs"}"]')
         text=text.replace('#[cfg(any(windows, target_os = "macos"))]','')
+        text=text.replace('self.default_open,', 'self.default_open || ui.ctx().data(|data| data.get_temp::<bool>(egui::Id::unique("preview-expand-settings")).unwrap_or(false)),')
     if path.stem == "ui":
         text = text.replace("    pub fn new() -> Self", "    pub fn new(state: AppState) -> Self")
         text = text.replace("state: AppState::new(),", "state,")
-        expected = 'egui::Popup::menu(&menu_response).show(|ui| {'
+        expected = 'egui::Popup::menu(&menu_response)'
         assert text.count(expected) == 1, "meeting menu fixture hook changed"
-        text = text.replace(expected, 'egui::Popup::menu(&menu_response).open(ui.ctx().data(|data| data.get_temp::<bool>(egui::Id::unique("fixture-meeting-menu")).unwrap_or(false)) || egui::Popup::is_id_open(ui.ctx(), egui::Popup::menu(&menu_response).get_id())).show(|ui| {')
+        text = text.replace(expected, expected + '.open(ui.ctx().data(|data| data.get_temp::<bool>(egui::Id::unique("fixture-meeting-menu")).unwrap_or(false)) || egui::Popup::is_id_open(ui.ctx(), egui::Popup::menu(&menu_response).get_id()))')
         text += '''
 impl NotetakerApp {
     pub fn fixture(state: AppState, screen: usize) -> Self {
@@ -104,7 +109,7 @@ impl NotetakerApp {
         if screen == 16 { app.state.notices.push((ToastLevel::Success, "Конспект скопирован".into())); }
         if screen == 17 { app.state.rows.clear(); }
         if screen == 18 { app.show_settings = true; }
-        if screen == 19 { app.state.recording.phase = Phase::Recording; }
+        if screen == 19 { app.state.recording.phase = Phase::Recording; app.state.recording.levels=[0.65,0.3]; app.state.recording.started=Some(Instant::now()-Duration::from_secs(123)); }
         if screen == 20 { app.chat_page=true; app.state.chat.open(None,String::new()); }
         if screen == 21 { app.state.tasks_open=true; }
         if (22..=25).contains(&screen) { app.people.fixture(&app.state.settings,screen); }
@@ -116,6 +121,10 @@ impl NotetakerApp {
         if screen == 30 { app.rename=Some("Итоги встречи с командой".into()); }
         if screen == 31 { app.confirm_regenerate=true; }
         if screen == 32 { if let Some(document)=app.state.selected.as_ref().and_then(|p|app.state.documents.get_mut(p)) { document.data.unfinished=true; } }
+        if screen == 35 {app.organization.fixture(&app.state.settings);app.organization.fixture_delete();}
+        if screen == 36 {app.people.fixture(&app.state.settings,23);app.people.fixture_merge();}
+        if screen == 37 {app.organization.fixture(&app.state.settings);app.organization.fixture_select();}
+        if screen == 38 {app.show_settings=true;app.settings_panel.section=crate::settings::Section::Ai;}
         if screen == 5 { app.state.tab = Tab::Transcript; }
         app
     }
@@ -135,6 +144,7 @@ impl eframe::App for Preview {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         // Use the real UI, but never call its logic/worker polling.
         ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("fixture-meeting-menu"), self.screen == 15));
+        ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("preview-expand-settings"),self.screen==37 || self.screen==38));
         self.app.ui(ui, frame);
         if self.screen==33 {
             let ctx=ui.ctx().clone();
@@ -145,6 +155,7 @@ impl eframe::App for Preview {
                     theme::button(ui,"Удалить",theme::ButtonStyle::Danger);
                 });
                 ui.add_enabled(false,theme::styled_button(theme::Palette::of(ui),"Недоступно",theme::ButtonStyle::Secondary));
+                ui.horizontal(|ui|{let mut checked=true;let mut unchecked=false;ui.add(theme::Checkbox::new(&mut checked,"Включён"));ui.add(theme::Checkbox::new(&mut unchecked,"Выключен"));});
                 let mut on=true;theme::toggle(ui,&mut on,"Переключатель");
                 theme::disclosure("Дополнительные параметры").default_open(true).show(ui,|ui| {ui.label("Параметры записи и распознавания");});
                 let mut selected=0;theme::segmented(ui,&mut selected,&[(0,"Конспект"),(1,"Транскрипт")]);
@@ -199,6 +210,7 @@ fn main() -> eframe::Result {
             auto: quickstart::Status::Ready, diarization: quickstart::Status::Ready, semantic: quickstart::Status::Ready };
         if screen == 0 { state.downloading = true; state.quickstart.models = Default::default(); }
         let library = notetaker_core::Library::open(&state.settings.library).unwrap();
+        let mut folders=library.load_folders().unwrap();folders.value.insert("Команда".into(),Default::default());library.save_folders(&folders.value,folders.revision).unwrap();
         for title in ["Планирование недели", "Обсуждение нового интерфейса", "Итоги встречи с командой"] {
             let meta = notetaker_core::MeetingMeta::new(title, chrono::Utc::now());
             let meeting = library.create_meeting(meta.clone()).unwrap();
@@ -249,7 +261,7 @@ if shutil.disk_usage(root).free < 2 * 1024**3:
 # Resolve the derived harness root against the copied workspace lock before its locked build.
 subprocess.run(["cargo", "metadata", "--offline", "--format-version", "1", "--manifest-path", str(harness / "Cargo.toml")], cwd=root, env=env, check=True, stdout=subprocess.DEVNULL)
 subprocess.run(["cargo", "build", "--locked", "--manifest-path", str(harness / "Cargo.toml")], cwd=root, env=env, check=True)
-names = ["welcome", "name", "connections", "home", "note", "transcript", "general", "recording", "calendars", "ai", "search", "storage", "recording-pill", "connections-expanded", "delete-confirm", "meeting-menu", "toast", "empty-library", "narrow-settings", "recording-bar", "chat", "tasks", "people", "person", "series", "digest", "folders", "diagnostics", "tracker-preview", "new-recording", "rename", "regenerate", "capture-warning", "widgets", "update-card"]
+names = ["welcome", "name", "connections", "home", "note", "transcript", "general", "recording", "calendars", "ai", "search", "storage", "recording-pill", "connections-expanded", "delete-confirm", "meeting-menu", "toast", "empty-library", "narrow-settings", "recording-bar", "chat", "tasks", "people", "person", "series", "digest", "folders", "diagnostics", "tracker-preview", "new-recording", "rename", "regenerate", "capture-warning", "widgets", "update-card", "folder-delete", "merge-people", "folders-advanced", "ai-expanded"]
 def render(spec):
     index, name, theme, width, height, zoom = spec
     actual_width = 760 if name == "narrow-settings" and zoom == 1.0 else width

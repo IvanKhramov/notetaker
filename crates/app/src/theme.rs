@@ -45,7 +45,6 @@ pub struct Palette {
     pub accent_hover: Color32,
     pub on_accent: Color32,
     pub red: Color32,
-    pub me: Color32,
 }
 impl Palette {
     pub fn for_dark(dark: bool) -> Self {
@@ -67,7 +66,6 @@ impl Palette {
                 accent_hover: rgb(81, 158, 94),
                 on_accent: rgb(15, 36, 19),
                 red: rgb(224, 103, 91),
-                me: rgb(35, 35, 34),
             }
         } else {
             Self {
@@ -86,7 +84,6 @@ impl Palette {
                 accent_hover: rgb(40, 106, 53),
                 on_accent: Color32::WHITE,
                 red: rgb(196, 69, 58),
-                me: rgb(247, 247, 246),
             }
         }
     }
@@ -325,12 +322,29 @@ impl<'a> Dialog<'a> {
     }
     /// Returns true when the header close button was pressed.
     pub fn show(self, ctx: &egui::Context, contents: impl FnOnce(&mut egui::Ui)) -> bool {
+        self.show_inner(ctx, contents, None::<fn(&mut egui::Ui)>)
+    }
+    pub fn show_footer(
+        self,
+        ctx: &egui::Context,
+        contents: impl FnOnce(&mut egui::Ui),
+        footer: impl FnOnce(&mut egui::Ui),
+    ) -> bool {
+        self.show_inner(ctx, contents, Some(footer))
+    }
+    fn show_inner<F: FnOnce(&mut egui::Ui)>(
+        self,
+        ctx: &egui::Context,
+        contents: impl FnOnce(&mut egui::Ui),
+        footer: Option<F>,
+    ) -> bool {
         if self.open.as_deref() == Some(&false) {
             return false;
         }
         let mut close = false;
         let popup_was_open = egui::Popup::is_any_open(ctx);
         let alpha = appearance(ctx, egui::Id::unique(("modal-fade", &self.title)));
+        let footer_height = if footer.is_some() { 44.0 } else { 0.0 };
         let body = |ui: &mut egui::Ui| {
             ui.multiply_opacity(alpha);
             ui.set_max_height((ctx.content_rect().height() - 80.0).max(100.0));
@@ -348,11 +362,23 @@ impl<'a> Dialog<'a> {
                 });
             });
             ui.add_space(12.0);
-            egui::ScrollArea::vertical()
+            let mut scroll = egui::ScrollArea::vertical()
                 .id_salt("dialog_body")
                 .auto_shrink([false, true])
-                .max_height((ctx.content_rect().height() - 160.0).max(80.0))
-                .show(ui, contents);
+                .max_height((ctx.content_rect().height() - 160.0 - footer_height).max(80.0));
+            if footer_height > 0.0 {
+                scroll = scroll.content_margin(egui::Margin {
+                    left: 0,
+                    right: SCROLL_LANE as i8,
+                    top: 0,
+                    bottom: 0,
+                });
+            }
+            scroll.show(ui, contents);
+            if let Some(footer) = footer {
+                ui.add_space(12.0);
+                footer(ui);
+            }
         };
         if self.anchored {
             let p = Palette::for_dark(ctx.global_style().visuals.dark_mode);
@@ -661,27 +687,25 @@ pub fn card(p: Palette, selected: bool) -> egui::Frame {
         .inner_margin(egui::Margin::symmetric(0, 8))
 }
 
-pub fn chip_frame(p: Palette) -> egui::Frame {
-    egui::Frame::new()
-        .fill(p.soft)
-        .stroke(Stroke::NONE)
-        .corner_radius(255)
-        .inner_margin(egui::Margin::symmetric(8, 3))
-}
-
-pub fn chip(ui: &mut egui::Ui, text: &str) {
-    let p = Palette::of(ui);
-    chip_frame(p).show(ui, |ui| {
-        ui.add_sized(
-            [0.0, 18.0],
-            egui::Label::new(egui::RichText::new(text).size(SMALL).color(p.muted)).truncate(),
-        );
-    });
-}
 pub fn segmented<T: Copy + PartialEq>(
     ui: &mut egui::Ui,
     selected: &mut T,
     values: &[(T, &str)],
+) -> bool {
+    segmented_width(ui, selected, values, None)
+}
+pub fn segmented_full<T: Copy + PartialEq>(
+    ui: &mut egui::Ui,
+    selected: &mut T,
+    values: &[(T, &str)],
+) -> bool {
+    segmented_width(ui, selected, values, Some(ui.available_width()))
+}
+fn segmented_width<T: Copy + PartialEq>(
+    ui: &mut egui::Ui,
+    selected: &mut T,
+    values: &[(T, &str)],
+    width: Option<f32>,
 ) -> bool {
     let mut clicked = false;
     let p = Palette::of(ui);
@@ -690,6 +714,9 @@ pub fn segmented<T: Copy + PartialEq>(
         .corner_radius(RADIUS_CONTROL)
         .inner_margin(4)
         .show(ui, |ui| {
+            if let Some(width) = width {
+                ui.set_width((width - 8.0).max(0.0));
+            }
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
                 for &(value, label) in values {
@@ -699,7 +726,12 @@ pub fn segmented<T: Copy + PartialEq>(
                         Color32::PLACEHOLDER,
                     );
                     let (rect, response) = ui.allocate_exact_size(
-                        egui::vec2(text.size().x + 24.0, 24.0),
+                        egui::vec2(
+                            width.map_or(text.size().x + 24.0, |width| {
+                                (width - 8.0) / values.len() as f32
+                            }),
+                            24.0,
+                        ),
                         egui::Sense::click(),
                     );
                     let active = *selected == value;
@@ -758,14 +790,12 @@ pub fn waveform(ui: &mut egui::Ui, level: f32) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::hover());
     let time = ui.input(|i| i.time) as f32;
     for n in 0..5 {
-        let height = 3.0 + 14.0 * amplitude * (time * 3.0 + n as f32 * 1.2).sin().abs();
-        let x = rect.left() + 3.0 + n as f32 * 4.0;
-        ui.painter().line_segment(
-            [
-                egui::pos2(x, rect.center().y - height / 2.0),
-                egui::pos2(x, rect.center().y + height / 2.0),
-            ],
-            Stroke::new(2.0, p.red),
+        let height = 3.0 + 13.0 * amplitude * (time * 3.0 + n as f32 * 1.2).sin().abs();
+        let x = rect.left() + 1.5 + n as f32 * 5.0;
+        ui.painter().rect_filled(
+            egui::Rect::from_center_size(egui::pos2(x, rect.center().y), egui::vec2(3.0, height)),
+            255,
+            p.accent,
         );
     }
     ui.ctx()
@@ -844,71 +874,51 @@ pub fn nav_label(
 }
 
 pub fn setting_row<R>(ui: &mut egui::Ui, label: &str, value: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    ui.scope(|ui| {
-        ui.spacing_mut().item_spacing.y = 4.0;
-        if ui.available_width() < 440.0 {
-            ui.label(label);
-            ui.horizontal(value).inner
-        } else {
-            ui.horizontal(|ui| {
-                ui.allocate_ui_with_layout(
-                    egui::vec2(ui.available_width() * 0.48, 44.0),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| {
-                        ui.add(egui::Label::new(label).wrap());
-                    },
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), value)
-                    .inner
-            })
-            .inner
-        }
-    })
-    .inner
+    settings_row_desc(ui, label, None, value)
 }
 
 pub fn toggle(ui: &mut egui::Ui, value: &mut bool, label: &str) -> egui::Response {
-    setting_row(ui, label, |ui| {
-        let p = Palette::of(ui);
-        let (_, mut response) =
-            ui.allocate_exact_size(egui::vec2(34.0, 28.0), egui::Sense::click());
-        if response.clicked() {
-            *value = !*value;
-            response.mark_changed();
-        }
-        let rect = egui::Rect::from_center_size(response.rect.center(), egui::vec2(34.0, 20.0));
-        let t = ui
-            .ctx()
-            .animate_bool_with_time(response.id.with("knob"), *value, 0.16);
-        let hover =
-            ui.ctx()
-                .animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
-        let track = mix(p.border_strong, p.accent, t);
-        ui.painter().rect_filled(
-            rect,
-            255,
-            mix(
-                track,
-                if *value { p.accent_hover } else { p.selected },
-                hover * 0.5,
-            ),
-        );
-        focus_ring(ui, &response, 255);
-        ui.painter().circle_filled(
-            rect.center() + egui::vec2(-7.0 + 14.0 * t, 1.0),
-            8.0,
-            Color32::from_black_alpha(24),
-        );
-        ui.painter().circle_filled(
-            rect.center() + egui::vec2(-7.0 + 14.0 * t, 0.0),
-            8.0,
-            Color32::WHITE,
-        );
-        response.widget_info(|| {
-            egui::WidgetInfo::selected(egui::Role::CheckBox, ui.is_enabled(), *value, label)
-        });
-        response
-    })
+    setting_row(ui, label, |ui| switch(ui, value, label))
+}
+pub fn switch(ui: &mut egui::Ui, value: &mut bool, label: &str) -> egui::Response {
+    let p = Palette::of(ui);
+    let (_, mut response) = ui.allocate_exact_size(egui::vec2(34.0, 28.0), egui::Sense::click());
+    if response.clicked() {
+        *value = !*value;
+        response.mark_changed();
+    }
+    let rect = egui::Rect::from_center_size(response.rect.center(), egui::vec2(34.0, 20.0));
+    let t = ui
+        .ctx()
+        .animate_bool_with_time(response.id.with("knob"), *value, 0.16);
+    let hover =
+        ui.ctx()
+            .animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
+    let track = mix(p.border_strong, p.accent, t);
+    ui.painter().rect_filled(
+        rect,
+        255,
+        mix(
+            track,
+            if *value { p.accent_hover } else { p.selected },
+            hover * 0.5,
+        ),
+    );
+    focus_ring(ui, &response, 255);
+    ui.painter().circle_filled(
+        rect.center() + egui::vec2(-7.0 + 14.0 * t, 1.0),
+        8.0,
+        Color32::from_black_alpha(24),
+    );
+    ui.painter().circle_filled(
+        rect.center() + egui::vec2(-7.0 + 14.0 * t, 0.0),
+        8.0,
+        Color32::WHITE,
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::Role::CheckBox, ui.is_enabled(), *value, label)
+    });
+    response
 }
 
 #[derive(Clone, Copy)]
@@ -1047,7 +1057,12 @@ pub fn icon_for_label(label: &str) -> &'static str {
         "Люди" | "Участники" => icons::USERS,
         "Удалить" => icons::TRASH_2,
         "Переименовать" => icons::PENCIL,
-        "Копировать" | "Копировать всё" => icons::COPY,
+        "Копировать" => icons::COPY,
+        "Копировать всё" => icons::FILES,
+        "Редактировать мои заметки" => icons::PENCIL,
+        "Редактировать конспект" => icons::FILE_PEN,
+        "Читать документ" => icons::BOOK_OPEN,
+        "Копировать конспект и транскрипт" => icons::FILES,
         "Пересоздать конспект" => icons::REFRESH_CW,
         "Задачи" => icons::CHECK,
         "Экспорт" => icons::DOWNLOAD,
@@ -1066,12 +1081,29 @@ pub fn icon_for_label(label: &str) -> &'static str {
         }
         text if text.starts_with("Копировать") => icons::COPY,
         text if text.starts_with("Экспорт") => icons::DOWNLOAD,
-        "Показать в папке" => icons::FOLDER,
-        "Отправить задачи в трекер…" => icons::CHECK,
+        "Показать в папке" => icons::FOLDER_OPEN,
+        "Отправить задачи в трекер…" => icons::SEND,
         _ => icons::FILE_TEXT,
     }
 }
 pub fn icon_button(ui: &mut egui::Ui, glyph: &str, tooltip: &str) -> egui::Response {
+    icon_button_with_color(ui, glyph, tooltip, Palette::of(ui).muted, true)
+}
+pub fn icon_button_visible(
+    ui: &mut egui::Ui,
+    glyph: &str,
+    tooltip: &str,
+    visible: bool,
+) -> egui::Response {
+    icon_button_with_color(ui, glyph, tooltip, Palette::of(ui).muted, visible)
+}
+pub fn icon_button_with_color(
+    ui: &mut egui::Ui,
+    glyph: &str,
+    tooltip: &str,
+    color: Color32,
+    visible: bool,
+) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(COMPACT_HEIGHT, COMPACT_HEIGHT),
         egui::Sense::click(),
@@ -1087,25 +1119,27 @@ pub fn icon_button(ui: &mut egui::Ui, glyph: &str, tooltip: &str) -> egui::Respo
         response.is_pointer_button_down_on() && ui.is_enabled(),
         0.12,
     );
-    ui.painter().rect_filled(
-        rect,
-        RADIUS_CONTROL,
-        mix(mix(Color32::TRANSPARENT, p.hover, t), p.selected, down),
-    );
-    focus_ring(ui, &response, RADIUS_CONTROL);
-    paint_icon(
-        ui,
-        rect.center(),
-        glyph,
-        16.0,
-        if !ui.is_enabled() {
-            p.tertiary
-        } else if response.hovered() {
-            p.text
-        } else {
-            p.muted
-        },
-    );
+    if visible || response.has_focus() || ui.input(|i| i.has_touch_screen()) {
+        ui.painter().rect_filled(
+            rect,
+            RADIUS_CONTROL,
+            mix(mix(Color32::TRANSPARENT, p.hover, t), p.selected, down),
+        );
+        focus_ring(ui, &response, RADIUS_CONTROL);
+        paint_icon(
+            ui,
+            rect.center(),
+            glyph,
+            16.0,
+            if !ui.is_enabled() {
+                p.tertiary
+            } else if response.hovered() {
+                p.text
+            } else {
+                color
+            },
+        );
+    }
     response
         .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), tooltip));
     response.on_hover_text(tooltip)
@@ -1122,14 +1156,20 @@ pub fn select_icon(ui: &egui::Ui, rect: egui::Rect, _: &egui::style::WidgetVisua
 pub struct Disclosure {
     title: egui::WidgetText,
     default_open: bool,
+    status: Option<String>,
 }
 pub fn disclosure(title: impl Into<egui::WidgetText>) -> Disclosure {
     Disclosure {
         title: title.into(),
         default_open: false,
+        status: None,
     }
 }
 impl Disclosure {
+    pub fn status(mut self, status: &str) -> Self {
+        self.status = Some(status.into());
+        self
+    }
     pub fn default_open(mut self, open: bool) -> Self {
         self.default_open = open;
         self
@@ -1148,8 +1188,13 @@ impl Disclosure {
                 id,
                 self.default_open,
             );
-            let (rect, response) = ui
-                .allocate_exact_size(egui::vec2(ui.available_width(), 32.0), egui::Sense::click());
+            let (rect, response) = ui.allocate_exact_size(
+                egui::vec2(
+                    ui.available_width(),
+                    if self.status.is_some() { 44.0 } else { 32.0 },
+                ),
+                egui::Sense::click(),
+            );
             let p = Palette::of(ui);
             let hover = ui.ctx().animate_bool_with_time(
                 response.id.with("hover"),
@@ -1172,7 +1217,28 @@ impl Disclosure {
                 FontId::new(16.0, FontFamily::Name("icons".into())),
                 p.muted,
             );
-            let center = rect.left_center() + egui::vec2(12.0, 0.0);
+            let center = if self.status.is_some() {
+                rect.right_center() - egui::vec2(8.0, 0.0)
+            } else {
+                rect.left_center() + egui::vec2(12.0, 0.0)
+            };
+            let status_width = self.status.as_ref().map_or(0.0, |status| {
+                let text = ui.painter().layout_no_wrap(
+                    status.clone(),
+                    FontId::proportional(12.0),
+                    p.muted,
+                );
+                let width = (text.size().x + 16.0).min(160.0);
+                let badge = egui::Rect::from_center_size(
+                    rect.right_center() - egui::vec2(28.0 + width / 2.0, 0.0),
+                    egui::vec2(width, 24.0),
+                );
+                ui.painter().rect_filled(badge, 255, p.soft);
+                ui.painter()
+                    .with_clip_rect(badge.shrink2(egui::vec2(8.0, 0.0)))
+                    .galley(badge.center() - text.size() / 2.0, text, p.muted);
+                width + 36.0
+            });
             ui.painter().add(
                 egui::epaint::TextShape::new(center - galley.size() / 2.0, galley, p.muted)
                     .with_angle_and_anchor(
@@ -1183,11 +1249,15 @@ impl Disclosure {
             let text = self.title.into_galley(
                 ui,
                 Some(egui::TextWrapMode::Truncate),
-                rect.width() - 40.0,
+                rect.width() - 40.0 - status_width,
                 medium(BUTTON),
             );
             ui.painter().galley(
-                rect.left_center() + egui::vec2(28.0, -text.size().y / 2.0),
+                rect.left_center()
+                    + egui::vec2(
+                        if self.status.is_some() { 0.0 } else { 28.0 },
+                        -text.size().y / 2.0,
+                    ),
                 text,
                 p.text,
             );
@@ -1197,7 +1267,13 @@ impl Disclosure {
             });
             ui.ctx()
                 .accesskit_node_builder(response.id, |node| node.set_expanded(state.is_open()));
-            state.show_body_unindented(ui, contents)
+            let padding = if self.status.is_some() { 16.0 } else { 0.0 };
+            state.show_body_unindented(ui, |ui| {
+                ui.add_space(padding);
+                let result = contents(ui);
+                ui.add_space(padding);
+                result
+            })
         })
         .inner
     }
@@ -1609,18 +1685,6 @@ mod interaction_tests {
     }
 }
 
-/// Dividers are reserved for settings groups, not ordinary forms or list rows.
-pub fn settings_row<R>(
-    ui: &mut egui::Ui,
-    label: &str,
-    value: impl FnOnce(&mut egui::Ui) -> R,
-) -> R {
-    if ui.cursor().top() > ui.max_rect().top() + 1.0 {
-        ui.separator();
-    }
-    setting_row(ui, label, value)
-}
-
 pub fn row_background(ui: &egui::Ui, response: &egui::Response, selected: bool) {
     let p = Palette::of(ui);
     let t =
@@ -1675,4 +1739,418 @@ mod footer_tests {
         )
         .drop_without_applying_deltas();
     }
+}
+
+/// Checkbox keeps a visible outline in either palette and shares keyboard activation.
+pub struct Checkbox<'a> {
+    value: &'a mut bool,
+    label: &'a str,
+}
+impl<'a> Checkbox<'a> {
+    pub fn new(value: &'a mut bool, label: &'a str) -> Self {
+        Self { value, label }
+    }
+    pub fn without_text(value: &'a mut bool) -> Self {
+        Self::new(value, "")
+    }
+}
+impl egui::Widget for Checkbox<'_> {
+    fn ui(self, ui: &mut egui::Ui) -> egui::Response {
+        let p = Palette::of(ui);
+        let text = ui.painter().layout_no_wrap(
+            self.label.into(),
+            FontId::proportional(14.0),
+            Color32::PLACEHOLDER,
+        );
+        let width = 16.0
+            + if self.label.is_empty() {
+                0.0
+            } else {
+                8.0 + text.size().x
+            };
+        let (rect, mut response) =
+            ui.allocate_exact_size(egui::vec2(width, 24.0), egui::Sense::click());
+        if response.clicked() {
+            *self.value = !*self.value;
+            response.mark_changed();
+        }
+        let square = egui::Rect::from_center_size(
+            rect.left_center() + egui::vec2(8.0, 0.0),
+            egui::vec2(16.0, 16.0),
+        );
+        ui.painter().rect(
+            square,
+            4,
+            if *self.value {
+                p.accent
+            } else {
+                Color32::TRANSPARENT
+            },
+            Stroke::new(
+                1.0,
+                if response.hovered() {
+                    p.tertiary
+                } else {
+                    p.border_strong
+                },
+            ),
+            egui::StrokeKind::Inside,
+        );
+        if *self.value {
+            paint_icon(ui, square.center(), icons::CHECK, 12.0, Color32::WHITE);
+        }
+        focus_ring(ui, &response.clone().with_new_rect(square), 4);
+        if !self.label.is_empty() {
+            ui.painter().galley(
+                rect.left_center() + egui::vec2(24.0, -text.size().y / 2.0),
+                text,
+                p.text,
+            );
+        }
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(
+                egui::Role::CheckBox,
+                ui.is_enabled(),
+                *self.value,
+                self.label,
+            )
+        });
+        response
+    }
+}
+pub fn toggle_chip(ui: &mut egui::Ui, value: &mut bool, label: &str) -> egui::Response {
+    let p = Palette::of(ui);
+    let text = ui
+        .painter()
+        .layout_no_wrap(label.into(), medium(14.0), Color32::PLACEHOLDER);
+    let (rect, mut response) =
+        ui.allocate_exact_size(egui::vec2(text.size().x + 24.0, 32.0), egui::Sense::click());
+    if response.clicked() {
+        *value = !*value;
+        response.mark_changed();
+    }
+    let hover =
+        ui.ctx()
+            .animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
+    ui.painter().rect_filled(
+        rect,
+        6,
+        if *value {
+            p.selected
+        } else {
+            mix(p.soft, p.hover, hover)
+        },
+    );
+    ui.painter().galley(
+        rect.center() - text.size() / 2.0,
+        text,
+        if *value { p.text } else { p.muted },
+    );
+    focus_ring(ui, &response, 6);
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::Role::CheckBox, ui.is_enabled(), *value, label)
+    });
+    response
+}
+pub fn form_field<R>(
+    ui: &mut egui::Ui,
+    label: &str,
+    description: Option<&str>,
+    control: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let gap = ui.spacing().item_spacing.y;
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let p = Palette::of(ui);
+        ui.label(egui::RichText::new(label).font(medium(13.0)).color(p.muted));
+        if let Some(description) = description {
+            ui.add_space(4.0);
+            ui.add(
+                egui::Label::new(egui::RichText::new(description).size(12.0).color(p.muted)).wrap(),
+            );
+        }
+        ui.add_space(6.0);
+        ui.spacing_mut().text_edit_width = ui.available_width();
+        let result = control(ui);
+        ui.add_space((16.0 - gap).max(0.0));
+        result
+    })
+    .inner
+}
+pub fn search_input(
+    ui: &mut egui::Ui,
+    text: &mut String,
+    id: impl egui::AsIdSalt,
+    placeholder: &str,
+    shortcut: Option<&str>,
+) -> egui::Response {
+    let p = Palette::of(ui);
+    egui::Frame::new()
+        .fill(p.bg)
+        .stroke(Stroke::new(1.0, p.border_strong))
+        .corner_radius(6)
+        .inner_margin(egui::Margin::symmetric(8, 0))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(16.0, 32.0), egui::Sense::hover());
+                paint_icon(ui, rect.center(), icons::SEARCH, 16.0, p.muted);
+                let reserved = shortcut.map_or(0.0, |s| {
+                    ui.painter()
+                        .layout_no_wrap(s.into(), FontId::proportional(12.0), p.tertiary)
+                        .size()
+                        .x
+                        + 8.0
+                });
+                let response = ui.add(
+                    egui::TextEdit::singleline(text)
+                        .id_salt(id)
+                        .font(FontId::proportional(14.0))
+                        .frame(egui::Frame::NONE)
+                        .margin(0)
+                        .align(egui::Align2::LEFT_CENTER)
+                        .min_size(egui::vec2(0.0, 32.0))
+                        .desired_width((ui.available_width() - reserved).max(24.0))
+                        .hint_text(placeholder),
+                );
+                if let Some(shortcut) = shortcut {
+                    ui.label(egui::RichText::new(shortcut).size(12.0).color(p.tertiary));
+                }
+                response
+            })
+            .inner
+        })
+        .inner
+}
+/// Shared fixed columns for past and upcoming meetings.
+pub fn meeting_row(
+    ui: &mut egui::Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    time: &str,
+    title: &str,
+    meta: &str,
+    action: bool,
+    selected: bool,
+) -> (egui::Response, bool) {
+    let p = Palette::of(ui);
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), 40.0),
+        egui::Sense::click_and_drag(),
+    );
+    row_background(ui, &response, selected);
+    ui.painter().text(
+        rect.left_center() + egui::vec2(8.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        time,
+        FontId::proportional(13.0),
+        p.muted,
+    );
+    let mut record = false;
+    let action_width = if action { 100.0 } else { 0.0 };
+    let meta_width = if meta.is_empty() {
+        0.0
+    } else {
+        ui.painter()
+            .layout_no_wrap(meta.into(), FontId::proportional(12.0), p.tertiary)
+            .size()
+            .x
+            .min(140.0)
+            + 16.0
+    };
+    let mut job = egui::text::LayoutJob::simple(
+        title.into(),
+        medium(14.0),
+        p.text,
+        (rect.width() - 70.0 - meta_width - action_width - 8.0).max(1.0),
+    );
+    job.wrap.max_rows = 1;
+    let text = ui.painter().layout_job(job);
+    ui.painter().galley(
+        rect.left_center() + egui::vec2(70.0, -text.size().y / 2.0),
+        text,
+        p.text,
+    );
+    if !meta.is_empty() {
+        ui.painter().text(
+            rect.right_center() - egui::vec2(8.0 + action_width, 0.0),
+            egui::Align2::RIGHT_CENTER,
+            meta,
+            FontId::proportional(12.0),
+            p.tertiary,
+        );
+    }
+    if action {
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .id_salt(id)
+                .max_rect(egui::Rect::from_min_size(
+                    rect.right_center() - egui::vec2(96.0, 14.0),
+                    egui::vec2(96.0, 28.0),
+                ))
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+            |ui| {
+                record = ui
+                    .add(
+                        styled_button(p, "Записать", ButtonStyle::Ghost)
+                            .min_size(egui::vec2(0.0, 28.0)),
+                    )
+                    .clicked();
+            },
+        );
+    }
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), title));
+    (response, record)
+}
+pub fn submenu<R>(
+    ui: &mut egui::Ui,
+    icon: &str,
+    label: &str,
+    body: impl FnOnce(&mut egui::Ui) -> R,
+) {
+    let p = Palette::of(ui);
+    let mut job = egui::text::LayoutJob::default();
+    if !icon.is_empty() {
+        job.append(
+            icon,
+            0.0,
+            egui::TextFormat {
+                font_id: FontId::new(16.0, FontFamily::Name("icons".into())),
+                color: p.muted,
+                ..Default::default()
+            },
+        );
+    }
+    job.append(
+        label,
+        if icon.is_empty() { 0.0 } else { 6.0 },
+        egui::TextFormat {
+            font_id: FontId::proportional(14.0),
+            color: p.text,
+            ..Default::default()
+        },
+    );
+    let button = egui::Button::new(job)
+        .frame(false)
+        .min_size(egui::vec2(ui.available_width(), 30.0))
+        .right_text(
+            egui::RichText::new(icons::CHEVRON_RIGHT)
+                .font(FontId::new(16.0, FontFamily::Name("icons".into())))
+                .color(p.tertiary),
+        );
+    ui.scope(|ui| {
+        ui.spacing_mut().interact_size.y = 30.0;
+        ui.spacing_mut().item_spacing.y = 0.0;
+        egui::containers::menu::SubMenuButton::from_button(button).ui(ui, body);
+    });
+}
+
+pub fn settings_group<R>(
+    ui: &mut egui::Ui,
+    title: &str,
+    body: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    if !title.is_empty() {
+        section_caption(ui, title);
+        ui.add_space(8.0);
+    }
+    let key = egui::Id::unique("active-settings-group");
+    let id = ui.scope_id().with(("group", title));
+    let previous = ui.ctx().data_mut(|d| {
+        let previous = d.get_temp::<egui::Id>(key);
+        d.insert_temp(key, id);
+        d.insert_temp(id.with("rows"), 0_usize);
+        previous
+    });
+    let result = egui::Frame::new()
+        .fill(Palette::of(ui).card)
+        .corner_radius(8)
+        .stroke(Stroke::new(1.0, Palette::of(ui).border))
+        .inner_margin(egui::Margin::symmetric(16, 0))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            body(ui)
+        })
+        .inner;
+    ui.ctx().data_mut(|d| {
+        if let Some(previous) = previous {
+            d.insert_temp(key, previous);
+        } else {
+            d.remove::<egui::Id>(key);
+        }
+    });
+    ui.add_space(24.0);
+    result
+}
+pub fn settings_disclosure<R>(
+    ui: &mut egui::Ui,
+    title: &str,
+    body: impl FnOnce(&mut egui::Ui) -> R,
+) {
+    settings_group(ui, "", |ui| {
+        disclosure(title).show(ui, body);
+    });
+}
+pub fn settings_row_desc<R>(
+    ui: &mut egui::Ui,
+    label: &str,
+    description: Option<&str>,
+    control: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let p = Palette::of(ui);
+    let group = ui
+        .ctx()
+        .data(|d| d.get_temp::<egui::Id>(egui::Id::unique("active-settings-group")));
+    if let Some(id) = group {
+        let index = ui.ctx().data_mut(|d| {
+            let index = d.get_temp::<usize>(id.with("rows")).unwrap_or(0);
+            d.insert_temp(id.with("rows"), index + 1);
+            index
+        });
+        if index > 0 {
+            let mut painter = ui.painter().clone();
+            painter.set_opacity(1.0);
+            painter.hline(
+                ui.max_rect().x_range(),
+                ui.cursor().top(),
+                Stroke::new(1.0, p.border),
+            );
+        }
+    }
+    let width = ui.available_width();
+    let label_width = (width * 0.52).max(100.0);
+    let desc = description.map(|text| {
+        ui.painter().layout(
+            text.into(),
+            FontId::proportional(12.0),
+            p.muted,
+            label_width,
+        )
+    });
+    let label_galley = ui.painter().layout(
+        label.into(),
+        FontId::proportional(14.0),
+        p.text,
+        label_width,
+    );
+    let height =
+        (label_galley.size().y + desc.as_ref().map_or(0.0, |d| d.size().y + 4.0) + 16.0).max(44.0);
+    ui.horizontal(|ui| {
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(label_width, height), egui::Sense::hover());
+        let text_height = label_galley.size().y + desc.as_ref().map_or(0.0, |d| d.size().y + 4.0);
+        let origin = egui::pos2(rect.left(), rect.center().y - text_height / 2.0);
+        let label_height = label_galley.size().y;
+        ui.painter().galley(origin, label_galley, p.text);
+        if let Some(desc) = desc {
+            ui.painter()
+                .galley(origin + egui::vec2(0.0, label_height + 4.0), desc, p.muted);
+        }
+        ui.allocate_ui_with_layout(
+            egui::vec2((width - label_width - 8.0).max(32.0), height),
+            egui::Layout::right_to_left(egui::Align::Center),
+            control,
+        )
+        .inner
+    })
+    .inner
 }

@@ -277,8 +277,8 @@ impl Panel {
                 ui.style_mut().text_styles.insert(egui::TextStyle::Heading,theme::semibold(20.0));
                 ui.horizontal(|ui| {
                     for step in 0..3 {
-                        let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-                        ui.painter().circle_filled(rect.center(), 3.0, if step == self.step { Palette::of(ui).text } else { Palette::of(ui).border_strong });
+                        let (rect, _) = ui.allocate_exact_size(egui::vec2(24.0, 3.0), egui::Sense::hover());
+                        ui.painter().rect_filled(rect,255,if step == self.step { Palette::of(ui).text } else { Palette::of(ui).border_strong });
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if theme::icon_button(ui, theme::icons::X, "Закрыть").clicked() { open = false; }
@@ -334,7 +334,7 @@ impl Panel {
                                     });
                                     if let Some(error) = &state.quickstart.calendar_error { ui.colored_label(Palette::of(ui).red, error); }
                                 } else { ui.label("Календарь подключён"); }
-                                if theme::button(ui, "Пропустить календарь", crate::theme::ButtonStyle::Ghost).clicked() { self.calendar_url.clear(); }
+                                if ui.add(theme::styled_button(Palette::of(ui),"Пропустить календарь",theme::ButtonStyle::Ghost).icon(theme::icons::X)).clicked() { self.calendar_url.clear(); }
                             });
                             crate::theme::disclosure("AI для конспектов").show(ui, |ui| {
                                 ui.label("Текст встречи будет отправлен выбранному AI. Аудио останется на компьютере.");

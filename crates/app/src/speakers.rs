@@ -1,7 +1,7 @@
 //! Speaker controls and selection are kept separate from text editing.
 use std::collections::BTreeSet;
 
-use eframe::egui::{self, RichText};
+use eframe::egui;
 use notetaker_core::{MeetingMeta, SpeakerEdit, SpeakerUndo, Transcript};
 use uuid::Uuid;
 
@@ -47,17 +47,6 @@ impl SpeakerUi {
     }
 }
 
-fn label<'a>(text: &'a Transcript, id: &'a str) -> &'a str {
-    if id == "me" || text.self_speaker.as_deref() == Some(id) {
-        return "Я";
-    }
-    match text.speaker_name(id) {
-        "me" => "Я",
-        "them" => "Собеседники",
-        name => name,
-    }
-}
-
 pub fn rename_menu(
     ui: &mut egui::Ui,
     transcript: &Transcript,
@@ -68,44 +57,13 @@ pub fn rename_menu(
     show_actions: bool,
 ) -> Option<SpeakerEdit> {
     let mut edit = None;
-    let title = transcript.speaker_suggestions.get(id).map_or_else(
-        || label(transcript, id).to_owned(),
-        |name| format!("{name}?"),
-    );
-    if ui
-        .add(
-            egui::Label::new(
-                RichText::new(title)
-                    .font(crate::theme::medium(13.0))
-                    .color(crate::theme::Palette::of(ui).text),
-            )
-            .sense(egui::Sense::click()),
-        )
-        .clicked()
-    {
-        crate::people::request(
-            ui,
-            crate::people::Request {
-                name: transcript.speaker_name(id).into(),
-                email: String::new(),
-                voice: transcript.speaker_voice_ids.get(id).cloned(),
-            },
-        );
-    }
     // Quiet, frameless: a framed 32px button outweighed the speaker name.
-    let more = ui
-        .scope(|ui| {
-            let focused = ui.memory(|mem| mem.has_focus(ui.next_auto_id()));
-            if !show_actions
-                && !focused
-                && !ui.input(|i| i.has_touch_screen())
-                && !egui::Popup::is_any_open(ui.ctx())
-            {
-                ui.multiply_opacity(0.0);
-            }
-            crate::theme::icon_button(ui, crate::theme::icons::ELLIPSIS, "Действия собеседника")
-        })
-        .inner;
+    let more = crate::theme::icon_button_visible(
+        ui,
+        crate::theme::icons::ELLIPSIS,
+        "Действия собеседника",
+        show_actions || egui::Popup::is_any_open(ui.ctx()),
+    );
     egui::Popup::menu(&more).show(|ui| {
         let name_key = ui.make_persistent_id(("speaker-name", meta.id, id));
         let all_key = name_key.with("everywhere");
@@ -125,7 +83,10 @@ pub fn rename_menu(
         }) {
             ui.add_enabled(
                 global_allowed,
-                egui::Checkbox::new(&mut everywhere, "Применить ко всем встречам с этим голосом"),
+                crate::theme::Checkbox::new(
+                    &mut everywhere,
+                    "Применить ко всем встречам с этим голосом",
+                ),
             );
             if !global_allowed {
                 everywhere = false;
@@ -224,8 +185,17 @@ pub fn count_control(
     let mut edit = None;
     let timeline = document.data.transcript.speaker_timeline();
     ui.horizontal_wrapped(|ui| {
-        let response = ui
-            .add_enabled_ui(unavailable.is_none(), |ui| {
+        let response = if unavailable.is_some() {
+            ui.label(
+                egui::RichText::new(format!(
+                    "Собеседников: {}",
+                    remote_count(&document.data.transcript)
+                ))
+                .size(12.0)
+                .color(Palette::of(ui).tertiary),
+            )
+        } else {
+            ui.add_enabled_ui(true, |ui| {
                 let label = format!("Собеседников: {}", remote_count(&document.data.transcript));
                 let button = theme::styled_button(Palette::of(ui), &label, ButtonStyle::Ghost)
                     .right_text(" ");
@@ -258,11 +228,12 @@ pub fn count_control(
                 );
                 response
             })
-            .inner;
+            .inner
+        };
         if let Some(reason) = unavailable {
-            response.on_disabled_hover_text(reason);
+            response.on_hover_text(reason);
         }
-        if timeline.speakers.len() >= 2 {
+        if remote_count(&document.data.transcript) >= 2 {
             ui.add_enabled_ui(editable, |ui| merge_menu(ui, &timeline, &mut edit));
         }
         if document.speaker_ui.recalculating {

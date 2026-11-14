@@ -128,10 +128,10 @@ impl Panel {
                         ui.visuals().warn_fg_color,
                         "Это Локально-встреча. Задача и фрагмент конспекта покинут компьютер.",
                     );
-                    ui.checkbox(
+                    ui.add(crate::theme::Checkbox::new(
                         &mut self.local_consent,
                         "Подтверждаю отправку Локально-данных в трекер",
-                    );
+                    ));
                 }
                 crate::theme::footer(ui, |ui| {
                     if ui

@@ -237,12 +237,16 @@ impl Connections {
                             },
                         );
                     }
-                    if crate::theme::button(
-                        ui,
-                        "Войти в подписку",
-                        crate::theme::ButtonStyle::Ghost,
-                    )
-                    .clicked()
+                    if ui
+                        .add(
+                            crate::theme::styled_button(
+                                crate::theme::Palette::of(ui),
+                                "Войти в подписку",
+                                crate::theme::ButtonStyle::Secondary,
+                            )
+                            .icon(crate::theme::icons::EXTERNAL_LINK),
+                        )
+                        .clicked()
                     {
                         operation = Some(Operation::Login);
                     }
@@ -304,11 +308,11 @@ impl Connections {
             if selected.is_some_and(|selected| selected != index) {
                 continue;
             }
-            ui.push_id(index, |ui| { crate::theme::disclosure(card.title)
+            ui.push_id(index, |ui| { crate::theme::settings_group(ui,"",|ui| {crate::theme::disclosure(card.title).status(if card.status.starts_with("Ошибка:"){ "Ошибка" }else{&card.status})
                 .default_open(default == card.provider.id || selected.is_some()).show(ui, |ui| {
                 if card.status.starts_with("Ошибка:") {
                     ui.colored_label(crate::theme::Palette::of(ui).red, &card.status);
-                } else { ui.label(&card.status); }
+                } else if card.status.len()>48 { ui.label(&card.status); }
                 let before = serde_json::to_value(&card.provider).expect("provider serialize");
                 let mut operation = None;
                 let mut typing = false;
@@ -385,7 +389,7 @@ impl Connections {
                     if matches!(operation, Operation::Save | Operation::Default) { card.edited = None; }
                     actions.push(Action { index, operation, provider: card.provider.clone(), key: if card.key_editing { String::new() } else { card.key.clone() } });
                 }
-            }); });
+            }); }); });
         }
         actions
     }

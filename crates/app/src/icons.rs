@@ -28,8 +28,32 @@ pub const PANEL_LEFT: &str = "\u{e12d}";
 pub const DATABASE: &str = "\u{e0b1}";
 pub const HARD_DRIVE: &str = "\u{e0f0}";
 
+pub const FILES: &str = "\u{e0d3}";
+
+pub const SEND: &str = "\u{e155}";
+
+pub const FILE_PEN: &str = "\u{e321}";
+
+pub const BOOK_OPEN: &str = "\u{e063}";
+
+pub const FOLDER_OPEN: &str = "\u{e246}";
+
+pub const REPEAT: &str = "\u{e149}";
+
+pub const PIN: &str = "\u{e258}";
+
+pub const EXTERNAL_LINK: &str = "\u{e0bd}";
+
 #[cfg(test)]
 pub const ALL: &[&str] = &[
+    EXTERNAL_LINK,
+    PIN,
+    REPEAT,
+    FOLDER_OPEN,
+    BOOK_OPEN,
+    FILE_PEN,
+    SEND,
+    FILES,
     SEARCH,
     CALENDAR,
     MESSAGE_CIRCLE,
