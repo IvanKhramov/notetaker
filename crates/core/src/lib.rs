@@ -4,7 +4,7 @@ mod brief;
 pub mod folders;
 mod people;
 pub mod sharing;
-pub use people::{PeopleEdits, Person, resolve_people};
+pub use people::{PeopleEdits, Person, person_from_name, resolve_people};
 mod relationships;
 pub use relationships::{CarryOver, MeetingSummary, PersonPage, Series, decisions};
 mod digest;
@@ -36,6 +36,7 @@ pub use speakers::{MergeUndo, SpeakerStats, SpeakerTimeline, TimelineSegment};
 pub use vocabulary::Vocabulary;
 pub use voices::{MeetingVoices, SELF_THRESHOLD, VOICE_MODEL, Voice, VoiceLibrary, cosine};
 pub use voices::{SpeakerEdit, SpeakerEditResult, SpeakerUndo};
+pub use voices::{VOICE_NAME_TAKEN, VoiceEvidence, VoiceSample};
 
 pub use attachments::{attachment_image_path, attachment_references, markdown_images};
 pub use index::Hit;
@@ -48,6 +49,8 @@ pub use storage::{Library, Meeting, Revision, Versioned};
 /// Errors from meeting storage, schema validation, or the rebuildable index.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("Транскрипт изменился после сверки, отмена недоступна")]
+    TranscriptUndoChanged,
     #[error("Не удалось изменить название: {0}")]
     TitleEdit(String),
     #[error("filesystem operation failed: {0}")]

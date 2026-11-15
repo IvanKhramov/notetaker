@@ -47,6 +47,14 @@ fn sends_auth_and_ignores_unknown_optional_fields() {
     assert!(request.contains("x-auth-token: test-secret"));
 }
 #[test]
+fn pending_transcript_is_a_typed_retryable_outcome() {
+    let (client, task) = server(200, br#"{"status":"pending","tracks":[]}"#.to_vec());
+    let error = client.transcript("neutral").unwrap_err();
+    assert!(error.is::<super::super::TranscriptNotReady>());
+    assert_eq!(error.to_string(), "Транскрипция Толка ещё не готова");
+    task.join().unwrap();
+}
+#[test]
 fn rejects_redirect_auth_rate_limit_and_malformed_shapes_without_secrets() {
     for (status, body, expected) in [
         (302, "{}", "302"),

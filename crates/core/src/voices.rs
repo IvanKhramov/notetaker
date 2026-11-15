@@ -1,5 +1,10 @@
 //! Local biometric state. Never embed these vectors in portable meeting files.
-use std::{collections::BTreeMap, fs, io::Write, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    io::Write,
+    path::Path,
+};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -25,12 +30,15 @@ pub struct Voice {
 pub struct VoiceLibrary {
     pub model: String,
     pub voices: Vec<Voice>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub tolk_samples: BTreeSet<String>,
 }
 impl Default for VoiceLibrary {
     fn default() -> Self {
         Self {
             model: VOICE_MODEL.into(),
             voices: Vec::new(),
+            tolk_samples: BTreeSet::new(),
         }
     }
 }
@@ -50,7 +58,168 @@ pub fn cosine(a: &[f32], b: &[f32]) -> Option<f32> {
     (dot.is_finite() && norm.is_finite() && norm > 1e-6).then(|| (dot / norm).clamp(-1.0, 1.0))
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VoiceEvidence {
+    pub speaker: String,
+    pub name: String,
+    pub registered: bool,
+    #[serde(default)]
+    pub track: Option<crate::Channel>,
+    pub ranges: Vec<(u64, u64)>,
+}
+pub struct VoiceSample {
+    pub speaker: String,
+    pub name: String,
+    pub embedding: Vec<f32>,
+    pub own: bool,
+}
+pub const VOICE_NAME_TAKEN: &str =
+    "Голос не сохранён: имя уже занято другим голосом. Если это другой человек, уточните имя.";
+fn same_name(a: &str, b: &str) -> bool {
+    a.trim().to_lowercase() == b.trim().to_lowercase()
+}
+fn add_sample(voice: &mut Voice, embedding: &Vec<f32>) {
+    if !voice.embeddings.contains(embedding) {
+        if voice.embeddings.len() >= 8 {
+            voice.embeddings.remove(0);
+        }
+        voice.embeddings.push(embedding.clone());
+        voice.updated_at = Utc::now();
+    }
+}
+fn microphone_speaker(transcript: &Transcript, speaker: &str) -> bool {
+    transcript
+        .segments
+        .iter()
+        .any(|segment| segment.speaker.0 == speaker)
+        && transcript
+            .segments
+            .iter()
+            .filter(|segment| segment.speaker.0 == speaker)
+            .all(|segment| segment.channel == crate::Channel::Mic)
+}
+enum VoiceKey<'a> {
+    Name,
+    Linked(&'a str),
+    Stable(&'a str),
+}
 impl VoiceLibrary {
+    fn identity(
+        &self,
+        name: &str,
+        linked: Option<&str>,
+        own: bool,
+    ) -> std::result::Result<Option<usize>, &'static str> {
+        let matches: Vec<_> = self
+            .voices
+            .iter()
+            .enumerate()
+            .filter(|(_, voice)| {
+                if own {
+                    voice.is_me
+                } else {
+                    !voice.is_me && linked.is_some_and(|id| voice.id.as_deref() == Some(id))
+                }
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if matches.len() > 1 {
+            return Err("Собственный голос неоднозначен");
+        }
+        let existing = matches.first().copied();
+        // Legacy duplicate names stay readable; updating a linked identity adds no duplicate.
+        if existing.is_some_and(|index| same_name(&self.voices[index].name, name)) {
+            return Ok(existing);
+        }
+        if self
+            .voices
+            .iter()
+            .enumerate()
+            .any(|(index, voice)| Some(index) != existing && same_name(&voice.name, name))
+        {
+            return Err(VOICE_NAME_TAKEN);
+        }
+        Ok(existing)
+    }
+    pub fn name_available(&self, name: &str, linked: Option<&str>, own: bool) -> bool {
+        self.identity(name, linked, own).is_ok()
+    }
+    pub fn speaker_name_status(
+        &self,
+        transcript: &Transcript,
+        edit: &SpeakerEdit,
+        own_allowed: bool,
+    ) -> Option<String> {
+        let SpeakerEdit::Rename {
+            speaker,
+            name,
+            is_me,
+            everywhere,
+        } = edit
+        else {
+            return None;
+        };
+        let correcting = !everywhere
+            && !transcript.speaker_names.contains_key(speaker)
+            && transcript
+                .speaker_suggestions
+                .get(speaker)
+                .is_some_and(|guess| guess != name.trim());
+        let linked = if correcting {
+            None
+        } else {
+            transcript
+                .speaker_voice_ids
+                .get(speaker)
+                .map(String::as_str)
+        };
+        self.identity(
+            name,
+            linked,
+            *is_me || own_allowed && microphone_speaker(transcript, speaker),
+        )
+        .err()
+        .map(String::from)
+    }
+    fn enroll(
+        &mut self,
+        key: VoiceKey<'_>,
+        name: &str,
+        own: bool,
+        embedding: &Vec<f32>,
+    ) -> Result<usize> {
+        let linked = match key {
+            VoiceKey::Name => None,
+            VoiceKey::Linked(id) | VoiceKey::Stable(id) => Some(id),
+        };
+        let existing = self
+            .identity(name, linked, own)
+            .map_err(|reason| crate::Error::SpeakerEdit(reason.into()))?;
+        let index = existing.unwrap_or_else(|| {
+            let proposed = match key {
+                VoiceKey::Stable(id)
+                    if !own
+                        && !self
+                            .voices
+                            .iter()
+                            .any(|voice| voice.id.as_deref() == Some(id)) =>
+                {
+                    id.into()
+                }
+                _ => uuid::Uuid::now_v7().to_string(),
+            };
+            self.voices.push(Voice {
+                id: Some(proposed),
+                name: name.trim().into(),
+                embeddings: Vec::new(),
+                updated_at: Utc::now(),
+                is_me: own,
+            });
+            self.voices.len() - 1
+        });
+        add_sample(&mut self.voices[index], embedding);
+        Ok(index)
+    }
     fn ensure_ids(&mut self) {
         for voice in &mut self.voices {
             if voice.id.is_none() {
@@ -108,6 +277,7 @@ impl Library {
         let path = self.private_state_dir().join("voices.json");
         let lock = meeting_lock(&path);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _files = self.lock_voice_files()?;
         let mut voices = self.read_voices()?;
         if voices.voices.iter().any(|v| v.id.is_none()) {
             voices.ensure_ids();
@@ -117,11 +287,18 @@ impl Library {
     }
 
     pub fn delete_voice(&self, name: &str) -> Result<()> {
+        self.delete_voice_matching(|voice| voice.name == name)
+    }
+    pub fn delete_voice_id(&self, id: &str) -> Result<()> {
+        self.delete_voice_matching(|voice| voice.id.as_deref() == Some(id))
+    }
+    fn delete_voice_matching(&self, matches: impl Fn(&Voice) -> bool) -> Result<()> {
         let path = self.private_state_dir().join("voices.json");
         let lock = meeting_lock(&path);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _files = self.lock_voice_files()?;
         let mut library = self.read_voices()?;
-        library.voices.retain(|v| v.name != name);
+        library.voices.retain(|voice| !matches(voice));
         write_json(&path, &library)
     }
 
@@ -130,6 +307,10 @@ impl Library {
         meeting: &Meeting,
         embeddings: BTreeMap<String, Vec<f32>>,
     ) -> Result<()> {
+        let path = self.private_state_dir().join("voices.json");
+        let lock = meeting_lock(&path);
+        let _guard = lock.lock().unwrap_or_else(|error| error.into_inner());
+        let _files = self.lock_voice_files()?;
         let id = meeting.read_meta()?.id;
         write_json(
             &self
@@ -142,8 +323,120 @@ impl Library {
         )
     }
 
+    fn lock_voice_files(&self) -> Result<Option<fs::File>> {
+        fs::create_dir_all(self.private_state_dir())?;
+        crate::storage::lock_meeting_files(&self.private_state_dir())
+    }
+    /// Discard biometric snapshots from unreleased development builds.
+    pub fn discard_voice_ledgers(&self) -> Result<()> {
+        let state = self.private_state_dir();
+        let libraries = state.parent().expect("per-library local state");
+        let entries = match fs::read_dir(libraries) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            match fs::remove_dir_all(entry.path().join("voice-enrollments")) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+    /// The bank write records each meeting/identity key atomically with its sample.
+    pub fn remember_tolk_voices(
+        &self,
+        meeting: &Meeting,
+        transcript: &Transcript,
+        samples: Vec<VoiceSample>,
+        expected: crate::Revision,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<(usize, Vec<String>)> {
+        let path = self.private_state_dir().join("voices.json");
+        let lock = meeting_lock(&path);
+        let _guard = lock.lock().unwrap_or_else(|error| error.into_inner());
+        let _files = self.lock_voice_files()?;
+        let lock = crate::storage::meeting_lock(meeting.path());
+        let _meeting = lock.lock().unwrap_or_else(|error| error.into_inner());
+        let _file = crate::storage::lock_meeting_files(meeting.path())?;
+        let loaded = meeting.load_transcript()?;
+        if loaded.revision != expected || loaded.value != *transcript {
+            return Err(crate::Error::SpeakerEdit(
+                "Транскрипт изменился после сверки, обучение пропущено".into(),
+            ));
+        }
+        let mut voices = self.read_voices()?;
+        voices.ensure_ids();
+        if voices.model != VOICE_MODEL {
+            return Err(crate::Error::SpeakerEdit(
+                "Модель библиотеки голосов не совпадает".into(),
+            ));
+        }
+        let mut cache = self.read_meeting_voices(meeting)?;
+        let mut count = 0;
+        let mut skipped = Vec::new();
+        let meeting_id = meeting.read_meta()?.id;
+        for sample in samples {
+            let key = format!("{meeting_id}:{}", sample.speaker);
+            if voices.tolk_samples.contains(&key) {
+                continue;
+            }
+            if cosine(&sample.embedding, &sample.embedding).is_none() {
+                return Err(crate::Error::SpeakerEdit(
+                    "Некорректный отпечаток голоса".into(),
+                ));
+            }
+            match voices.enroll(
+                VoiceKey::Stable(&sample.speaker),
+                &sample.name,
+                sample.own,
+                &sample.embedding,
+            ) {
+                Ok(_) => {
+                    cache.embeddings.insert(
+                        if sample.own {
+                            "me".into()
+                        } else {
+                            sample.speaker
+                        },
+                        sample.embedding,
+                    );
+                    voices.tolk_samples.insert(key);
+                    count += 1;
+                }
+                Err(crate::Error::SpeakerEdit(reason)) => {
+                    skipped.push(format!("{}: {reason}", sample.name))
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if cancelled() {
+            return Err(crate::Error::SpeakerEdit("Операция Толка отменена".into()));
+        }
+        if count == 0 {
+            return Ok((count, skipped));
+        }
+        // On a crash between these two writes, the retry completes the bank write.
+        write_json(&self.meeting_voices_path(meeting)?, &cache)?;
+        write_json(&path, &voices)?;
+        Ok((count, skipped))
+    }
     /// Called only after explicit enrollment and a successful transcript save.
     pub fn remember_speakers(&self, meeting: &Meeting, transcript: &Transcript) -> Result<()> {
+        self.remember_speakers_owned(meeting, transcript, false)
+    }
+    pub fn remember_speakers_owned(
+        &self,
+        meeting: &Meeting,
+        transcript: &Transcript,
+        own_allowed: bool,
+    ) -> Result<()> {
         let id = meeting.read_meta()?.id;
         let bytes = match fs::read(
             self.private_state_dir()
@@ -160,6 +453,7 @@ impl Library {
         let path = self.private_state_dir().join("voices.json");
         let lock = meeting_lock(&path);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _files = self.lock_voice_files()?;
         let mut library = self.read_voices()?;
         if library.model != VOICE_MODEL {
             return Ok(());
@@ -173,37 +467,18 @@ impl Library {
             else {
                 continue;
             };
-            let is_me = id == "me" || transcript.self_speaker.as_ref() == Some(id);
-            let existing = library.voices.iter().position(|v| {
-                transcript
-                    .speaker_voice_ids
-                    .get(id)
-                    .map_or(v.name == *name, |linked| v.id.as_ref() == Some(linked))
-            });
-            let index = existing.unwrap_or_else(|| {
-                library.voices.push(Voice {
-                    id: Some(uuid::Uuid::now_v7().to_string()),
-                    name: name.clone(),
-                    embeddings: Vec::new(),
-                    updated_at: Utc::now(),
-                    is_me,
+            let is_me = own_allowed && microphone_speaker(transcript, id);
+            let key = transcript
+                .speaker_voice_ids
+                .get(id)
+                .map_or(VoiceKey::Name, |id| {
+                    if id.starts_with("ktalk-") {
+                        VoiceKey::Stable(id)
+                    } else {
+                        VoiceKey::Linked(id)
+                    }
                 });
-                library.voices.len() - 1
-            });
-            if is_me {
-                for voice in &mut library.voices {
-                    voice.is_me = false;
-                }
-            }
-            let voice = &mut library.voices[index];
-            voice.is_me |= is_me;
-            if !voice.embeddings.contains(embedding) {
-                if voice.embeddings.len() >= 8 {
-                    voice.embeddings.remove(0);
-                }
-                voice.embeddings.push(embedding.clone());
-                voice.updated_at = Utc::now();
-            }
+            library.enroll(key, name, is_me, embedding)?;
         }
         write_json(&path, &library)
     }
@@ -250,14 +525,34 @@ mod storage_tests {
         let mut text = Transcript::default();
         text.rename_speaker("s1", "Саша");
         text.rename_speaker("me", "Иван");
+        text.segments.push(crate::Segment {
+            id: uuid::Uuid::now_v7(),
+            speaker: crate::SpeakerId("me".into()),
+            channel: crate::Channel::Mic,
+            start_ms: 0,
+            end_ms: 7000,
+            text: "Нейтральный текст".into(),
+            source: crate::Source::Final,
+            edited: false,
+            lang: None,
+        });
         library
             .write_meeting_voices(
                 &meeting,
                 BTreeMap::from([("s1".into(), vec![1.0, 0.0]), ("me".into(), vec![0.0, 1.0])]),
             )
             .unwrap();
-        library.remember_speakers(&meeting, &text).unwrap();
-        library.remember_speakers(&meeting, &text).unwrap();
+        library
+            .remember_speakers_owned(&meeting, &text, true)
+            .unwrap();
+        for voice in library.read_voices().unwrap().voices {
+            let speaker = if voice.is_me { "me" } else { "s1" };
+            text.speaker_voice_ids
+                .insert(speaker.into(), voice.id.unwrap());
+        }
+        library
+            .remember_speakers_owned(&meeting, &text, true)
+            .unwrap();
         let saved = library.read_voices().unwrap();
         assert_eq!(saved.voices.len(), 2);
         assert!(saved.voices.iter().all(|v| v.embeddings.len() == 1));
@@ -310,6 +605,7 @@ pub struct SpeakerUndo {
 pub struct SpeakerEditResult {
     pub undo: Option<SpeakerUndo>,
     pub renamed_meetings: Vec<std::path::PathBuf>,
+    pub voice_status: String,
 }
 
 impl Library {
@@ -340,6 +636,17 @@ impl Library {
         edit: SpeakerEdit,
         voices_enabled: bool,
     ) -> Result<SpeakerEditResult> {
+        self.edit_speakers_owned(meeting, expected, edit, voices_enabled, false, None)
+    }
+    pub fn edit_speakers_owned(
+        &self,
+        meeting: &Meeting,
+        expected: &Transcript,
+        edit: SpeakerEdit,
+        voices_enabled: bool,
+        own_mic_allowed: bool,
+        fresh_embedding: Option<Vec<f32>>,
+    ) -> Result<SpeakerEditResult> {
         let loaded = meeting.load_transcript()?;
         if &loaded.value != expected {
             return Err(crate::Error::SpeakerEdit(
@@ -350,6 +657,7 @@ impl Library {
         let voices_path = self.private_state_dir().join("voices.json");
         let lock = meeting_lock(&voices_path);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _files = self.lock_voice_files()?;
         let mut voices = if voices_enabled {
             Some(self.read_voices()?)
         } else {
@@ -366,6 +674,7 @@ impl Library {
         let mut result = SpeakerEditResult {
             undo: None,
             renamed_meetings: Vec::new(),
+            voice_status: String::new(),
         };
         let mut propagation = None;
         match edit {
@@ -393,35 +702,27 @@ impl Library {
                             } else {
                                 clusters.embeddings.insert(into.clone(), source.clone());
                             }
-                            let is_me =
-                                into == "me" || transcript.self_speaker.as_ref() == Some(&into);
-                            if is_me && voices.model == VOICE_MODEL {
-                                for voice in &mut voices.voices {
-                                    voice.is_me = false;
-                                }
-                            }
                             if voices.model == VOICE_MODEL
                                 && transcript.speaker_names.contains_key(&into)
                                 && let Some(voice) = voices.voices.iter_mut().find(|v| {
                                     v.id.as_ref() == transcript.speaker_voice_ids.get(&into)
                                 })
                             {
-                                for embedding in old_clusters
-                                    .embeddings
-                                    .get(&into)
-                                    .into_iter()
-                                    .chain(std::iter::once(&source))
-                                {
-                                    if cosine(embedding, embedding).is_some()
-                                        && !voice.embeddings.contains(embedding)
+                                // A merge is not an explicit own-voice confirmation.
+                                if !voice.is_me {
+                                    for embedding in old_clusters
+                                        .embeddings
+                                        .get(&into)
+                                        .into_iter()
+                                        .chain(std::iter::once(&source))
                                     {
-                                        if voice.embeddings.len() >= 8 {
-                                            voice.embeddings.remove(0);
+                                        if cosine(embedding, embedding).is_some() {
+                                            add_sample(voice, embedding);
                                         }
-                                        voice.embeddings.push(embedding.clone());
                                     }
+                                } else {
+                                    clusters.embeddings.remove(&into);
                                 }
-                                voice.is_me |= is_me;
                                 voice.updated_at = Utc::now();
                             }
                         }
@@ -487,59 +788,62 @@ impl Library {
                     transcript.self_speaker = Some(speaker.clone());
                 }
                 if let Some(voices) = &mut voices {
+                    let own_voice =
+                        is_me || own_mic_allowed && microphone_speaker(&transcript, &speaker);
                     let linked = transcript.speaker_voice_ids.get(&speaker).cloned();
-                    let existing = voices.voices.iter().position(|v| {
-                        linked
-                            .as_ref()
-                            .map_or(v.name == name.trim(), |id| v.id.as_ref() == Some(id))
-                    });
-                    let embedding = clusters
-                        .as_ref()
-                        .filter(|v| v.model == VOICE_MODEL)
-                        .and_then(|v| v.embeddings.get(&speaker))
-                        .filter(|v| cosine(v, v).is_some());
-                    if voices.model == VOICE_MODEL && (existing.is_some() || embedding.is_some()) {
-                        let index = existing.unwrap_or_else(|| {
-                            voices.voices.push(Voice {
-                                id: Some(uuid::Uuid::now_v7().to_string()),
-                                name: name.trim().into(),
-                                embeddings: Vec::new(),
-                                updated_at: Utc::now(),
-                                is_me: false,
-                            });
-                            voices.voices.len() - 1
-                        });
-                        let own_voice = is_me
-                            || speaker == "me"
-                            || transcript.self_speaker.as_ref() == Some(&speaker);
-                        if own_voice {
-                            for voice in &mut voices.voices {
-                                voice.is_me = false;
+                    if voices.model == VOICE_MODEL {
+                        match voices.identity(&name, linked.as_deref(), own_voice) {
+                            Err(reason) => result.voice_status = reason.into(),
+                            Ok(existing) => {
+                                if let Some(embedding) = fresh_embedding {
+                                    if cosine(&embedding, &embedding).is_none() {
+                                        return Err(crate::Error::SpeakerEdit(
+                                            "Некорректный отпечаток голоса".into(),
+                                        ));
+                                    }
+                                    if let Some(cache) = &mut clusters {
+                                        cache.embeddings.insert(speaker.clone(), embedding);
+                                    }
+                                }
+                                let embedding = clusters
+                                    .as_ref()
+                                    .filter(|cache| cache.model == VOICE_MODEL)
+                                    .and_then(|cache| cache.embeddings.get(&speaker))
+                                    .filter(|embedding| cosine(embedding, embedding).is_some());
+
+                                let index = if let Some(embedding) = embedding {
+                                    Some(voices.enroll(
+                                        linked.as_deref().map_or(VoiceKey::Name, VoiceKey::Linked),
+                                        &name,
+                                        own_voice,
+                                        embedding,
+                                    )?)
+                                } else {
+                                    existing
+                                };
+                                if let Some(index) = index {
+                                    let voice = &mut voices.voices[index];
+                                    if let Some(id) = &voice.id {
+                                        transcript.speaker_voice_ids.insert(speaker, id.clone());
+                                        if everywhere {
+                                            voice.name = name.trim().into();
+                                            propagation =
+                                                Some((id.clone(), name.trim().to_owned()));
+                                        }
+                                    }
+                                }
                             }
-                        }
-                        let voice = &mut voices.voices[index];
-                        if let Some(embedding) = embedding.filter(|e| !voice.embeddings.contains(e))
-                        {
-                            if voice.embeddings.len() >= 8 {
-                                voice.embeddings.remove(0);
-                            }
-                            voice.embeddings.push(embedding.clone());
-                        }
-                        voice.is_me |= own_voice;
-                        voice.updated_at = Utc::now();
-                        let voice_id = voice.id.clone().expect("prepared identity");
-                        transcript
-                            .speaker_voice_ids
-                            .insert(speaker, voice_id.clone());
-                        if everywhere {
-                            voice.name = name.trim().into();
-                            propagation = Some((voice_id, name.trim().to_owned()));
                         }
                     }
                 }
             }
         }
-        meeting.save_transcript(&transcript, loaded.revision)?;
+        if transcript != *expected {
+            meeting.save_transcript(&transcript, loaded.revision)?;
+        }
+        if !result.voice_status.is_empty() {
+            return Ok(result);
+        }
         if let Some(clusters) = clusters {
             write_json(&self.meeting_voices_path(meeting)?, &clusters)?;
         }
@@ -575,5 +879,244 @@ impl Library {
         }
         self.reindex_incremental()?;
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    use crate::{Channel, MeetingMeta, Segment, Source, SpeakerId};
+    #[test]
+    fn unique_names_and_own_identity_never_promote_a_namesake() {
+        let mut bank = VoiceLibrary::default();
+        bank.enroll(
+            VoiceKey::Stable("namesake"),
+            "Олег Сидоров",
+            false,
+            &vec![1.0, 0.0],
+        )
+        .unwrap();
+        let before = bank.clone();
+        assert!(
+            bank.enroll(VoiceKey::Name, "  ОЛЕГ СИДОРОВ ", true, &vec![0.0, 1.0])
+                .is_err()
+        );
+        assert_eq!(bank, before);
+        bank.enroll(VoiceKey::Name, "Олег, мой голос", true, &vec![0.0, 1.0])
+            .unwrap();
+        assert_eq!(bank.voices.iter().filter(|voice| voice.is_me).count(), 1);
+        assert!(!bank.voices[0].is_me);
+        let own = bank.voices[1].clone();
+        for key in [
+            VoiceKey::Name,
+            VoiceKey::Stable("ktalk-guest"),
+            VoiceKey::Stable("other-registered"),
+        ] {
+            assert!(
+                bank.enroll(key, "Олег, мой голос", false, &vec![1.0, 1.0])
+                    .is_err()
+            );
+        }
+        assert_eq!(bank.voices[1], own);
+        assert!(
+            bank.enroll(
+                VoiceKey::Stable("second-namesake"),
+                "Олег Сидоров",
+                false,
+                &vec![0.5, 0.5]
+            )
+            .is_err()
+        );
+        bank.enroll(
+            VoiceKey::Linked("namesake"),
+            "Олег Сидоров",
+            false,
+            &vec![0.5, 0.5],
+        )
+        .unwrap();
+        assert_eq!(bank.voices.len(), 2);
+        assert_eq!(bank.voices[0].embeddings.len(), 2);
+    }
+    #[test]
+    fn legacy_duplicates_remain_readable_without_creating_more() {
+        let mut bank = VoiceLibrary::default();
+        bank.enroll(
+            VoiceKey::Stable("first"),
+            "Участник",
+            false,
+            &vec![1.0, 0.0],
+        )
+        .unwrap();
+        let mut duplicate = bank.voices[0].clone();
+        duplicate.id = Some("legacy".into());
+        bank.voices.push(duplicate);
+        bank.enroll(
+            VoiceKey::Linked("first"),
+            "Участник",
+            false,
+            &vec![0.0, 1.0],
+        )
+        .unwrap();
+        assert!(
+            bank.enroll(VoiceKey::Name, "УЧАСТНИК", false, &vec![1.0, 1.0])
+                .is_err()
+        );
+        assert_eq!(bank.voices.len(), 2);
+    }
+    fn fixture() -> (tempfile::TempDir, Library, Meeting, Transcript) {
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open(root.path()).unwrap();
+        let meeting = library
+            .create_meeting(MeetingMeta::new("Пример", Utc::now()))
+            .unwrap();
+        let mut text = Transcript::default();
+        for id in ["s1", "ktalk-guest", "me"] {
+            text.segments.push(Segment {
+                id: uuid::Uuid::now_v7(),
+                speaker: SpeakerId(id.into()),
+                channel: if id == "me" {
+                    Channel::Mic
+                } else {
+                    Channel::System
+                },
+                start_ms: 0,
+                end_ms: 7000,
+                text: "Нейтральный текст".into(),
+                source: Source::Final,
+                edited: false,
+                lang: None,
+            });
+        }
+        meeting.write_transcript(&text).unwrap();
+        library
+            .write_meeting_voices(
+                &meeting,
+                BTreeMap::from([
+                    ("s1".into(), vec![1.0, 0.0]),
+                    ("ktalk-guest".into(), vec![1.0, 1.0]),
+                    ("me".into(), vec![0.0, 1.0]),
+                ]),
+            )
+            .unwrap();
+        (root, library, meeting, text)
+    }
+    #[test]
+    fn manual_guest_and_microphone_collisions_keep_names_but_do_not_save_voices() {
+        let (_root, library, meeting, mut text) = fixture();
+        for (speaker, own) in [("s1", false), ("me", true), ("ktalk-guest", false)] {
+            let result = library
+                .edit_speakers_owned(
+                    &meeting,
+                    &text,
+                    SpeakerEdit::Rename {
+                        speaker: speaker.into(),
+                        name: "Олег Сидоров".into(),
+                        is_me: false,
+                        everywhere: false,
+                    },
+                    true,
+                    own,
+                    None,
+                )
+                .unwrap();
+            text = meeting.read_transcript().unwrap();
+            assert_eq!(text.speaker_names[speaker], "Олег Сидоров");
+            if speaker != "s1" {
+                assert_eq!(result.voice_status, VOICE_NAME_TAKEN);
+            }
+        }
+        let bank = library.read_voices().unwrap();
+        assert_eq!(bank.voices.len(), 1);
+        assert!(!bank.voices[0].is_me);
+        assert_eq!(bank.voices[0].embeddings, vec![vec![1.0, 0.0]]);
+    }
+    #[test]
+    fn a_collision_rechecked_at_commit_cannot_write_a_fresh_guest_embedding() {
+        let (_root, library, meeting, mut text) = fixture();
+        text.rename_speaker("ktalk-guest", "Анна");
+        meeting.write_transcript(&text).unwrap();
+        let guest = SpeakerEdit::Rename {
+            speaker: "ktalk-guest".into(),
+            name: "Анна".into(),
+            is_me: false,
+            everywhere: false,
+        };
+        assert!(
+            library
+                .read_voices()
+                .unwrap()
+                .speaker_name_status(&text, &guest, false)
+                .is_none()
+        );
+        library
+            .edit_speakers(
+                &meeting,
+                &text,
+                SpeakerEdit::Rename {
+                    speaker: "s1".into(),
+                    name: "Анна".into(),
+                    is_me: false,
+                    everywhere: false,
+                },
+                true,
+            )
+            .unwrap();
+        text = meeting.read_transcript().unwrap();
+        let bank = library.private_state_dir().join("voices.json");
+        let cache = library.meeting_voices_path(&meeting).unwrap();
+        let transcript = meeting.path().join("transcript.json");
+        let before = [
+            fs::read(&bank).unwrap(),
+            fs::read(&cache).unwrap(),
+            fs::read(&transcript).unwrap(),
+        ];
+        let result = library
+            .edit_speakers_owned(&meeting, &text, guest, true, false, Some(vec![0.5, 0.5]))
+            .unwrap();
+        assert_eq!(result.voice_status, VOICE_NAME_TAKEN);
+        assert_eq!(
+            [
+                fs::read(bank).unwrap(),
+                fs::read(cache).unwrap(),
+                fs::read(transcript).unwrap()
+            ],
+            before
+        );
+    }
+    #[test]
+    fn restarted_enrollment_is_idempotent_and_creates_no_ledger() {
+        let (root, library, meeting, text) = fixture();
+        let revision = meeting.load_transcript().unwrap().revision;
+        for vector in [vec![1.0, 0.0], vec![0.0, 1.0]] {
+            let reopened = Library::open(root.path()).unwrap();
+            reopened
+                .remember_tolk_voices(
+                    &meeting,
+                    &text,
+                    vec![VoiceSample {
+                        speaker: "ktalk-user".into(),
+                        name: "Анна Петрова".into(),
+                        embedding: vector,
+                        own: false,
+                    }],
+                    revision,
+                    || false,
+                )
+                .unwrap();
+        }
+        let bank = library.read_voices().unwrap();
+        assert_eq!(bank.voices.len(), 1);
+        assert_eq!(bank.voices[0].embeddings, vec![vec![1.0, 0.0]]);
+        assert_eq!(bank.tolk_samples.len(), 1);
+        assert!(
+            !library
+                .private_state_dir()
+                .join("voice-enrollments")
+                .exists()
+        );
+        let allowed = ["voices.json", "speaker-embeddings", ".notetaker.lock"];
+        for file in fs::read_dir(library.private_state_dir()).unwrap() {
+            assert!(allowed.contains(&file.unwrap().file_name().to_str().unwrap()));
+        }
     }
 }

@@ -57,7 +57,14 @@ impl AsrClient {
         Self::spawn_command(Command::new(binary.as_ref()), Duration::from_secs(300))
     }
 
-    pub fn spawn_command(mut command: Command, timeout: Duration) -> Result<Self, ClientError> {
+    pub fn spawn_command(command: Command, timeout: Duration) -> Result<Self, ClientError> {
+        Self::spawn_command_cancellable(command, timeout, CancellationHandle::default())
+    }
+    pub fn spawn_command_cancellable(
+        mut command: Command,
+        timeout: Duration,
+        cancel: CancellationHandle,
+    ) -> Result<Self, ClientError> {
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -100,7 +107,7 @@ impl AsrClient {
             written,
             writer: Some(writer),
             deadline: None,
-            cancel: CancellationHandle::default(),
+            cancel,
             responses,
             timeout,
         };
@@ -494,6 +501,25 @@ mod tests {
         assert!(start.elapsed() < Duration::from_secs(3));
         assert!(client.writer.is_none());
         assert!(client.child.try_wait().unwrap().is_some());
+    }
+    #[test]
+    fn cancellation_interrupts_worker_startup_before_ready() {
+        let _serial = serial();
+        #[cfg(unix)]
+        let command = fake_command("exec sleep 5");
+        #[cfg(windows)]
+        let command = fake_command("Start-Sleep -Seconds 5");
+        let cancel = CancellationHandle::default();
+        let other = cancel.clone();
+        let thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            other.cancel();
+        });
+        let start = Instant::now();
+        let result = AsrClient::spawn_command_cancellable(command, Duration::from_secs(30), cancel);
+        thread.join().unwrap();
+        assert!(matches!(result, Err(ClientError::Timeout)));
+        assert!(start.elapsed() < Duration::from_secs(3));
     }
     #[test]
     fn progress_cannot_extend_request_deadline() {

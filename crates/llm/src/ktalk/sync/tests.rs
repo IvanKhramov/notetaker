@@ -142,7 +142,14 @@ fn overlap_matching_ambiguity_none_and_complete_only() {
 fn aligns_positive_and_negative_offsets_and_rejects_unrelated_text() {
     for offset in [37_000, -95_000] {
         let (local, remote) = fixture(offset);
-        let p = plan(&local, start(), recording("a", 0, 400), &remote, &owner()).unwrap();
+        let p = plan(
+            &local,
+            start(),
+            recording("a", 0, 400),
+            &remote,
+            Some(&owner()),
+        )
+        .unwrap();
         assert!((p.offset_ms - offset).abs() <= 100, "{}", p.offset_ms);
         assert!(p.validation_score > 0.95);
         let mut unrelated = local;
@@ -155,7 +162,7 @@ fn aligns_positive_and_negative_offsets_and_rejects_unrelated_text() {
                 start(),
                 recording("a", 0, 400),
                 &remote,
-                &owner()
+                Some(&owner())
             )
             .err()
             .unwrap()
@@ -172,7 +179,14 @@ fn alternating_tracks_fine_words_guests_confirmed_and_manual_edits() {
         .speaker_names
         .insert("confirmed".into(), "Моё имя".into());
     local.segments[3].edited = true;
-    let p = plan(&local, start(), recording("a", 0, 400), &remote, &owner()).unwrap();
+    let p = plan(
+        &local,
+        start(),
+        recording("a", 0, 400),
+        &remote,
+        Some(&owner()),
+    )
+    .unwrap();
     assert_ne!(p.after.segments[0].speaker, p.after.segments[1].speaker);
     assert_eq!(
         p.after.speaker_name(&p.after.segments[0].speaker.0),
@@ -198,11 +212,25 @@ fn equal_split_unchanged_and_me_named_only_when_unconfirmed() {
         .words
         .extend(words[3..].iter().cloned());
     local.segments[1].speaker.0 = "me".into();
-    let p = plan(&local, start(), recording("a", 0, 400), &remote, &owner()).unwrap();
+    let p = plan(
+        &local,
+        start(),
+        recording("a", 0, 400),
+        &remote,
+        Some(&owner()),
+    )
+    .unwrap();
     assert_eq!(p.after.segments[0].speaker.0, "s1");
     assert_eq!(p.after.speaker_name("me"), "Oleg Sidorov");
     local.speaker_names.insert("me".into(), "Своё имя".into());
-    let p = plan(&local, start(), recording("a", 0, 400), &remote, &owner()).unwrap();
+    let p = plan(
+        &local,
+        start(),
+        recording("a", 0, 400),
+        &remote,
+        Some(&owner()),
+    )
+    .unwrap();
     assert_eq!(p.after.speaker_name("me"), "Своё имя");
 }
 #[test]
@@ -227,7 +255,7 @@ fn old_file_read_no_rewrite_idempotent_revision_stale_summary_and_search() {
         start(),
         recording("a", 0, 400),
         &remote,
-        &owner(),
+        Some(&owner()),
     )
     .unwrap();
     apply(&lib, &meeting, &p).unwrap();
@@ -239,7 +267,7 @@ fn old_file_read_no_rewrite_idempotent_revision_stale_summary_and_search() {
         start(),
         recording("a", 0, 400),
         &remote,
-        &owner(),
+        Some(&owner()),
     )
     .unwrap();
     assert_eq!(p2.before, p2.after);
@@ -304,7 +332,14 @@ fn realistic_asr_noise_and_word_forms_in_a_fifth_of_words_are_accepted() {
             replacements[i]
         );
     }
-    let p = plan(&local, start(), recording("a", 0, 400), &remote, &owner()).unwrap();
+    let p = plan(
+        &local,
+        start(),
+        recording("a", 0, 400),
+        &remote,
+        Some(&owner()),
+    )
+    .unwrap();
     assert!((p.validation_score - 0.8).abs() < 0.001);
     assert_eq!(p.offset_ms, 37_000);
 }
@@ -323,7 +358,16 @@ fn shared_vocabulary_with_only_a_minority_of_matching_segments_is_refused() {
             .join(" ");
         s.text = format!("{topic} обсуждали другие изменения");
     }
-    assert!(plan(&local, start(), recording("a", 0, 400), &remote, &owner()).is_err());
+    assert!(
+        plan(
+            &local,
+            start(),
+            recording("a", 0, 400),
+            &remote,
+            Some(&owner())
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -354,10 +398,16 @@ fn majority_gate_rejects_many_low_content_samples_despite_six_good_matches() {
     }
 
     assert_eq!(
-        plan(&local, start(), recording("a", 0, 400), &remote, &owner())
-            .err()
-            .unwrap()
-            .to_string(),
+        plan(
+            &local,
+            start(),
+            recording("a", 0, 400),
+            &remote,
+            Some(&owner())
+        )
+        .err()
+        .unwrap()
+        .to_string(),
         "не удалось надёжно сопоставить время (сходство текста 0.73, подтверждено реплик 7 из 15, общих слов 42)"
     );
 }
@@ -395,7 +445,7 @@ fn three_similar_but_contradictory_pairs_are_too_short_to_verify() {
             start(),
             recording("wrong", 0, 65),
             &remote,
-            &owner()
+            Some(&owner())
         )
         .err()
         .unwrap()
@@ -427,7 +477,7 @@ fn repeated_speech_block_is_ambiguous() {
             start(),
             recording("twice", 0, 500),
             &remote,
-            &owner()
+            Some(&owner())
         )
         .err()
         .unwrap()
@@ -529,11 +579,17 @@ fn extreme_alignment_arithmetic_and_local_timings_fail_without_panics() {
     let (mut local, remote) = fixture(0);
     local.segments[0].end_ms = u64::MAX;
     assert!(
-        plan(&local, start(), recording("a", 0, 400), &remote, &owner())
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("недопустимое время")
+        plan(
+            &local,
+            start(),
+            recording("a", 0, 400),
+            &remote,
+            Some(&owner())
+        )
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("недопустимое время")
     );
 }
 
@@ -552,7 +608,16 @@ fn fillers_repeated_words_and_shared_greeting_are_not_evidence() {
         {
             word.text = text.into();
         }
-        assert!(plan(&local, start(), recording("a", 0, 400), &remote, &owner()).is_err());
+        assert!(
+            plan(
+                &local,
+                start(),
+                recording("a", 0, 400),
+                &remote,
+                Some(&owner())
+            )
+            .is_err()
+        );
     }
     let (mut local, mut remote) = fixture(0);
     // Eighteen distinct opening words match perfectly. Later fillers also match,
@@ -570,7 +635,16 @@ fn fillers_repeated_words_and_shared_greeting_are_not_evidence() {
             word.text = "да".into();
         }
     }
-    assert!(plan(&local, start(), recording("a", 0, 400), &remote, &owner()).is_err());
+    assert!(
+        plan(
+            &local,
+            start(),
+            recording("a", 0, 400),
+            &remote,
+            Some(&owner())
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -616,7 +690,7 @@ fn partial_middle_recording_ignores_segments_before_and_after() {
         start(),
         recording("middle", 1200, 1200),
         &remote,
-        &owner(),
+        Some(&owner()),
     )
     .unwrap();
     assert_eq!(p.offset_ms, -1_200_000);
@@ -655,9 +729,27 @@ fn voice_links_and_removed_speakers_do_not_leak_into_people_or_series() {
     local
         .speaker_names
         .insert("orphan".into(), "Старое имя".into());
-    let p = plan(&local, start(), recording("a", 0, 400), &remote, &owner()).unwrap();
+    let p = plan(
+        &local,
+        start(),
+        recording("a", 0, 400),
+        &remote,
+        Some(&owner()),
+    )
+    .unwrap();
     assert_eq!(p.after.speaker_name("me"), "Oleg Sidorov");
-    assert!(p.after.speaker_voice_ids.is_empty());
+    assert!(
+        !p.after
+            .speaker_voice_ids
+            .values()
+            .any(|id| id == "old-voice" || id == "old-me")
+    );
+    assert!(
+        p.after
+            .speaker_voice_ids
+            .iter()
+            .all(|(speaker, id)| speaker == id && id.starts_with("ktalk-"))
+    );
     assert!(!p.after.speaker_suggestions.contains_key("s1"));
     assert!(!p.after.speaker_names.contains_key("orphan"));
     meeting.write_transcript(&local).unwrap();
@@ -681,7 +773,14 @@ fn voice_links_and_removed_speakers_do_not_leak_into_people_or_series() {
     }
     // Confirmed names and their enrolled voices remain untouched.
     local.speaker_names.insert("me".into(), "Моё имя".into());
-    let p = plan(&local, start(), recording("a", 0, 400), &remote, &owner()).unwrap();
+    let p = plan(
+        &local,
+        start(),
+        recording("a", 0, 400),
+        &remote,
+        Some(&owner()),
+    )
+    .unwrap();
     assert_eq!(p.after.speaker_voice_ids.get("me").unwrap(), "boris-voice");
     assert_eq!(p.after.speaker_name("me"), "Моё имя");
 }
@@ -713,4 +812,131 @@ fn three_hour_offset_search_has_fixed_cost() {
     eprintln!("three-hour search: {elapsed:?}, {} intervals", speech.len());
     assert!(elapsed < std::time::Duration::from_secs(3));
     assert!(estimate_offset(&[(0, MAX_BINS as i64 * GRID_MS)], &[(0, 100)], 0).is_err());
+}
+
+#[test]
+fn foreign_manual_sync_never_assigns_key_owner_to_me() {
+    let (mut local, remote) = fixture(0);
+    local.segments.push(Segment {
+        id: Uuid::now_v7(),
+        speaker: SpeakerId("me".into()),
+        channel: Channel::Mic,
+        start_ms: 140000,
+        end_ms: 143000,
+        text: "Вопрос владельца чужого микрофона".into(),
+        source: Source::Final,
+        edited: false,
+        lang: None,
+    });
+    let p = plan(&local, start(), recording("foreign", 0, 400), &remote, None).unwrap();
+    assert!(!p.after.speaker_names.contains_key("me"));
+    assert!(!p.after.ktalk_sources.contains_key("me"));
+}
+#[test]
+fn equal_display_names_keep_separate_registered_identities() {
+    let (local, mut remote) = fixture(0);
+    remote.tracks[1].speaker = Participant {
+        is_anonymous: false,
+        anonymous_id: None,
+        anonymous_name: None,
+        user_info: Some(User {
+            key: "second-user".into(),
+            firstname: "Анна".into(),
+            surname: "Петрова".into(),
+        }),
+    };
+    let p = plan(&local, start(), recording("a", 0, 400), &remote, None).unwrap();
+    let voices: Vec<_> = p.voices.iter().filter(|voice| voice.registered).collect();
+    assert_eq!(voices.len(), 2);
+    assert_eq!(voices[0].name, voices[1].name);
+    assert_ne!(voices[0].speaker, voices[1].speaker);
+}
+#[test]
+fn words_exclude_overlap_margin_clip_bounds_and_cap_audio() {
+    let remote:Transcript=serde_json::from_value(serde_json::json!({"status":"complete","tracks":[
+        {"speaker":{"isAnonymous":false,"userInfo":{"key":"a","firstname":"Same","surname":"Name"}},"chunks":[{"startTimeOffsetInMillis":0,"endTimeOffsetInMillis":30000,"words":[{"text":"one","startTimeOffsetInMillis":0,"endTimeOffsetInMillis":30000}]}]},
+        {"speaker":{"isAnonymous":true,"anonymousId":"guest","anonymousName":"iPhone"},"chunks":[{"startTimeOffsetInMillis":8000,"endTimeOffsetInMillis":10000,"words":[{"text":"other","startTimeOffsetInMillis":8000,"endTimeOffsetInMillis":10000}]}]}
+    ]})).unwrap();
+    let evidence = voice_evidence(&remote, 1000, 20000, None).unwrap();
+    let registered = evidence.iter().find(|v| v.registered).unwrap();
+    assert!(registered.ranges.contains(&(0, 6700)));
+    assert!(registered.ranges.contains(&(9300, 20000)));
+    assert!(registered.ranges.len() <= 8);
+    assert!(
+        registered
+            .ranges
+            .iter()
+            .all(|(a, b)| b - a >= 1500 && b - a <= 15000 && *b <= 20000)
+    );
+}
+#[test]
+fn applied_revision_cannot_authorize_undo_of_a_later_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let lib = Library::open(dir.path()).unwrap();
+    let meeting = lib
+        .create_meeting(MeetingMeta::new("Пример", start()))
+        .unwrap();
+    let (local, remote) = fixture(0);
+    meeting.write_transcript(&local).unwrap();
+    let p = plan(&local, start(), recording("a", 0, 400), &remote, None).unwrap();
+    let result = apply(&lib, &meeting, &p).unwrap();
+    let mut later = result.after.value.clone();
+    later.segments[0].text = "Поздняя внешняя правка".into();
+    meeting.write_transcript(&later).unwrap();
+    let before = std::fs::read(meeting.path().join("transcript.json")).unwrap();
+    let files = std::fs::read_dir(meeting.path()).unwrap().count();
+    let error = meeting
+        .restore_transcript(&result.before, result.after.revision)
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "Транскрипт изменился после сверки, отмена недоступна"
+    );
+    assert_eq!(
+        std::fs::read(meeting.path().join("transcript.json")).unwrap(),
+        before
+    );
+    assert_eq!(std::fs::read_dir(meeting.path()).unwrap().count(), files);
+}
+
+#[test]
+fn local_owner_is_identified_uniquely_and_never_uses_the_system_track() {
+    let remote:Transcript=serde_json::from_value(serde_json::json!({"status":"complete","tracks":[
+        {"speaker":{"isAnonymous":false,"userInfo":{"key":"owner-key","firstname":"Oleg","surname":"Sidorov"}},"chunks":[{"startTimeOffsetInMillis":0,"endTimeOffsetInMillis":7000,"words":[{"text":"owner","startTimeOffsetInMillis":0,"endTimeOffsetInMillis":7000}]}]},
+        {"speaker":{"isAnonymous":false,"userInfo":{"key":"peer","firstname":"Anna","surname":"Petrova"}},"chunks":[{"startTimeOffsetInMillis":10000,"endTimeOffsetInMillis":17000,"words":[{"text":"peer","startTimeOffsetInMillis":10000,"endTimeOffsetInMillis":17000}]}]}
+    ]})).unwrap();
+    let voices = voice_evidence(&remote, 0, 20000, Some(&owner())).unwrap();
+    assert_eq!(
+        voices
+            .iter()
+            .find(|voice| voice.name == "Oleg Sidorov")
+            .unwrap()
+            .track,
+        Some(Channel::Mic)
+    );
+    assert_eq!(
+        voices
+            .iter()
+            .find(|voice| voice.name == "Anna Petrova")
+            .unwrap()
+            .track,
+        Some(Channel::System)
+    );
+    assert!(
+        voice_evidence(&remote, 0, 20000, None)
+            .unwrap()
+            .iter()
+            .all(|voice| voice.track == Some(Channel::System))
+    );
+    let unknown = User {
+        key: String::new(),
+        firstname: "Unknown".into(),
+        surname: String::new(),
+    };
+    assert!(
+        voice_evidence(&remote, 0, 20000, Some(&unknown))
+            .unwrap()
+            .iter()
+            .all(|voice| voice.track.is_none())
+    );
 }

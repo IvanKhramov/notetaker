@@ -197,6 +197,11 @@ pub fn resolve_people(observations: Vec<Person>, edits: &PeopleEdits) -> Vec<Per
     people.sort_by_key(|p| (normalized(&p.name), p.id.clone()));
     people
 }
+pub fn person_from_name(name: &str) -> Option<Person> {
+    let mut person = observation(name, "", None)?;
+    person.identities.insert(person.id.clone());
+    Some(person)
+}
 fn observation(name: &str, address: &str, voice: Option<&str>) -> Option<Person> {
     let address = email(address);
     let name = name.trim();

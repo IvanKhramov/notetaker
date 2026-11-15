@@ -10,6 +10,9 @@ mod config;
 mod desktop;
 mod detection;
 mod icon;
+mod ktalk;
+#[cfg(test)]
+mod ktalk_fixture;
 mod live;
 #[cfg(target_os = "macos")]
 mod macos;

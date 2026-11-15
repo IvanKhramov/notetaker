@@ -356,6 +356,7 @@ impl Document {
 }
 
 pub struct AppState {
+    pub ktalk: crate::ktalk::State,
     pub view_revision: u64,
     pub settings: Settings,
     pub settings_draft: Settings,
@@ -522,6 +523,7 @@ impl AppState {
             documents: HashMap::new(),
             loading: HashSet::new(),
             selected: None,
+            ktalk: Default::default(),
             tab: Tab::Enhanced,
             recording: Recording::default(),
             call_prompt: None,
@@ -714,6 +716,7 @@ impl AppState {
         }
         // Saves are serialized ahead of the command. The worker checks the
         // expected transcript and refuses analysis after a failed/conflicting save.
+        self.ktalk_end_undo(&path);
         self.flush();
         let document = self.documents.get_mut(&path).expect("selected document");
         document.speaker_ui.busy = true;
@@ -733,6 +736,16 @@ impl AppState {
         let Some(path) = self.selected.clone() else {
             return;
         };
+        if self.ktalk.editing(&path) {
+            return;
+        }
+        if self.ktalk.busy
+            && self.settings.voice_library
+            && matches!(&edit,notetaker_core::SpeakerEdit::Rename {speaker,..} if self.documents.get(&path).is_some_and(|document|document.data.transcript.ktalk_sources.contains_key(speaker)))
+        {
+            self.error = Some("Дождитесь завершения операции Толка".into());
+            return;
+        }
         if self
             .documents
             .get(&path)
@@ -748,6 +761,17 @@ impl AppState {
         self.flush();
         let document = self.documents.get_mut(&path).expect("selected document");
         document.speaker_ui.busy = true;
+        if self.settings.voice_library
+            && matches!(&edit,notetaker_core::SpeakerEdit::Rename {speaker,..} if document.data.transcript.ktalk_sources.contains_key(speaker))
+        {
+            let job = crate::ktalk::Job::Name {
+                meeting: document.data.meeting.clone(),
+                expected: document.data.transcript.clone(),
+                edit,
+            };
+            self.ktalk_job(job);
+            return;
+        }
         let command = Command::EditSpeakers {
             meeting: document.data.meeting.clone(),
             expected: document.data.transcript.clone(),
@@ -1588,6 +1612,9 @@ impl AppState {
         self.send(Command::Download(model));
     }
     pub fn can_save_settings(&self) -> bool {
+        if self.ktalk.busy {
+            return false;
+        }
         self.ready
             && !self.recording.busy()
             && self.recording.assist.bookmarks_pending == 0
@@ -1606,6 +1633,9 @@ impl AppState {
         self.settings_edited(false, false);
     }
     pub fn settings_edited(&mut self, delayed: bool, llm: bool) {
+        if !self.settings_draft.voice_library && self.ktalk.biometric {
+            self.ktalk.cancel.cancel();
+        }
         self.settings_autosave.edit(Instant::now(), delayed, llm);
         self.poll_settings(Instant::now());
     }
@@ -1704,6 +1734,7 @@ impl AppState {
         self.chat.cancel.cancel();
         self.draft_cancel.cancel();
         self.connections.cancel_all();
+        self.ktalk.cancel.cancel();
         self.recording.request_stop();
         self.flush();
         for action in self.connections.autosaves() {
@@ -1712,7 +1743,7 @@ impl AppState {
         self.poll_settings(Instant::now());
     }
     pub fn can_exit(&self) -> bool {
-        self.pending_ai.is_empty()
+        self.pending_ai.is_empty() && !self.ktalk.busy
             // A cancelled sign-in reports back once its process is gone.
             && !self.connections.busy()
             && (!self.settings_autosave.pending || self.settings_autosave.error.is_some())
@@ -1746,6 +1777,7 @@ impl AppState {
         self.poll_live();
         crate::quickstart::auto_download(self);
         self.poll_detection();
+        self.poll_ktalk();
         self.update_calendar_reminder(chrono::Utc::now());
         if self.ready
             && !self.settings.calendars.is_empty()
@@ -1846,7 +1878,7 @@ impl AppState {
         }
         self.tick_call_end(Instant::now());
     }
-    fn apply(&mut self, event: Event) {
+    pub(crate) fn apply(&mut self, event: Event) {
         if matches!(
             &event,
             Event::Listed { .. }
@@ -1861,6 +1893,10 @@ impl AppState {
             self.view_revision = self.view_revision.wrapping_add(1);
         }
         match event {
+            Event::Ktalk(message) => self.ktalk_result(message),
+            Event::KtalkRecorded(task) => {
+                self.ktalk.tasks.insert(task.meeting.path().into(), task);
+            }
             Event::SearchNote { request, note } => {
                 if request == self.request {
                     self.semantic_note = note;
@@ -2241,6 +2277,7 @@ impl AppState {
                     match &result {
                         Ok(result) => {
                             document.speaker_ui.undo = result.undo.clone();
+                            document.speaker_ui.voice_status = result.voice_status.clone();
                         }
                         Err(error) => {
                             self.error = Some(error.clone());
@@ -2656,6 +2693,10 @@ impl AppState {
                             self.loading.clear();
                         }
                         self.status = "Настройки сохранены".into();
+                        if changed_library {
+                            self.ktalk = Default::default();
+                            self.ktalk.load_root = Some(self.settings.library.clone());
+                        }
                         self.refresh();
                     }
                     Err(error) => {
@@ -3809,6 +3850,7 @@ mod tests {
             result: Ok(notetaker_core::SpeakerEditResult {
                 undo: None,
                 renamed_meetings: Vec::new(),
+                voice_status: String::new(),
             }),
         });
         let document = &state.documents[&path];
@@ -3843,6 +3885,7 @@ mod tests {
             result: Ok(notetaker_core::SpeakerEditResult {
                 undo: None,
                 renamed_meetings: vec![other_path.clone()],
+                voice_status: String::new(),
             }),
         });
         assert!(!state.documents.contains_key(&other_path));

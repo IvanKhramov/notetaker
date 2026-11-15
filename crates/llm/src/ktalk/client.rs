@@ -28,10 +28,19 @@ const REQUEST_GAP: Duration = Duration::from_millis(1501);
 /// would never end. The whole body has to arrive within this time.
 const BODY_DEADLINE: Duration = Duration::from_secs(120);
 
-fn read_body(mut body: impl Read, deadline: Instant) -> Result<Vec<u8>> {
+#[cfg(test)]
+fn read_body(body: impl Read, deadline: Instant) -> Result<Vec<u8>> {
+    read_body_cancel(body, deadline, &crate::Cancellation::default())
+}
+fn read_body_cancel(
+    mut body: impl Read,
+    deadline: Instant,
+    cancel: &crate::Cancellation,
+) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     let mut chunk = [0u8; 64 * 1024];
     loop {
+        ensure!(!cancel.is_cancelled(), "Операция Толка отменена");
         let read = body
             .read(&mut chunk)
             .map_err(|_| anyhow::anyhow!("Не удалось прочитать ответ Толка"))?;
@@ -168,6 +177,7 @@ impl Transcript {
 }
 
 pub struct Client {
+    cancel: crate::Cancellation,
     base: reqwest::Url,
     http: reqwest::blocking::Client,
     key: reqwest::header::HeaderValue,
@@ -196,6 +206,7 @@ impl Client {
             .map_err(|_| anyhow::anyhow!("Некорректный ключ Толка"))?;
         key.set_sensitive(true);
         Ok(Self {
+            cancel: Default::default(),
             base,
             key,
             http: reqwest::blocking::Client::builder()
@@ -206,7 +217,12 @@ impl Client {
                 .map_err(|_| anyhow::anyhow!("Не удалось создать клиент Толка"))?,
         })
     }
+    pub fn with_cancellation(mut self, cancel: crate::Cancellation) -> Self {
+        self.cancel = cancel;
+        self
+    }
     fn get<T: DeserializeOwned>(&self, path: &[&str], query: &[(&str, String)]) -> Result<T> {
+        ensure!(!self.cancel.is_cancelled(), "Операция Толка отменена");
         let mut url = self.base.clone();
         url.path_segments_mut()
             .map_err(|_| anyhow::anyhow!("Некорректный адрес Толка"))?
@@ -218,6 +234,7 @@ impl Client {
         }
         #[cfg(not(test))]
         pace_requests(&LAST_REQUEST, Instant::now, std::thread::sleep);
+        ensure!(!self.cancel.is_cancelled(), "Операция Толка отменена");
         let response = self
             .http
             .get(url)
@@ -234,7 +251,8 @@ impl Client {
             response.status().is_success(),
             "Толк: HTTP {code}; редиректы запрещены"
         );
-        let bytes = read_body(response, Instant::now() + BODY_DEADLINE)?;
+        let bytes = read_body_cancel(response, Instant::now() + BODY_DEADLINE, &self.cancel)?;
+        ensure!(!self.cancel.is_cancelled(), "Операция Толка отменена");
         serde_json::from_slice(&bytes)
             .map_err(|_| anyhow::anyhow!("Некорректная структура ответа Толка"))
     }
@@ -257,11 +275,12 @@ impl Client {
     }
     pub fn transcript(&self, id: &str) -> Result<Transcript> {
         let transcript: Transcript = self.get(&["api", "recordings", id, "transcript"], &[])?;
-        ensure!(
-            transcript.status == "complete",
-            "Транскрипция Толка ещё не готова"
-        );
-        transcript.validate()?;
+        if transcript.status != "complete" {
+            return Err(super::TranscriptNotReady.into());
+        }
+        transcript
+            .validate()
+            .map_err(|error| super::InvalidTranscript(error.to_string()))?;
         Ok(transcript)
     }
 }

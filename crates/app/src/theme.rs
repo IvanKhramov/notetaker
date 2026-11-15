@@ -983,6 +983,42 @@ pub fn setting_row<R>(ui: &mut egui::Ui, label: &str, value: impl FnOnce(&mut eg
     settings_row_desc(ui, label, None, value)
 }
 
+#[derive(Clone, Copy)]
+pub enum StatusStyle {
+    Muted,
+    Positive,
+    Error,
+}
+pub fn status_chip(ui: &mut egui::Ui, text: &str, style: StatusStyle) -> egui::Response {
+    let p = Palette::of(ui);
+    let color = match style {
+        StatusStyle::Muted => p.muted,
+        StatusStyle::Positive => p.accent,
+        StatusStyle::Error => p.red,
+    };
+    let font = FontId::proportional(SMALL);
+    let width = (ui
+        .painter()
+        .layout_no_wrap(text.into(), font.clone(), color)
+        .size()
+        .x
+        + 16.0)
+        .min(ui.available_width().max(16.0));
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 24.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 255, p.soft);
+    let mut job = egui::text::LayoutJob::simple(text.into(), font, color, (width - 16.0).max(1.0));
+    job.wrap.max_rows = 1;
+    let galley = ui.painter().layout_job(job);
+    ui.painter()
+        .with_clip_rect(rect.shrink2(egui::vec2(8.0, 0.0)))
+        .galley(
+            rect.left_center() + egui::vec2(8.0, -galley.size().y / 2.0),
+            galley,
+            color,
+        );
+    response.on_hover_text(text)
+}
+
 pub fn toggle(ui: &mut egui::Ui, value: &mut bool, label: &str) -> egui::Response {
     setting_row(ui, label, |ui| switch(ui, value, label))
 }
@@ -2416,12 +2452,7 @@ pub fn settings_disclosure<R>(
         disclosure(title).show(ui, body);
     });
 }
-pub fn settings_row_desc<R>(
-    ui: &mut egui::Ui,
-    label: &str,
-    description: Option<&str>,
-    control: impl FnOnce(&mut egui::Ui) -> R,
-) -> R {
+fn settings_row_separator(ui: &mut egui::Ui) {
     let p = Palette::of(ui);
     let group = ui
         .ctx()
@@ -2442,6 +2473,22 @@ pub fn settings_row_desc<R>(
             );
         }
     }
+}
+pub fn settings_footer<R>(ui: &mut egui::Ui, footer: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    settings_row_separator(ui);
+    ui.add_space(8.0);
+    let result = ui.horizontal_wrapped(footer).inner;
+    ui.add_space(8.0);
+    result
+}
+pub fn settings_row_desc<R>(
+    ui: &mut egui::Ui,
+    label: &str,
+    description: Option<&str>,
+    control: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let p = Palette::of(ui);
+    settings_row_separator(ui);
     let width = ui.available_width();
     let label_width = (width * 0.52).max(100.0);
     let desc = description.map(|text| {

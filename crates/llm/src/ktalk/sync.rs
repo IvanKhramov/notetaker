@@ -126,6 +126,26 @@ const STOP_WORDS: &[&str] = &[
 const GRID_MS: i64 = 100;
 const MAX_BINS: usize = 131_072;
 
+#[derive(Debug)]
+pub enum SelectionError {
+    NotFound,
+    Refused(String),
+    Ambiguous {
+        reason: String,
+        recordings: Vec<Recording>,
+    },
+}
+impl std::fmt::Display for SelectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => f.write_str("Подходящая запись Толка не найдена"),
+            Self::Refused(reason) => f.write_str(reason),
+            Self::Ambiguous { reason, .. } => f.write_str(reason),
+        }
+    }
+}
+impl std::error::Error for SelectionError {}
+
 // The search performs at most 3601 * 2048 word shifts/popcounts. Rasterization
 // follows interval union and costs O(intervals + bins) per timeline.
 fn estimate_offset(activity: &[Interval], speech: &[Interval], implied: i64) -> Result<i64> {
@@ -237,7 +257,7 @@ pub fn match_recording(
     }
     candidates.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.id.cmp(&b.1.id)));
     let Some((best, r)) = candidates.first() else {
-        anyhow::bail!("Подходящая запись Толка не найдена");
+        return Err(SelectionError::NotFound.into());
     };
     ensure!(
         best.checked_mul(2).ok_or_else(malformed)? >= duration_ms.min(i64::from(r.duration) * 1000),
@@ -253,7 +273,15 @@ pub fn match_recording(
             .map(|(_, r)| format!("{} ({})", r.title, r.created_date))
             .collect::<Vec<_>>()
             .join(", ");
-        anyhow::bail!("Неоднозначное совпадение записей Толка: {titles}");
+        return Err(SelectionError::Ambiguous {
+            reason: format!("Неоднозначное совпадение записей Толка: {titles}"),
+            recordings: candidates
+                .iter()
+                .filter(|(score, _)| *score as f64 >= *best as f64 * 0.9)
+                .map(|(_, recording)| (*recording).clone())
+                .collect(),
+        }
+        .into());
     }
     Ok((*r).clone())
 }
@@ -270,7 +298,13 @@ pub fn select_recording(
         .checked_sub_signed(chrono::Duration::days(1))
         .ok_or_else(malformed)?;
     let recordings = scan_recordings(|skip| client.recordings("", skip, 100), cutoff)?;
-    select_from_recordings(&recordings, meta.started_at, duration, explicit)
+    select_from_recordings(&recordings, meta.started_at, duration, explicit).map_err(|error| {
+        if error.is::<SelectionError>() {
+            error
+        } else {
+            SelectionError::Refused(error.to_string()).into()
+        }
+    })
 }
 
 const PAGE_LIMIT: usize = 30;
@@ -318,12 +352,16 @@ pub struct Row {
     pub segments: usize,
     pub seconds: f64,
 }
+pub use notetaker_core::VoiceEvidence;
+#[derive(Debug)]
 pub struct Plan {
     pub recording: Recording,
     /// Add to a local timestamp to obtain a Tolk timestamp.
     pub offset_ms: i64,
     pub validation_score: f64,
     pub rows: Vec<Row>,
+    pub voices: Vec<VoiceEvidence>,
+    pub names_owner: bool,
     before: Local,
     after: Local,
 }
@@ -332,7 +370,7 @@ pub fn plan(
     started_at: DateTime<Utc>,
     recording: Recording,
     remote: &Transcript,
-    owner: &User,
+    owner: Option<&User>,
 ) -> Result<Plan> {
     ensure!(
         remote.status == "complete",
@@ -481,6 +519,7 @@ pub fn plan(
             continue;
         }
         if original == "me" {
+            let Some(owner) = owner else { continue };
             ensure!(!owner.name().is_empty(), "Некорректный профиль Толка");
             if local.speaker_suggestions.get("me") != Some(&owner.name()) {
                 after.speaker_voice_ids.remove("me");
@@ -552,7 +591,23 @@ pub fn plan(
         .retain(|id, _| active.contains(id));
     after.speaker_voice_ids.retain(|id, _| active.contains(id));
     after.ktalk_sources.retain(|id, _| active.contains(id));
+    let bound = local
+        .segments
+        .iter()
+        .map(|segment| segment.end_ms)
+        .max()
+        .unwrap_or(0);
+    let voices = voice_evidence(remote, offset, bound, owner)?;
+    for voice in voices.iter().filter(|voice| voice.registered) {
+        if after.speaker_names.contains_key(&voice.speaker) {
+            after
+                .speaker_voice_ids
+                .insert(voice.speaker.clone(), voice.speaker.clone());
+        }
+    }
     Ok(Plan {
+        voices,
+        names_owner: owner.is_some(),
         recording,
         offset_ms: offset,
         validation_score: score,
@@ -569,10 +624,17 @@ pub fn plan(
         after,
     })
 }
-/// Reject a stale plan, including on storage's revision-conflict retry.
-pub fn apply(library: &Library, meeting: &Meeting, plan: &Plan) -> Result<()> {
+pub struct AppliedTranscript {
+    pub index_error: Option<String>,
+    pub before: Local,
+    pub after: notetaker_core::Versioned<Local>,
+}
+/// Capture the exact before/after value and revision from the checked write.
+pub fn apply(library: &Library, meeting: &Meeting, plan: &Plan) -> Result<AppliedTranscript> {
     let mut stale = false;
-    meeting.update_transcript(|current| {
+    let mut before = plan.before.clone();
+    let after = meeting.update_transcript_versioned(|current| {
+        before = current.clone();
         if *current == plan.after {
             return;
         }
@@ -586,8 +648,121 @@ pub fn apply(library: &Library, meeting: &Meeting, plan: &Plan) -> Result<()> {
         !stale,
         "Транскрипт изменился; повторите синхронизацию Толка"
     );
-    library.reindex_incremental()?;
-    Ok(())
+    let index_error = library
+        .reindex_incremental()
+        .err()
+        .map(|error| error.to_string());
+    Ok(AppliedTranscript {
+        before,
+        after,
+        index_error,
+    })
+}
+
+/// Use word timings only. Other speakers, including guests, exclude a 300 ms margin.
+fn voice_evidence(
+    remote: &Transcript,
+    offset: i64,
+    bound: u64,
+    owner: Option<&User>,
+) -> Result<Vec<VoiceEvidence>> {
+    use sha2::{Digest, Sha256};
+    let mut speakers = BTreeMap::<String, (String, bool, Vec<Interval>)>::new();
+    for track in &remote.tracks {
+        let (identity, name) = track.speaker.identity()?;
+        let id = format!(
+            "ktalk-{}",
+            Sha256::digest(identity.as_bytes())
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+        let entry = speakers
+            .entry(id)
+            .or_insert((name, !track.speaker.is_anonymous, Vec::new()));
+        for word in track.chunks.iter().flat_map(|chunk| &chunk.words) {
+            let start = sub(word.start_time_offset_in_millis, offset)?.max(0);
+            let end = sub(word.end_time_offset_in_millis, offset)?.min(bound as i64);
+            if end > start {
+                entry.2.push((start, end));
+            }
+        }
+    }
+    let owner_matches: Vec<_> = owner
+        .map(|owner| {
+            speakers
+                .iter()
+                .filter(|(_, (name, registered, _))| *registered && *name == owner.name())
+                .map(|(id, _)| id.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut result = Vec::new();
+    for (id, (name, registered, words)) in &speakers {
+        let mut own = union(words.clone());
+        // Short pauses between consecutive words belong to the same speech run.
+        let mut runs: Vec<Interval> = Vec::new();
+        for (start, end) in own.drain(..) {
+            if let Some(last) = runs.last_mut()
+                && start <= last.1 + 300
+            {
+                last.1 = last.1.max(end);
+            } else {
+                runs.push((start, end));
+            }
+        }
+        let others = union(
+            speakers
+                .iter()
+                .filter(|(other, _)| *other != id)
+                .flat_map(|(_, (_, _, words))| {
+                    words
+                        .iter()
+                        .map(|(a, b)| ((a - 300).max(0), (b + 300).min(bound as i64)))
+                })
+                .collect(),
+        );
+        for (a, b) in others {
+            runs = runs
+                .into_iter()
+                .flat_map(|(start, end)| {
+                    if a >= end || b <= start {
+                        vec![(start, end)]
+                    } else {
+                        [(start, a.min(end)), (b.max(start), end)]
+                            .into_iter()
+                            .filter(|(x, y)| y > x)
+                            .collect()
+                    }
+                })
+                .collect();
+        }
+        let mut ranges: Vec<_> = runs
+            .into_iter()
+            .filter(|(a, b)| b - a >= 1500)
+            .map(|(a, b)| (a as u64, (b as u64).min(a as u64 + 15000)))
+            .collect();
+        ranges.sort_by_key(|(a, b)| std::cmp::Reverse(b - a));
+        ranges.truncate(8);
+        result.push(VoiceEvidence {
+            speaker: id.clone(),
+            name: name.clone(),
+            registered: *registered,
+            track: if owner.is_some() {
+                if owner_matches.len() != 1 {
+                    None
+                } else if owner_matches.first() == Some(id) {
+                    Some(notetaker_core::Channel::Mic)
+                } else {
+                    Some(notetaker_core::Channel::System)
+                }
+            } else {
+                Some(notetaker_core::Channel::System)
+            },
+            ranges,
+        });
+    }
+    Ok(result)
 }
 #[cfg(test)]
 mod tests;

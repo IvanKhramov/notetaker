@@ -53,15 +53,18 @@ fn sync(
 ) -> Result<()> {
     print_plan(plan, out)?;
     if !dry_run {
-        ktalk::apply(library, meeting, plan)?;
+        let result = ktalk::apply(library, meeting, plan)?;
+        if let Some(error) = result.index_error {
+            writeln!(out, "Имена сохранены; поиск не обновлён: {error}")?;
+        }
     }
     Ok(())
 }
+fn load_settings(path: &std::path::Path) -> Result<ktalk::Settings> {
+    ktalk::Settings::from_path(path)?.context("Добавьте [ktalk] в config.toml; см. docs/ktalk.md")
+}
 pub fn run(args: Args) -> Result<()> {
-    let config = Config::load()?;
-    let settings = config
-        .ktalk
-        .context("Добавьте [ktalk] в config.toml; см. docs/ktalk.md")?;
+    let settings = load_settings(&Config::path()?)?;
     let client = settings.client(&OsCredentialStore)?;
     let owner = client.profile()?;
     match args.command {
@@ -88,7 +91,7 @@ pub fn run(args: Args) -> Result<()> {
                 meeting.read_meta()?.started_at,
                 recording,
                 &remote,
-                &owner,
+                None,
             )?;
             sync(&library, &meeting, &plan, dry_run, &mut std::io::stdout())?;
         }
@@ -98,6 +101,20 @@ pub fn run(args: Args) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ktalk_loader_does_not_require_ai_sections() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[ktalk]\nbase_url='https://neutral.ktalk.ru'\ncredential_id='neutral'\n",
+        )
+        .unwrap();
+        assert_eq!(
+            super::load_settings(&path).unwrap().base_url,
+            "https://neutral.ktalk.ru"
+        );
+    }
     use super::*;
     #[test]
     fn dry_run_prints_table_and_does_not_write() {
@@ -126,11 +143,6 @@ mod tests {
         let revision = meeting.load_transcript().unwrap().revision;
         let words: Vec<_> = texts.iter().enumerate().map(|(i,text)| serde_json::json!({"text":text,"startTimeOffsetInMillis":times[i],"endTimeOffsetInMillis":times[i]+3000})).collect();
         let remote = serde_json::from_value(serde_json::json!({"status":"complete","tracks":[{"speaker":{"isAnonymous":true,"anonymousId":"guest","anonymousName":"Анна Петрова"},"chunks":[{"startTimeOffsetInMillis":0,"endTimeOffsetInMillis":80000,"words":words}]}]})).unwrap();
-        let owner = ktalk::User {
-            key: "owner".into(),
-            firstname: "Oleg".into(),
-            surname: "Sidorov".into(),
-        };
         let recording = ktalk::Recording {
             id: "test".into(),
             title: "Тест".into(),
@@ -138,7 +150,7 @@ mod tests {
             duration: 80,
             status: "complete".into(),
         };
-        let plan = ktalk::plan(&local, start, recording, &remote, &owner).unwrap();
+        let plan = ktalk::plan(&local, start, recording, &remote, None).unwrap();
         let mut output = Vec::new();
         sync(&library, &meeting, &plan, true, &mut output).unwrap();
         let output = String::from_utf8(output).unwrap();
