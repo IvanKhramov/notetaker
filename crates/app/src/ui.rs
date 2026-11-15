@@ -2087,6 +2087,27 @@ impl NotetakerApp {
             self.show_settings = false;
         }
     }
+    fn calendar_reminder_overlay(&mut self, ctx: &egui::Context, bounds: egui::Rect) {
+        let Some(event) = self.state.calendar_reminder.clone() else {
+            return;
+        };
+        let bounds = bounds.shrink(theme::SPACE[3]);
+        let width = bounds.width().clamp(1.0, 340.0);
+        let action = egui::Area::new(egui::Id::unique("calendar-reminder"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(egui::pos2(bounds.right() - width, bounds.top()))
+            .constrain_to(bounds)
+            .show(ctx, |ui| {
+                ui.set_width(width);
+                crate::calendar_ui::reminder(
+                    ui,
+                    &event,
+                    cfg!(any(windows, target_os = "macos")) && self.can_record(),
+                )
+            })
+            .inner;
+        self.calendar_action(ctx, action, event);
+    }
     fn calendar_action(
         &mut self,
         ctx: &egui::Context,
@@ -2519,28 +2540,14 @@ impl NotetakerApp {
                 self.sidebar_open = false;
             }
         }
-        if let Some(event) = self.state.calendar_reminder.clone() {
-            egui::Panel::top("calendar-reminder")
-                .frame(
-                    egui::Frame::new()
-                        .fill(p.bg)
-                        .inner_margin(egui::Margin::symmetric(24, 8)),
-                )
-                .show(ui, |ui| {
-                    let action = crate::calendar_ui::reminder(
-                        ui,
-                        &event,
-                        cfg!(any(windows, target_os = "macos")) && self.can_record(),
-                    );
-                    self.calendar_action(&ctx, action, event.clone());
-                });
-        }
         if self.show_settings {
+            let reminder_bounds = ui.available_rect_before_wrap();
             self.toast_anchor = Some(egui::pos2(
                 ui.available_rect_before_wrap().center().x,
                 ctx.content_rect().bottom() - 12.0,
             ));
             self.settings_dialog(ui);
+            self.calendar_reminder_overlay(&ctx, reminder_bounds);
             self.notifications(&ctx);
             self.indicator(&ctx);
             self.call_notification(&ctx);
@@ -2564,6 +2571,7 @@ impl NotetakerApp {
                     );
                 });
             });
+        let reminder_bounds = ui.available_rect_before_wrap();
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(p.bg).inner_margin(
                 if ctx.content_rect().height() < 600.0 {
@@ -2606,6 +2614,7 @@ impl NotetakerApp {
                     }
                 });
             });
+        self.calendar_reminder_overlay(&ctx, reminder_bounds);
         if let Some(uri) = self.image_viewer.clone() {
             let mut open = true;
             theme::modal(&ctx, "Изображение")
