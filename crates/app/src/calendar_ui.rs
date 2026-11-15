@@ -160,3 +160,235 @@ mod tests {
         assert_eq!(chosen, Action::Start);
     }
 }
+
+pub fn refresh_enabled(configured: bool, busy: bool) -> bool {
+    configured && !busy
+}
+fn status_line(ui: &mut egui::Ui, icon: &str, text: &str, color: egui::Color32) {
+    ui.horizontal_wrapped(|ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(16.0, 20.0), egui::Sense::hover());
+        theme::paint_icon(ui, rect.center(), icon, 16.0, color);
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(text)
+                    .font(theme::medium(theme::SMALL))
+                    .color(color),
+            )
+            .wrap(),
+        );
+    });
+}
+pub fn skipped_text(skipped: &[notetaker_core::calendar::SkippedEvent]) -> String {
+    let mut counts = std::collections::BTreeMap::new();
+    for event in skipped {
+        *counts.entry(event.reason).or_insert(0) += 1;
+    }
+    format!(
+        "Пропущено событий: {} ({})",
+        skipped.len(),
+        counts
+            .into_iter()
+            .map(|(reason, count)| format!("{}: {count}", reason.label()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+pub fn subscription_status(
+    ui: &mut egui::Ui,
+    report: Option<&notetaker_llm::calendar::SubscriptionStatus>,
+    error: Option<&str>,
+    busy: bool,
+) {
+    let p = theme::Palette::of(ui);
+    if let Some(report) = report
+        && let Some(at) = report.updated_at
+    {
+        status_line(
+            ui,
+            theme::icons::CHECK,
+            &format!(
+                "Обновлено в {} · событий на ближайшие дни: {}",
+                at.with_timezone(&chrono::Local).format("%H:%M"),
+                report.events.iter().filter(|event| event.end > at).count()
+            ),
+            p.muted,
+        );
+    } else {
+        status_line(
+            ui,
+            theme::icons::REFRESH_CW,
+            if busy {
+                "Обновляем календарь…"
+            } else {
+                "Календарь ещё не обновлён"
+            },
+            p.muted,
+        );
+    }
+    if let Some(error) = report.and_then(|r| r.error.as_deref()).or(error) {
+        theme::callout(ui, theme::icons::CIRCLE_ALERT, |ui| {
+            ui.colored_label(p.red, error);
+            ui.label("Проверьте сеть и сохранённую ICS-подписку, затем обновите календарь.");
+        });
+    }
+    if let Some(report) = report
+        && !report.skipped.is_empty()
+    {
+        status_line(
+            ui,
+            theme::icons::TRIANGLE_ALERT,
+            &skipped_text(&report.skipped),
+            p.warning,
+        );
+        theme::disclosure("Пропущенные события").show(ui, |ui| {
+            for event in &report.skipped {
+                ui.add(egui::Label::new(&event.title).wrap());
+            }
+        });
+    }
+}
+pub struct Home<'a> {
+    pub events: &'a [CalendarEvent],
+    pub reports: &'a [notetaker_llm::calendar::SubscriptionStatus],
+    pub error: Option<&'a str>,
+    pub loading: bool,
+    pub now: DateTime<Utc>,
+    pub can_record: bool,
+}
+#[derive(Default)]
+pub enum HomeAction {
+    #[default]
+    None,
+    Settings,
+    Start(CalendarEvent),
+}
+pub fn home(ui: &mut egui::Ui, model: Home<'_>, expanded: &mut bool) -> HomeAction {
+    let mut action = HomeAction::None;
+    let p = theme::Palette::of(ui);
+    theme::card(p, false).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(18.0, 24.0), egui::Sense::hover());
+            theme::paint_icon(ui, rect.center(), theme::icons::CALENDAR, 18.0, p.text);
+            ui.label(
+                egui::RichText::new("Календарь")
+                    .font(theme::semibold(theme::BODY))
+                    .color(p.text),
+            );
+        });
+        let today = model.now.with_timezone(&chrono::Local).date_naive();
+        let tomorrow = today.succ_opt().unwrap_or(today);
+        let mut events: Vec<_> = model
+            .events
+            .iter()
+            .filter(|event| {
+                event.end > model.now
+                    && event.start.with_timezone(&chrono::Local).date_naive() <= tomorrow
+            })
+            .collect();
+        events.sort_by_key(|event| event.start);
+        let issue = model
+            .error
+            .or_else(|| model.reports.iter().find_map(|r| r.error.as_deref()));
+        let skipped = model.reports.iter().map(|r| r.skipped.len()).sum::<usize>();
+        if let Some(issue) = issue {
+            ui.add(egui::Label::new(egui::RichText::new(issue).color(p.red)).wrap());
+        } else if skipped > 0 {
+            ui.colored_label(
+                p.warning,
+                format!("Пропущено событий: {skipped}. Часть календаря не поддерживается."),
+            );
+        }
+        if (issue.is_some() || skipped > 0)
+            && theme::button(ui, "Открыть настройки календаря", ButtonStyle::Ghost).clicked()
+        {
+            action = HomeAction::Settings;
+        }
+        if model.loading {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Загружаем календарь…");
+            });
+        } else if events.is_empty() {
+            ui.label(if issue.is_some() {
+                "Календарь пока недоступен"
+            } else {
+                "Сегодня и завтра встреч нет"
+            });
+        }
+        let mut day = None;
+        for event in events.iter().take(if *expanded { events.len() } else { 6 }) {
+            let date = event
+                .start
+                .with_timezone(&chrono::Local)
+                .date_naive()
+                .max(today);
+            if day != Some(date) {
+                theme::section_caption(
+                    ui,
+                    if date == today {
+                        "Сегодня"
+                    } else {
+                        "Завтра"
+                    },
+                );
+                day = Some(date);
+            }
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    egui::RichText::new(if event.all_day {
+                        "Весь день".into()
+                    } else {
+                        event
+                            .start
+                            .with_timezone(&chrono::Local)
+                            .format("%H:%M")
+                            .to_string()
+                    })
+                    .color(p.muted),
+                );
+                ui.add(egui::Label::new(&event.link.title).wrap());
+                if call_link(event).is_some() {
+                    ui.label(
+                        egui::RichText::new("Звонок")
+                            .font(theme::medium(theme::SMALL))
+                            .color(p.accent),
+                    );
+                }
+                if event.start <= model.now {
+                    ui.colored_label(p.accent, "идёт");
+                }
+                if !event.all_day
+                    && event.start <= model.now + chrono::Duration::minutes(5)
+                    && ui
+                        .add_enabled(
+                            model.can_record,
+                            theme::styled_button(p, action_label(event), ButtonStyle::Secondary),
+                        )
+                        .clicked()
+                {
+                    action = HomeAction::Start((*event).clone());
+                }
+            });
+        }
+        if events.len() > 6
+            && theme::button(
+                ui,
+                &if *expanded {
+                    "Свернуть".into()
+                } else {
+                    format!("ещё {}", events.len() - 6)
+                },
+                ButtonStyle::Ghost,
+            )
+            .clicked()
+        {
+            *expanded = !*expanded;
+        }
+    });
+    ui.add_space(theme::SPACE[2]);
+    action
+}
+
+#[cfg(test)]
+mod visibility_tests;

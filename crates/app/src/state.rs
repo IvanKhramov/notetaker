@@ -384,7 +384,8 @@ pub struct AppState {
     pub calendar_events: Vec<notetaker_core::calendar::CalendarEvent>,
     pub calendar_secrets: HashMap<String, String>,
     pub calendar_busy: bool,
-    pub calendar_status: String,
+    pub calendar_reports: Vec<notetaker_llm::calendar::SubscriptionStatus>,
+    pub calendar_error: Option<String>,
     pub calendar_checked: Option<Instant>,
     calendar_generation: u64,
     prefilled_title: Option<String>,
@@ -489,7 +490,8 @@ impl AppState {
             calendar_events: Vec::new(),
             calendar_secrets: HashMap::new(),
             calendar_busy: false,
-            calendar_status: String::new(),
+            calendar_reports: Vec::new(),
+            calendar_error: None,
             calendar_checked: None,
             calendar_generation: 0,
             prefilled_title: None,
@@ -1965,15 +1967,34 @@ impl AppState {
                 if generation == self.calendar_generation {
                     self.calendar_busy = false;
                     match result {
-                        Ok(events) => {
-                            self.quickstart.calendar_error = None;
-                            self.calendar_status = format!("Событий: {}", events.len());
-                            self.calendar_events = events;
+                        Ok(mut reports) => {
+                            self.calendar_error = None;
+                            for report in &mut reports {
+                                if report.error.is_some()
+                                    && let Some(old) =
+                                        self.calendar_reports.iter().find(|old| old.id == report.id)
+                                {
+                                    report.events = old.events.clone();
+                                    report.updated_at = old.updated_at;
+                                    report.skipped = old.skipped.clone();
+                                }
+                            }
+                            self.quickstart.calendar_error =
+                                reports.iter().find_map(|report| report.error.clone());
+                            self.calendar_events = reports
+                                .iter()
+                                .flat_map(|report| report.events.iter().cloned())
+                                .collect();
+                            self.calendar_events
+                                .sort_by_key(|event| (event.start, event.link.uid.clone()));
+                            self.calendar_events
+                                .dedup_by(|a, b| a.start == b.start && a.link.uid == b.link.uid);
+                            self.calendar_reports = reports;
                             self.update_calendar_reminder(chrono::Utc::now());
                         }
                         Err(error) => {
                             self.quickstart.calendar_error = Some(error.clone());
-                            self.calendar_status = error;
+                            self.calendar_error = Some(error);
                         }
                     }
                 }
@@ -2568,6 +2589,8 @@ impl AppState {
                         if calendar_changed {
                             self.quickstart.calendar_error = None;
                             self.calendar_events.clear();
+                            self.calendar_reports.clear();
+                            self.calendar_error = None;
                             self.calendar_reminder = None;
                             self.reminded_events.clear();
                             self.calendar_busy = false;
@@ -4977,11 +5000,15 @@ mod calendar_tests {
             }
             state.apply(Event::Calendar {
                 generation: state.calendar_generation,
-                result: Ok(if change == "cancelled" {
-                    vec![]
-                } else {
-                    vec![event]
-                }),
+                result: Ok(vec![notetaker_llm::calendar::SubscriptionStatus {
+                    id: "calendar-test".into(),
+                    events: if change == "cancelled" {
+                        vec![]
+                    } else {
+                        vec![event]
+                    },
+                    ..Default::default()
+                }]),
             });
             if change == "link" {
                 assert_eq!(state.calendar_reminder, key);
@@ -5034,6 +5061,72 @@ mod calendar_tests {
         assert!(matches!(
             commands.try_recv().unwrap(),
             Command::Calendar { .. }
+        ));
+    }
+}
+
+#[cfg(test)]
+mod calendar_feed_status_tests {
+    use super::*;
+    #[test]
+    fn failed_feed_keeps_its_snapshot_other_feeds_update_and_refresh_stays_enabled() {
+        let (mut state, _, _) = crate::test_ui::state();
+        let now = chrono::Utc::now();
+        let make = |id: &str| notetaker_core::calendar::CalendarEvent {
+            link: notetaker_core::calendar::EventLink {
+                uid: id.into(),
+                title: "Рабочая встреча".into(),
+                attendees: vec![],
+                call_url: None,
+            },
+            start: now,
+            end: now + chrono::Duration::hours(1),
+            all_day: false,
+            organizer: None,
+        };
+        state.apply(Event::Calendar {
+            generation: state.calendar_generation,
+            result: Ok(vec![notetaker_llm::calendar::SubscriptionStatus {
+                id: "calendar-a".into(),
+                events: vec![make("a")],
+                updated_at: Some(now),
+                ..Default::default()
+            }]),
+        });
+        state.calendar_busy = true;
+        state.apply(Event::Calendar {
+            generation: state.calendar_generation,
+            result: Ok(vec![
+                notetaker_llm::calendar::SubscriptionStatus {
+                    id: "calendar-a".into(),
+                    error: Some("Ошибка загрузки календаря".into()),
+                    ..Default::default()
+                },
+                notetaker_llm::calendar::SubscriptionStatus {
+                    id: "calendar-b".into(),
+                    events: vec![make("b")],
+                    updated_at: Some(now),
+                    ..Default::default()
+                },
+            ]),
+        });
+        assert_eq!(state.calendar_events.len(), 2);
+        assert!(state.calendar_reports[0].error.is_some());
+        assert_eq!(state.calendar_reports[0].updated_at, Some(now));
+        assert!(crate::calendar_ui::refresh_enabled(
+            true,
+            state.calendar_busy
+        ));
+        state.calendar_busy = true;
+        state.apply(Event::Calendar {
+            generation: state.calendar_generation,
+            result: Err("Ошибка подключения".into()),
+        });
+        assert!(state.calendar_error.is_some());
+        assert_eq!(state.calendar_events.len(), 2);
+        assert!(crate::calendar_ui::refresh_enabled(
+            true,
+            state.calendar_busy
         ));
     }
 }

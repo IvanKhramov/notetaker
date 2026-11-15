@@ -2,7 +2,7 @@
 use std::{io::Read, time::Duration};
 
 use anyhow::{Result, ensure};
-use notetaker_core::calendar::{CalendarEvent, parse_ics, timezone};
+use notetaker_core::calendar::{CalendarEvent, SkippedEvent, parse_ics_report, timezone};
 use serde::{Deserialize, Serialize};
 
 use crate::CredentialStore;
@@ -45,25 +45,35 @@ fn validate_url(secret: &str) -> Result<reqwest::Url> {
     Ok(url)
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct SubscriptionStatus {
+    pub id: String,
+    pub events: Vec<CalendarEvent>,
+    pub skipped: Vec<SkippedEvent>,
+    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub error: Option<String>,
+}
 pub fn refresh(
     subscriptions: &[Subscription],
     zone: &str,
     now: chrono::DateTime<chrono::Utc>,
     store: &dyn CredentialStore,
-) -> Result<Vec<CalendarEvent>> {
+) -> Result<Vec<SubscriptionStatus>> {
     let zone = timezone(zone)?;
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| anyhow::anyhow!("Не удалось создать клиент календаря"))?;
-    let mut events = Vec::new();
-    for subscription in subscriptions {
-        subscription.validate()?;
-        let secret = store.read(&subscription.id)?;
-        let url = validate_url(&secret)?;
-        // Do not format reqwest errors: they contain the private subscription URL.
-        let response = client
+    Ok(subscriptions
+        .iter()
+        .map(|subscription| {
+            let load = || -> Result<notetaker_core::calendar::ParsedCalendar> {
+                subscription.validate()?;
+                let secret = store.read(&subscription.id)?;
+                let url = validate_url(&secret)?;
+                // Do not format reqwest errors: they contain the private subscription URL.
+                let response = client
             .get(url)
             .send()
             .and_then(|r| r.error_for_status())
@@ -72,24 +82,37 @@ pub fn refresh(
                     "Не удалось загрузить календарь; проверьте URL и сеть (редиректы запрещены)"
                 )
             })?;
-        let mut bytes = Vec::new();
-        response
-            .take(8 * 1024 * 1024 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| anyhow::anyhow!("Не удалось прочитать календарь"))?;
-        ensure!(bytes.len() <= 8 * 1024 * 1024, "Календарь больше 8 МБ");
-        let text =
-            String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("ICS должен быть UTF-8"))?;
-        events.extend(parse_ics(
-            &text,
-            now - chrono::Duration::days(2),
-            now + chrono::Duration::days(2),
-            zone,
-        )?);
-    }
-    events.sort_by_key(|event| (event.start, event.link.uid.clone()));
-    events.dedup_by(|a, b| a.start == b.start && a.link.uid == b.link.uid);
-    Ok(events)
+                let mut bytes = Vec::new();
+                response
+                    .take(8 * 1024 * 1024 + 1)
+                    .read_to_end(&mut bytes)
+                    .map_err(|_| anyhow::anyhow!("Не удалось прочитать календарь"))?;
+                ensure!(bytes.len() <= 8 * 1024 * 1024, "Календарь больше 8 МБ");
+                let text = String::from_utf8(bytes)
+                    .map_err(|_| anyhow::anyhow!("ICS должен быть UTF-8"))?;
+                Ok(parse_ics_report(
+                    &text,
+                    now - chrono::Duration::days(2),
+                    now + chrono::Duration::days(2),
+                    zone,
+                )?)
+            };
+            match load() {
+                Ok(report) => SubscriptionStatus {
+                    id: subscription.id.clone(),
+                    events: report.events,
+                    skipped: report.skipped,
+                    updated_at: Some(now),
+                    error: None,
+                },
+                Err(error) => SubscriptionStatus {
+                    id: subscription.id.clone(),
+                    error: Some(format!("{error:#}")),
+                    ..Default::default()
+                },
+            }
+        })
+        .collect())
 }
 
 #[cfg(test)]
