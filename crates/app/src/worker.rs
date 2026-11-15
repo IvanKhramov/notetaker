@@ -212,6 +212,7 @@ pub enum Command {
     Chat {
         root: PathBuf,
         scope: Option<Meeting>,
+        live: Option<(String, notetaker_core::Transcript)>,
         folder: Option<String>,
         question: String,
         history: Vec<notetaker_llm::ChatTurn>,
@@ -620,6 +621,7 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                 Command::Chat {
                     root,
                     scope,
+                    live,
                     folder,
                     question,
                     history,
@@ -633,7 +635,15 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                             notetaker_llm::ask(
                                 &library,
                                 if let Some(meeting) = scope.as_ref() {
-                                    notetaker_llm::ChatScope::Meeting(meeting)
+                                    if let Some((notes, transcript)) = &live {
+                                        notetaker_llm::ChatScope::Live {
+                                            meeting,
+                                            notes,
+                                            transcript,
+                                        }
+                                    } else {
+                                        notetaker_llm::ChatScope::Meeting(meeting)
+                                    }
                                 } else if let Some(folder) = folder.as_deref() {
                                     notetaker_llm::ChatScope::Folder(folder)
                                 } else {

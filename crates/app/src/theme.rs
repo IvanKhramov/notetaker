@@ -576,6 +576,7 @@ pub enum ButtonStyle {
     Primary,
     Secondary,
     Ghost,
+    Chip,
     Danger,
     DangerFilled,
 }
@@ -605,14 +606,20 @@ impl<'a> Button<'a> {
 impl egui::Widget for Button<'_> {
     fn ui(self, ui: &mut egui::Ui) -> egui::Response {
         let p = Palette::of(ui);
-        let text =
-            ui.painter()
-                .layout_no_wrap(self.text.to_owned(), medium(BUTTON), Color32::PLACEHOLDER);
         let leading = if self.icon.is_some() { 22.0 } else { 0.0 };
         let trailing = if self.trailing.is_some() { 24.0 } else { 0.0 };
+        let text = ui.painter().layout_no_wrap(
+            self.text.to_owned(),
+            medium(if self.variant == ButtonStyle::Chip {
+                SMALL
+            } else {
+                BUTTON
+            }),
+            Color32::PLACEHOLDER,
+        );
         let size = egui::vec2(
             text.size().x + 24.0 + leading + trailing,
-            self.min_size.y.max(COMPACT_HEIGHT),
+            self.min_size.y.max(COMPACT_HEIGHT).max(text.size().y + 8.0),
         )
         .max(self.min_size);
         let (rect, response) = ui.allocate_at_least(size, egui::Sense::click());
@@ -625,6 +632,12 @@ impl egui::Widget for Button<'_> {
                 Stroke::new(1.0, p.border_strong),
             ),
             ButtonStyle::Ghost => (Color32::TRANSPARENT, p.hover, p.muted, Stroke::NONE),
+            ButtonStyle::Chip => (
+                Color32::TRANSPARENT,
+                p.hover,
+                p.muted,
+                Stroke::new(1.0, p.border),
+            ),
             ButtonStyle::Danger => (Color32::TRANSPARENT, p.hover, p.red, Stroke::NONE),
             ButtonStyle::DangerFilled => (
                 p.red,
@@ -652,9 +665,14 @@ impl egui::Widget for Button<'_> {
             },
             pressing,
         );
+        let radius = if self.variant == ButtonStyle::Chip {
+            255
+        } else {
+            RADIUS_CONTROL
+        };
         ui.painter()
-            .rect(rect, RADIUS_CONTROL, fill, border, egui::StrokeKind::Inside);
-        focus_ring(ui, &response, RADIUS_CONTROL);
+            .rect(rect, radius, fill, border, egui::StrokeKind::Inside);
+        focus_ring(ui, &response, radius);
         let ink = if !ui.is_enabled() {
             p.tertiary
         } else if self.variant == ButtonStyle::Ghost && response.hovered() {
@@ -710,7 +728,14 @@ pub fn styled_button<'a>(_: Palette, text: &'a str, variant: ButtonStyle) -> But
         text,
         variant,
         icon,
-        min_size: egui::vec2(0.0, CONTROL_HEIGHT),
+        min_size: egui::vec2(
+            0.0,
+            if variant == ButtonStyle::Chip {
+                COMPACT_HEIGHT
+            } else {
+                CONTROL_HEIGHT
+            },
+        ),
         trailing: None,
     }
 }
@@ -2434,4 +2459,105 @@ mod sticky_footer_tests {
             );
         }
     }
+}
+
+/// One row of compact prompts; only complete chips are shown.
+pub fn prompt_chips(ui: &mut egui::Ui, prompts: &[&str]) -> Option<String> {
+    let mut chosen = None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        ui.set_height(COMPACT_HEIGHT);
+        for prompt in prompts {
+            let width = ui
+                .painter()
+                .layout_no_wrap((*prompt).into(), medium(SMALL), Color32::PLACEHOLDER)
+                .size()
+                .x
+                + 24.0;
+            if width <= ui.available_width() && button(ui, prompt, ButtonStyle::Chip).clicked() {
+                chosen = Some((*prompt).into());
+            }
+        }
+    });
+    chosen
+}
+
+pub fn recipe_popup<R>(
+    ui: &egui::Ui,
+    anchor: &egui::Response,
+    open: &mut bool,
+    content: impl FnOnce(&mut egui::Ui) -> R,
+) -> Option<egui::InnerResponse<R>> {
+    let frame = egui::Frame::popup(ui.style());
+    let width = (anchor.rect.width() - frame.total_margin().sum().x).max(1.0);
+    egui::Popup::new(
+        egui::Id::unique("chat-recipes"),
+        ui.ctx().clone(),
+        anchor.rect,
+        ui.layer_id(),
+    )
+    .align(egui::emath::RectAlign::TOP_START)
+    .align_alternatives(&[])
+    .width(anchor.rect.width())
+    .frame(frame)
+    .open_bool(open)
+    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+    .show(|ui| {
+        ui.set_width(width);
+        content(ui)
+    })
+}
+
+pub fn recipe_row(
+    ui: &mut egui::Ui,
+    name: &str,
+    reason: Option<&str>,
+    selected: bool,
+) -> egui::Response {
+    let p = Palette::of(ui);
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 32.0), egui::Sense::click());
+    if selected || (response.hovered() && ui.is_enabled()) {
+        ui.painter().rect_filled(
+            rect,
+            RADIUS_CONTROL,
+            if selected { p.selected } else { p.hover },
+        );
+    }
+    let mut name_rect = rect.shrink2(egui::vec2(10.0, 0.0));
+    if let Some(reason) = reason {
+        let reason_width = (rect.width() * 0.45).max(0.0);
+        name_rect.max.x -= reason_width + 8.0;
+        let reason_rect = egui::Rect::from_min_max(
+            egui::pos2(name_rect.right() + 8.0, rect.top()),
+            egui::pos2(rect.right() - 10.0, rect.bottom()),
+        );
+        let text = ui
+            .painter()
+            .layout_no_wrap(reason.into(), medium(SMALL), p.muted);
+        ui.painter()
+            .with_clip_rect(reason_rect.intersect(ui.clip_rect()))
+            .galley(
+                reason_rect.left_center() - egui::vec2(0.0, text.size().y / 2.0),
+                text,
+                p.muted,
+            );
+        response.clone().on_disabled_hover_text(reason);
+    }
+    let ink = if ui.is_enabled() { p.text } else { p.muted };
+    let text = ui
+        .painter()
+        .layout_no_wrap(name.into(), medium(BUTTON), ink);
+    ui.painter()
+        .with_clip_rect(name_rect.intersect(ui.clip_rect()))
+        .galley(
+            name_rect.left_center() - egui::vec2(0.0, text.size().y / 2.0),
+            text,
+            ink,
+        );
+    focus_ring(ui, &response, RADIUS_CONTROL);
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, name)
+    });
+    response
 }

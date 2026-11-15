@@ -31,6 +31,11 @@ pub enum ChatScope<'a> {
     All,
     Meeting(&'a Meeting),
     Folder(&'a str),
+    Live {
+        meeting: &'a Meeting,
+        notes: &'a str,
+        transcript: &'a notetaker_core::Transcript,
+    },
 }
 
 /// History is passed by value from the UI session and never written to disk.
@@ -47,8 +52,8 @@ pub fn ask(
     ensure!(!question.trim().is_empty(), "Введите вопрос");
     ensure!(!cancel.is_cancelled(), "Запрос отменён");
     let mut retrieved = Vec::new();
-    let meetings = if let ChatScope::Meeting(meeting) = scope {
-        vec![meeting.clone()]
+    let meetings = if let ChatScope::Meeting(meeting) | ChatScope::Live { meeting, .. } = &scope {
+        vec![(*meeting).clone()]
     } else {
         library.reindex_incremental()?;
         let allow_remote = !history.iter().any(|turn| turn.mode == Mode::Local);
@@ -111,7 +116,14 @@ pub fn ask(
             "[{number}: {}, {date}]",
             meta.title.replace(['\r', '\n'], " ")
         );
-        let mut transcript = meeting.read_transcript()?;
+        let (notes, mut transcript) = if let ChatScope::Live {
+            notes, transcript, ..
+        } = &scope
+        {
+            ((*notes).to_owned(), (*transcript).clone())
+        } else {
+            (meeting.read_notes()?, meeting.read_transcript()?)
+        };
         transcript.default_self_name(&user_name);
         let hit = retrieved.iter().find(|hit| hit.path == meeting.path());
         let text = if let Some(hit) = hit.filter(|h| !h.chunks.is_empty()) {
@@ -123,7 +135,7 @@ pub fn ask(
         } else {
             format!(
                 "Участники: {participants}\nЗаметки:\n{}\nКонспект:\n{}\nТранскрипт:\n{}",
-                notes_without_images(&meeting.read_notes()?),
+                notes_without_images(&notes),
                 notes_without_images(&meeting.read_enhanced()?),
                 transcript.named_text()
             )
@@ -305,6 +317,26 @@ mod tests {
                 &mut |_| panic!("privacy failure")
             )
             .is_err()
+        );
+        let transcript = meeting.read_transcript().unwrap();
+        assert!(
+            ask(
+                &library,
+                ChatScope::Live {
+                    meeting: &meeting,
+                    notes: "Личные заметки",
+                    transcript: &transcript
+                },
+                "Что решили?",
+                &[],
+                &config,
+                Cancellation::default(),
+                &mut |_| panic!("privacy failure")
+            )
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("Local")
         );
         let mut meta = meeting.read_meta().unwrap();
         meta.mode = Mode::Hybrid;

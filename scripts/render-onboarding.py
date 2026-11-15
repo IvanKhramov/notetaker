@@ -108,6 +108,11 @@ impl NotetakerApp {
         if screen == 17 { app.state.rows.clear(); }
         if screen == 18 { app.show_settings = true; }
         if screen == 19 { app.state.recording.phase = Phase::Recording; app.state.recording.levels=[0.65,0.3]; app.state.recording.started=Some(Instant::now()-Duration::from_secs(123)); }
+        if (42..=45).contains(&screen) {
+            app.home=screen==43 || screen==44;
+            if screen==44 {app.ask_text="/".into();}
+            if screen==45 {app.state.recording.path=app.state.selected.clone();app.state.recording.phase=Phase::Recording;app.state.recording.started=Some(Instant::now()-Duration::from_secs(123));}
+        }
         if screen == 20 { app.chat_page=true; app.state.chat.open(None,String::new()); }
         if screen == 21 { app.state.tasks_open=true; }
         if (22..=25).contains(&screen) { app.people.fixture(&app.state.settings,screen); }
@@ -185,7 +190,7 @@ impl eframe::App for Preview {
             });
         }
         if self.screen==34 {
-            theme::update_prompt(ui.ctx(),"Доступно обновление".into(),"Новая версия готова к установке.","Установить",true,true,true);
+            theme::update_prompt(ui.ctx(),"Доступно обновление".into(),"Новая версия готова к установке.","Установить",true,true,Some(&["Новая версия готова к установке.".into()]));
         }
         if self.screen == 12 {
             egui::Area::new(egui::Id::unique("recording-pill-preview")).anchor(egui::Align2::RIGHT_BOTTOM, [-20.0, -100.0])
@@ -283,7 +288,7 @@ if shutil.disk_usage(root).free < 2 * 1024**3:
 # Resolve the derived harness root against the copied workspace lock before its locked build.
 subprocess.run(["cargo", "metadata", "--offline", "--format-version", "1", "--manifest-path", str(harness / "Cargo.toml")], cwd=root, env=env, check=True, stdout=subprocess.DEVNULL)
 subprocess.run(["cargo", "build", "--locked", "--manifest-path", str(harness / "Cargo.toml")], cwd=root, env=env, check=True)
-names = ["welcome", "name", "connections", "home", "note", "transcript", "general", "recording", "calendars", "ai", "search", "storage", "recording-pill", "connections-expanded", "delete-confirm", "meeting-menu", "toast", "empty-library", "narrow-settings", "recording-bar", "chat", "tasks", "people", "person", "series", "digest", "folders", "diagnostics", "tracker-preview", "new-recording", "rename", "regenerate", "capture-warning", "widgets", "update-card", "folder-delete", "merge-people", "folders-advanced", "ai-expanded", "performance-transcript", "performance-meetings", "performance-live"]
+names = ["welcome", "name", "connections", "home", "note", "transcript", "general", "recording", "calendars", "ai", "search", "storage", "recording-pill", "connections-expanded", "delete-confirm", "meeting-menu", "toast", "empty-library", "narrow-settings", "recording-bar", "chat", "tasks", "people", "person", "series", "digest", "folders", "diagnostics", "tracker-preview", "new-recording", "rename", "regenerate", "capture-warning", "widgets", "update-card", "folder-delete", "merge-people", "folders-advanced", "ai-expanded", "performance-transcript", "performance-meetings", "performance-live", "chat-meeting-empty", "chat-library-empty", "chat-recipes", "chat-recording"]
 def render(spec):
     index, name, theme, width, height, zoom = spec
     actual_width = 760 if name == "narrow-settings" and zoom == 1.0 else width
