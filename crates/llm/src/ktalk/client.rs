@@ -24,6 +24,28 @@ pub(super) fn valid_time(start: i64, end: i64) -> Result<()> {
 #[cfg(not(test))]
 static LAST_REQUEST: Mutex<Option<Instant>> = Mutex::new(None);
 const REQUEST_GAP: Duration = Duration::from_millis(1501);
+/// The client timeout restarts on every read, so a body dripped byte by byte
+/// would never end. The whole body has to arrive within this time.
+const BODY_DEADLINE: Duration = Duration::from_secs(120);
+
+fn read_body(mut body: impl Read, deadline: Instant) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        let read = body
+            .read(&mut chunk)
+            .map_err(|_| anyhow::anyhow!("Не удалось прочитать ответ Толка"))?;
+        if read == 0 {
+            return Ok(bytes);
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+        ensure!(bytes.len() as u64 <= LIMIT, "Ответ Толка больше 16 МиБ");
+        ensure!(
+            Instant::now() < deadline,
+            "Толк отвечает слишком медленно: ответ не получен за 2 минуты"
+        );
+    }
+}
 fn pace_requests(
     state: &Mutex<Option<Instant>>,
     now: impl Fn() -> Instant,
@@ -210,12 +232,7 @@ impl Client {
             response.status().is_success(),
             "Толк: HTTP {code}; редиректы запрещены"
         );
-        let mut bytes = Vec::new();
-        response
-            .take(LIMIT + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| anyhow::anyhow!("Не удалось прочитать ответ Толка"))?;
-        ensure!(bytes.len() as u64 <= LIMIT, "Ответ Толка больше 16 МиБ");
+        let bytes = read_body(response, Instant::now() + BODY_DEADLINE)?;
         serde_json::from_slice(&bytes)
             .map_err(|_| anyhow::anyhow!("Некорректная структура ответа Толка"))
     }

@@ -201,3 +201,20 @@ fn process_pacer_allows_at_most_forty_requests_in_a_rolling_minute() {
         assert!(pair[1].duration_since(pair[0]) >= REQUEST_GAP);
     }
 }
+
+#[test]
+fn slow_body_stops_at_the_deadline_and_large_body_at_the_limit() {
+    struct Drip;
+    impl std::io::Read for Drip {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            buffer[0] = b' ';
+            Ok(1)
+        }
+    }
+    let error = super::read_body(Drip, std::time::Instant::now()).unwrap_err();
+    assert!(error.to_string().contains("слишком медленно"));
+    let far = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+    let error = super::read_body(std::io::repeat(b' '), far).unwrap_err();
+    assert!(error.to_string().contains("16 МиБ"));
+    assert_eq!(super::read_body(&b"{}"[..], far).unwrap(), b"{}");
+}
