@@ -146,7 +146,7 @@ impl NotetakerApp {
                 link:notetaker_core::calendar::EventLink {uid:"entry".into(),title:"Планирование с командой".into(),attendees:vec![notetaker_core::calendar::Attendee{name:"Иван".into(),email:String::new()},notetaker_core::calendar::Attendee{name:"Алексей".into(),email:String::new()}],call_url:if screen==52 {None} else {Some("https://meet.google.com/example".into())}},
                 start:now+chrono::Duration::minutes(if screen==53 {30} else {3}),end:now+chrono::Duration::minutes(60),all_day:false,organizer:None};
             app.state.calendar_events=vec![event.clone()];
-            if screen==51 || screen==52 {app.state.calendar_reminder=Some(event);}
+            if screen==51 || screen==52 {app.state.calendar_reminder=Some((event.link.uid.clone(),event.start));}
             if screen==52 {app.state.recording.path=app.state.selected.clone();app.state.recording.phase=Phase::Recording;app.state.recording.started=Some(Instant::now()-Duration::from_secs(123));}
             if screen==54 {app.show_settings=true;app.settings_panel.section=crate::settings::Section::Calendars;}
         }

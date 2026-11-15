@@ -5,10 +5,10 @@ use notetaker_core::calendar::CalendarEvent;
 
 pub fn call_link(event: &CalendarEvent) -> Option<String> {
     let url = event.link.call_url.as_deref()?;
-    notetaker_core::calendar::call_url(url).filter(|allowed| allowed == url)
+    notetaker_core::calendar::is_allowed_call_link(url).then(|| url.to_owned())
 }
 pub fn action_label(event: &CalendarEvent) -> &'static str {
-    if event.link.call_url.is_some() {
+    if call_link(event).is_some() {
         "Войти и записать"
     } else {
         "Начать запись"

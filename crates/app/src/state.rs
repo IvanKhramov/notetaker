@@ -348,7 +348,7 @@ pub struct AppState {
     pub followup_text: String,
     pub followup_path: Option<PathBuf>,
     pub followup_kind: notetaker_llm::FollowupKind,
-    pub calendar_reminder: Option<notetaker_core::calendar::CalendarEvent>,
+    pub calendar_reminder: Option<(String, chrono::DateTime<chrono::Utc>)>,
     reminded_events: HashSet<(String, chrono::DateTime<chrono::Utc>)>,
     pub calendar_events: Vec<notetaker_core::calendar::CalendarEvent>,
     pub calendar_secrets: HashMap<String, String>,
@@ -823,40 +823,44 @@ impl AppState {
             app,
         }));
     }
+    pub fn calendar_reminder(&self) -> Option<&notetaker_core::calendar::CalendarEvent> {
+        let (uid, start) = self.calendar_reminder.as_ref()?;
+        self.calendar_events
+            .iter()
+            .find(|event| &event.link.uid == uid && &event.start == start)
+            .filter(|event| crate::calendar_ui::eligible(event, chrono::Utc::now()))
+    }
     pub fn dismiss_calendar_reminder(&mut self) {
-        if let Some(event) = self.calendar_reminder.take() {
-            self.reminded_events.insert((event.link.uid, event.start));
+        if let Some(key) = self.calendar_reminder.take() {
+            self.reminded_events.insert(key);
         }
     }
     pub fn update_calendar_reminder(&mut self, now: chrono::DateTime<chrono::Utc>) {
-        if self
-            .calendar_reminder
-            .as_ref()
-            .is_some_and(|event| event.end <= now)
-        {
+        if self.calendar_reminder.as_ref().is_some_and(|(uid, start)| {
+            !self.calendar_events.iter().any(|event| {
+                &event.link.uid == uid
+                    && &event.start == start
+                    && crate::calendar_ui::eligible(event, now)
+            })
+        }) {
             self.calendar_reminder = None;
         }
         if self.calendar_reminder.is_none() {
             for event in &self.calendar_events {
+                let key = (event.link.uid.clone(), event.start);
                 if crate::calendar_ui::eligible(event, now)
-                    && self
-                        .reminded_events
-                        .insert((event.link.uid.clone(), event.start))
+                    && self.reminded_events.insert(key.clone())
                 {
-                    self.calendar_reminder = Some(event.clone());
+                    self.calendar_reminder = Some(key);
                     break;
                 }
             }
         }
     }
     fn recording_event_started(&mut self, event: &notetaker_core::calendar::CalendarEvent) {
-        self.reminded_events
-            .insert((event.link.uid.clone(), event.start));
-        if self
-            .calendar_reminder
-            .as_ref()
-            .is_some_and(|r| r.link.uid == event.link.uid && r.start == event.start)
-        {
+        let key = (event.link.uid.clone(), event.start);
+        self.reminded_events.insert(key.clone());
+        if self.calendar_reminder.as_ref() == Some(&key) {
             self.calendar_reminder = None;
         }
     }
@@ -1688,6 +1692,7 @@ impl AppState {
                             self.quickstart.calendar_error = None;
                             self.calendar_status = format!("Событий: {}", events.len());
                             self.calendar_events = events;
+                            self.update_calendar_reminder(chrono::Utc::now());
                         }
                         Err(error) => {
                             self.quickstart.calendar_error = Some(error.clone());
@@ -4035,7 +4040,7 @@ mod calendar_tests {
         state.calendar_events[0].start += chrono::Duration::seconds(1);
         state.update_calendar_reminder(now);
         assert!(state.calendar_reminder.is_some());
-        let event = state.calendar_reminder.clone().unwrap();
+        let event = state.calendar_reminder().cloned().unwrap();
         let ctx = eframe::egui::Context::default();
         crate::theme::install(&ctx);
         crate::test_ui::click(
@@ -4133,6 +4138,50 @@ mod calendar_tests {
         };
         assert_eq!(request.title, "Календарный план");
         assert!(request.event.is_some());
+    }
+    #[test]
+    fn reminder_tracks_shortened_cancelled_and_updated_calendar_snapshots() {
+        for change in ["shortened", "cancelled", "link"] {
+            let (mut state, _commands) = fixture();
+            let now = chrono::Utc::now();
+            state.calendar_events[0].link.call_url = Some("https://zoom.us/old".into());
+            state.update_calendar_reminder(now);
+            assert!(state.calendar_reminder().is_some());
+            let key = state.calendar_reminder.clone();
+            let mut event = state.calendar_events[0].clone();
+            if change == "shortened" {
+                event.end = now - chrono::Duration::minutes(1);
+            }
+            if change == "link" {
+                event.link.call_url = Some("https://zoom.us/new".into());
+            }
+            state.apply(Event::Calendar {
+                generation: state.calendar_generation,
+                result: Ok(if change == "cancelled" {
+                    vec![]
+                } else {
+                    vec![event]
+                }),
+            });
+            if change == "link" {
+                assert_eq!(state.calendar_reminder, key);
+                assert_eq!(
+                    state.calendar_reminder().unwrap().link.call_url.as_deref(),
+                    Some("https://zoom.us/new")
+                );
+                state.apply(Event::Calendar {
+                    generation: state.calendar_generation,
+                    result: Err("Обновление недоступно".into()),
+                });
+                assert_eq!(
+                    state.calendar_reminder().unwrap().link.call_url.as_deref(),
+                    Some("https://zoom.us/new")
+                );
+            } else {
+                assert!(state.calendar_reminder.is_none());
+                assert!(state.calendar_reminder().is_none());
+            }
+        }
     }
     #[test]
     fn calendar_refresh_discards_stale_settings_results_and_runs_every_ten_minutes() {

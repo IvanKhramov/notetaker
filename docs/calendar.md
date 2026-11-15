@@ -31,7 +31,9 @@ attendees (name/email), call_url. Старые встречи читаются �
 Участники видны в заголовке, предлагаются при переименовании спикера и поступают
 в LLM-промпт как «Участники: ...». Ссылка на `ktalk.ru`, `telemost.yandex.ru`,
 `meet.google.com`, `zoom.us` или поддомен Zoom из URL/LOCATION/DESCRIPTION
-доступна по кнопке «Открыть звонок».
+разрешена только по HTTPS, без userinfo и с портом по умолчанию или 443.
+Ссылки с backslash, пробелами, управляющими символами или не-ASCII hostname
+не принимаются.
 
 Поддержано: переносы строк ICS, экранирование, DTSTART/DTEND в UTC и TZID,
 VALUE=DATE, SUMMARY, ATTENDEE CN/mailto, ORGANIZER, RRULE DAILY/WEEKLY с

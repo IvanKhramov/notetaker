@@ -201,25 +201,70 @@ fn attendee(p: &Property) -> Attendee {
     }
 }
 
-/// Only known call hosts and HTTP(S); suffix lookalikes and userinfo are rejected.
+/// Decide trust before a URL can be displayed as a call link or opened.
+pub fn is_allowed_call_link(value: &str) -> bool {
+    if value
+        .chars()
+        .any(|ch| ch == '\\' || ch.is_control() || ch.is_whitespace())
+    {
+        return false;
+    }
+    let Ok(parsed) = url::Url::parse(value) else {
+        return false;
+    };
+    if parsed.scheme() != "https"
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.port().is_some_and(|port| port != 443)
+    {
+        return false;
+    }
+    // Check the original authority too: URL parsing normalises IDNs and escapes.
+    let Some((_, rest)) = value.split_once("://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    if authority.contains('@') || authority.ends_with(':') {
+        return false;
+    }
+    let raw_host = authority.split(':').next().unwrap_or_default();
+    if raw_host.is_empty()
+        || !raw_host.is_ascii()
+        || !raw_host
+            .bytes()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == b'-' || ch == b'.')
+    {
+        return false;
+    }
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    let host = host.strip_suffix('.').unwrap_or(host);
+    let raw_host = raw_host.to_ascii_lowercase();
+    let raw_host = raw_host.strip_suffix('.').unwrap_or(raw_host.as_str());
+    if host != raw_host {
+        return false;
+    }
+    if !host.is_ascii()
+        || host
+            .split('.')
+            .any(|label| label.is_empty() || label.starts_with('-') || label.ends_with('-'))
+    {
+        return false;
+    }
+    matches!(
+        host,
+        "ktalk.ru" | "telemost.yandex.ru" | "meet.google.com" | "zoom.us"
+    ) || host.ends_with(".zoom.us")
+}
+
+/// Extract a known HTTPS call link from calendar URL, LOCATION or DESCRIPTION text.
 pub fn call_url(text: &str) -> Option<String> {
     text.split(|ch: char| ch.is_whitespace() || matches!(ch, '<' | '>' | '"' | '\''))
         .filter_map(|part| {
-            let offset = part.find("https://").or_else(|| part.find("http://"))?;
-            let url = part[offset..].trim_end_matches([',', '.', ';', ')', ']', '}']);
-            let authority = url.split_once("://")?.1.split(['/', '?', '#']).next()?;
-            let host = authority.to_ascii_lowercase();
-            [
-                "ktalk.ru",
-                "telemost.yandex.ru",
-                "meet.google.com",
-                "zoom.us",
-            ]
-            .iter()
-            .any(|allowed| {
-                host == *allowed || (*allowed == "zoom.us" && host.ends_with(".zoom.us"))
-            })
-            .then(|| url.to_owned())
+            let offset = part.to_ascii_lowercase().find("https://")?;
+            let value = part[offset..].trim_end_matches([',', '.', ';', ')', ']', '}']);
+            is_allowed_call_link(value).then(|| value.to_owned())
         })
         .next()
 }
@@ -556,6 +601,53 @@ mod tests {
                 .calendar_event
                 .is_none()
         );
+    }
+    #[test]
+    fn call_link_allowlist_parses_urls_before_trusting_hosts() {
+        for (value, allowed) in [
+            (r"https://evil.example\.zoom.us/j/1", false),
+            ("http://zoom.us/j/1", false),
+            ("https://zoom.us@evil.example/", false),
+            ("https://evil.example/?x=zoom.us", false),
+            ("https://notzoom.us/", false),
+            ("https://zoom.us.evil.example/", false),
+            ("https://ZOOM.US./j/1", true),
+            ("https://us02web.zoom.us/j/1", true),
+            ("https://sub.meet.google.com/", false),
+            ("https://ｚｏｏｍ.us/", false),
+            ("https://xn--zm-6kcb.us/", false),
+            ("https://zoom.us:8443/j/1", false),
+            ("https://zoom.us:443/j/1", true),
+            ("https://@zoom.us/", false),
+            ("https://zoom.us:/", false),
+            ("https:////zoom.us/j/1", false),
+            ("https://%7aoom.us/", false),
+            ("https://zoom.us/j/1\n", false),
+            ("https://zoom.us/j/ 1", false),
+            ("https://zoom.us/j/1\u{7f}", false),
+            ("https://telemost.yandex.ru/j/1", true),
+            ("https://ktalk.ru/j/1", true),
+            ("https://meet.google.com/example", true),
+        ] {
+            assert_eq!(is_allowed_call_link(value), allowed, "{value:?}");
+        }
+        assert_eq!(
+            call_url("Встречаемся (https://zoom.us/j/1)."),
+            Some("https://zoom.us/j/1".into())
+        );
+        let description = r"https://evil.example\\.zoom.us/j/1";
+        assert!(call_url(&unescape(description)).is_none());
+        let text = format!(
+            "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:unsafe\nDTSTART:20261115T100000Z\nDTEND:20261115T110000Z\nDESCRIPTION:{description}\nEND:VEVENT\nEND:VCALENDAR"
+        );
+        let events = parse_ics(
+            &text,
+            utc("2026-11-15T00:00:00Z"),
+            utc("2026-11-16T00:00:00Z"),
+            chrono_tz::UTC,
+        )
+        .unwrap();
+        assert!(events[0].link.call_url.is_none());
     }
     #[test]
     fn daily_until_dst_and_windows_zone() {

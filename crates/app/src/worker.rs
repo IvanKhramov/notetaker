@@ -688,8 +688,7 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                 Command::OpenCall(url) => {
                     let events = events.clone();
                     thread::spawn(move || {
-                        let allowed = notetaker_core::calendar::call_url(&url).as_deref()
-                            == Some(url.as_str());
+                        let allowed = notetaker_core::calendar::is_allowed_call_link(&url);
                         let ok = allowed && open_call(&url);
                         let _ = events.send(Event::CallOpened(ok));
                     });
