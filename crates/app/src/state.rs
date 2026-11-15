@@ -356,6 +356,7 @@ impl Document {
 }
 
 pub struct AppState {
+    pub ktalk: crate::ktalk::State,
     pub view_revision: u64,
     pub settings: Settings,
     pub settings_draft: Settings,
@@ -518,6 +519,7 @@ impl AppState {
             documents: HashMap::new(),
             loading: HashSet::new(),
             selected: None,
+            ktalk: Default::default(),
             tab: Tab::Enhanced,
             recording: Recording::default(),
             call_prompt: None,
@@ -729,6 +731,9 @@ impl AppState {
         let Some(path) = self.selected.clone() else {
             return;
         };
+        if self.ktalk.editing(&path) {
+            return;
+        }
         if self
             .documents
             .get(&path)
@@ -1571,6 +1576,9 @@ impl AppState {
         self.send(Command::Download(model));
     }
     pub fn can_save_settings(&self) -> bool {
+        if self.ktalk.busy {
+            return false;
+        }
         self.ready
             && !self.recording.busy()
             && self.recording.assist.bookmarks_pending == 0
@@ -1729,6 +1737,7 @@ impl AppState {
         self.poll_live();
         crate::quickstart::auto_download(self);
         self.poll_detection();
+        self.poll_ktalk();
         self.update_calendar_reminder(chrono::Utc::now());
         if self.ready
             && !self.settings.calendars.is_empty()
@@ -1844,6 +1853,7 @@ impl AppState {
             self.view_revision = self.view_revision.wrapping_add(1);
         }
         match event {
+            Event::Ktalk(message) => self.ktalk_result(message),
             Event::SearchNote { request, note } => {
                 if request == self.request {
                     self.semantic_note = note;
@@ -2446,6 +2456,9 @@ impl AppState {
                         self.documents.insert(path.clone(), Document::new(*data));
                     }
                     if error.is_none() {
+                        if !self.recording.importing {
+                            self.ktalk_schedule(&path);
+                        }
                         self.schedule_summary(path);
                     }
                 }
@@ -2605,6 +2618,10 @@ impl AppState {
                             self.loading.clear();
                         }
                         self.status = "Настройки сохранены".into();
+                        if changed_library {
+                            self.ktalk = Default::default();
+                            self.ktalk.load_root = Some(self.settings.library.clone());
+                        }
                         self.refresh();
                     }
                     Err(error) => {

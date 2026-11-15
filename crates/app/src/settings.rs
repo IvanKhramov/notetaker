@@ -17,17 +17,19 @@ pub enum Section {
     Recording,
     Calendars,
     Ai,
+    Ktalk,
     Search,
     Storage,
 }
 impl Section {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::General,
         Self::Recording,
         Self::Calendars,
         Self::Ai,
         Self::Search,
         Self::Storage,
+        Self::Ktalk,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -35,6 +37,7 @@ impl Section {
             Self::Recording => "Запись",
             Self::Calendars => "Календари",
             Self::Ai => "AI",
+            Self::Ktalk => "Толк",
             Self::Search => "Поиск",
             Self::Storage => "Хранилище и диагностика",
         }
@@ -213,6 +216,16 @@ impl Panel {
         let mut edits = Edits::default();
         let mut quickstart = false;
         match self.section {
+            Section::Ktalk => {
+                if let Some(job) = ui
+                    .add_enabled_ui(state.ready && !state.settings_pending, |ui| {
+                        crate::ktalk::settings_ui(ui, &mut state.ktalk)
+                    })
+                    .inner
+                {
+                    state.ktalk_job(job);
+                }
+            }
             Section::General => {
                 let settings = &mut state.settings_draft;
                 theme::settings_group(ui, "Оформление", |ui| {

@@ -4,7 +4,7 @@ mod brief;
 pub mod folders;
 mod people;
 pub mod sharing;
-pub use people::{PeopleEdits, Person, resolve_people};
+pub use people::{PeopleEdits, Person, person_from_name, resolve_people};
 mod relationships;
 pub use relationships::{CarryOver, MeetingSummary, PersonPage, Series, decisions};
 mod digest;

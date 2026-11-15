@@ -173,6 +173,7 @@ pub struct RecordRequest {
 }
 
 pub enum Command {
+    Ktalk(Box<crate::ktalk::Job>),
     RememberRecording(notetaker_core::app_config::RecordingOptions),
     SemanticIndex {
         root: PathBuf,
@@ -304,6 +305,7 @@ pub enum Command {
 // Rare worker-to-UI messages; boxing variants buys nothing measurable.
 #[allow(clippy::large_enum_variant)]
 pub enum Event {
+    Ktalk(crate::ktalk::Message),
     RecordingRemembered(Result<(), String>),
     SemanticProgress {
         root: PathBuf,
@@ -488,6 +490,8 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                 .map_err(|e| e.to_string()),
         ));
         let llm_configured = Config::load().is_ok();
+        let ktalk = crate::ktalk::dispatch(crate::ktalk::Job::Load(settings.library.clone()));
+        let _ = events.send(Event::Ktalk(ktalk));
         let _ = events.send(Event::Boot {
             settings,
             llm,
@@ -497,6 +501,12 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
         });
         for command in rx {
             match command {
+                Command::Ktalk(job) => {
+                    let events = events.clone();
+                    thread::spawn(move || {
+                        let _ = events.send(Event::Ktalk(crate::ktalk::dispatch(*job)));
+                    });
+                }
                 Command::SemanticIndex { root } => {
                     let events = events.clone();
                     thread::spawn(move || {

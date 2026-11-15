@@ -23,6 +23,7 @@ const TEXT_SCROLL_MARGIN: egui::Margin = egui::Margin {
 
 struct Toast {
     undo_title: Option<crate::state::TitleUndo>,
+    undo_ktalk: Option<crate::ktalk::Undo>,
     at: Instant,
     text: String,
     path: Option<std::path::PathBuf>,
@@ -1197,6 +1198,7 @@ impl NotetakerApp {
         });
 
         let mut open_ai = false;
+        let mut ktalk_sync = false;
         let can_enhance = self.state.enhancing.is_none()
             && !self.state.recording.busy()
             && !self.state.unsaved()
@@ -1205,6 +1207,7 @@ impl NotetakerApp {
             self.state.recording.busy() && self.state.recording.path.as_ref() == Some(&path);
         let global_allowed = !self.state.unsaved();
         let speaker_busy = self.state.documents.values().any(|d| d.speaker_ui.busy);
+        let ktalk_busy = self.state.ktalk.editing(&path);
         let can_cancel = self.state.generation_cancellable();
         if self
             .meeting_tasks
@@ -1271,6 +1274,7 @@ impl NotetakerApp {
             None
         };
         let editable = !locked
+            && !ktalk_busy
             && !document.saving
             && !speaker_busy
             && document.attachments_pending == 0
@@ -1381,6 +1385,17 @@ impl NotetakerApp {
                                 row(ui, DocumentAction::EditNotes);
                                 row(ui, DocumentAction::EditSummary);
                                 row(ui, DocumentAction::Read);
+                                if self.state.tab == Tab::Transcript
+                                    && ui
+                                        .add_enabled_ui(editable && !self.state.ktalk.busy, |ui| {
+                                            theme::menu_item(ui, "", "Имена из Толка", false, false)
+                                        })
+                                        .inner
+                                        .clicked()
+                                {
+                                    ktalk_sync = true;
+                                    ui.close();
+                                }
                                 ui.add(egui::Separator::default().spacing(if compact {
                                     4.0
                                 } else {
@@ -1788,6 +1803,12 @@ impl NotetakerApp {
                 .map(|&index| self.state.tasks[index].clone())
                 .collect();
             self.trackers.prepare(ui.ctx(), &self.state, tasks);
+        }
+        if ktalk_sync {
+            self.state.ktalk_manual(&path, None);
+        }
+        if self.state.tab == Tab::Transcript {
+            crate::ktalk::transcript_ui(ui, &mut self.state, &path);
         }
         self.organization.meeting_notices(ui, &self.state);
         let Some(document) = self.state.documents.get_mut(&path) else {
@@ -2223,6 +2244,7 @@ impl NotetakerApp {
                 &mut self.toasts,
                 Toast {
                     undo_title: None,
+                    undo_ktalk: None,
                     at: Instant::now(),
                     text: notetaker_core::display_text(&text),
                     path: None,
@@ -2236,12 +2258,34 @@ impl NotetakerApp {
                 },
             );
         }
+        while let Some((undo, segments)) = self.state.ktalk.successes.pop_front() {
+            push_toast(
+                &mut self.toasts,
+                Toast {
+                    undo_title: None,
+                    undo_ktalk: Some(undo),
+                    at: Instant::now(),
+                    text: format!(
+                        "Имена из Толка: {}",
+                        crate::wording::count(segments as u64, crate::wording::UTTERANCES)
+                    ),
+                    path: None,
+                    retry_settings: false,
+                    level: ToastLevel::Success,
+                    count: 1,
+                    focused_for: Duration::ZERO,
+                    last_tick: Instant::now(),
+                    was_focused: focused,
+                },
+            );
+        }
         for path in self.state.exported.drain(..) {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
             push_toast(
                 &mut self.toasts,
                 Toast {
                     undo_title: None,
+                    undo_ktalk: None,
                     at: Instant::now(),
                     text: format!("Файл обновлён: {name}"),
                     path: Some(path),
@@ -2277,6 +2321,7 @@ impl NotetakerApp {
                         undo.generated, undo.previous
                     ),
                     undo_title: Some(undo),
+                    undo_ktalk: None,
                     path: None,
                     retry_settings: false,
                     level: ToastLevel::Success,
@@ -2308,6 +2353,7 @@ impl NotetakerApp {
                 let mut dismiss = None;
                 let mut retry = false;
                 let mut restore_title = None;
+                let mut restore_ktalk = None;
                 for (index, toast) in self.toasts.iter().enumerate() {
                     let response = theme::toast(
                         ui,
@@ -2317,6 +2363,8 @@ impl NotetakerApp {
                         toast.count,
                         if toast.undo_title.is_some() {
                             Some("Вернуть название")
+                        } else if toast.undo_ktalk.is_some() {
+                            Some("Отменить")
                         } else if toast.retry_settings {
                             Some("Повторить")
                         } else {
@@ -2331,9 +2379,16 @@ impl NotetakerApp {
                             restore_title = Some(undo.clone());
                             dismiss = Some(index);
                         }
+                        if let Some(undo) = &toast.undo_ktalk {
+                            restore_ktalk = Some(undo.clone());
+                            dismiss = Some(index);
+                        }
                         reveal = toast.path.clone();
                         retry |= toast.retry_settings;
                     }
+                }
+                if let Some(undo) = restore_ktalk {
+                    self.state.ktalk.undo_pending = Some(undo);
                 }
                 if let Some(undo) = restore_title {
                     self.state.undo_title(undo);
@@ -2470,6 +2525,8 @@ impl NotetakerApp {
     }
     fn interaction_blocked(&self, ctx: &egui::Context) -> bool {
         self.show_settings
+            || self.state.ktalk.preview_open
+            || self.state.ktalk.merge.is_some()
             || self.show_record
             || self.quickstart.open
             || self.rename.is_some()
@@ -3068,6 +3125,7 @@ impl NotetakerApp {
         self.indicator(&ctx);
         self.call_notification(&ctx);
         let onboarding_open = self.quickstart.open;
+        crate::ktalk::windows(&ctx, &mut self.state);
         self.quickstart.show(&ctx, &mut self.state);
         if onboarding_open && !self.quickstart.open {
             self.home = true;
@@ -3112,6 +3170,16 @@ fn open_url(url: String) {
 }
 fn next_state_wake(state: &AppState, now: Instant) -> Option<Duration> {
     let mut deadlines = Vec::new();
+    if !state.ktalk.busy
+        && !state.settings_pending
+        && !state.ktalk.preview_open
+        && !state.settings_autosave.pending
+        && (state.ktalk.load_root.is_some()
+            || state.ktalk.undo_pending.is_some()
+            || state.settings.voice_library && state.ktalk.enroll_pending.is_some())
+    {
+        deadlines.push(Duration::ZERO);
+    }
     if state.recording.busy() || state.quickstart.probe_busy {
         deadlines.push(Duration::from_millis(100));
     }
@@ -3146,6 +3214,30 @@ fn next_state_wake(state: &AppState, now: Instant) -> Option<Duration> {
         );
     }
     let utc = chrono::Utc::now();
+    if !state.ktalk.busy
+        && state.ktalk.saved
+        && state
+            .ktalk
+            .settings
+            .as_ref()
+            .is_some_and(notetaker_llm::ktalk::Settings::auto_sync)
+    {
+        for task in state
+            .ktalk
+            .tasks
+            .values()
+            .filter(|task| !task.progress.done)
+        {
+            let delay = task
+                .progress
+                .next
+                .unwrap_or(utc)
+                .signed_duration_since(utc)
+                .to_std()
+                .unwrap_or(Duration::ZERO);
+            deadlines.push(delay.max(Duration::from_secs(1)));
+        }
+    }
     for event in &state.calendar_events {
         for time in [
             event.start - chrono::Duration::minutes(5),
@@ -5317,7 +5409,7 @@ impl Toast {
         self.last_tick = now;
     }
     fn expired(&self, now: Instant) -> bool {
-        if self.undo_title.is_some() {
+        if self.undo_title.is_some() || self.undo_ktalk.is_some() {
             return self.focused_for >= Duration::from_secs(12);
         }
         match self.level {
@@ -5332,7 +5424,9 @@ impl Toast {
 
 fn push_toast(queue: &mut VecDeque<Toast>, toast: Toast) {
     if let Some(existing) = queue.iter_mut().find(|t| {
-        t.level == toast.level
+        t.undo_ktalk.as_ref().map(|u| u.meeting.path())
+            == toast.undo_ktalk.as_ref().map(|u| u.meeting.path())
+            && t.level == toast.level
             && t.text == toast.text
             && t.undo_title.as_ref().map(|undo| undo.meeting.path())
                 == toast.undo_title.as_ref().map(|undo| undo.meeting.path())
@@ -5360,6 +5454,7 @@ mod toast_lifetime_tests {
     fn toast(now: Instant, level: ToastLevel) -> Toast {
         Toast {
             undo_title: None,
+            undo_ktalk: None,
             at: now,
             text: "notice".into(),
             path: None,
@@ -5956,6 +6051,52 @@ mod direct_action_tests {
         output.drop_without_applying_deltas();
         click_at(&ctx, &mut app, size, button.center());
         assert!(app.state.recording.stop_requested);
+    }
+    #[test]
+    fn ktalk_success_toast_queues_undo_while_busy_and_restores_the_transcript() {
+        let (mut app, commands, _events, _root) = fixture();
+        let path = app.state.selected.clone().unwrap();
+        let (before, plan) = crate::ktalk_fixture::plan();
+        let meeting = app.state.documents[&path].data.meeting.clone();
+        meeting.write_transcript(&before).unwrap();
+        let task = crate::ktalk::Task {
+            meeting: meeting.clone(),
+            ended: chrono::Utc::now(),
+            progress: Default::default(),
+        };
+        app.state.ktalk_result(crate::ktalk::run(
+            crate::ktalk::Job::Apply {
+                task,
+                plan: Box::new(plan),
+                voices: false,
+            },
+            &notetaker_llm::OsCredentialStore,
+        ));
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        app.state.ktalk.busy = true;
+        crate::test_ui::click(&ctx, &mut |ui| app.frame(ui), "Отменить");
+        assert!(app.state.ktalk.undo_pending.is_some());
+        app.state.poll_ktalk();
+        assert!(app.state.ktalk.undo_pending.is_some());
+        app.state
+            .ktalk_result(crate::ktalk::Message::Checked("Олег Сидоров".into()));
+        app.state.poll_ktalk();
+        let job = commands
+            .try_iter()
+            .find_map(|command| {
+                if let Command::Ktalk(job) = command {
+                    Some(job)
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        assert!(matches!(*job, crate::ktalk::Job::Undo(_)));
+        app.state
+            .ktalk_result(crate::ktalk::run(*job, &notetaker_llm::OsCredentialStore));
+        assert_eq!(meeting.read_transcript().unwrap(), before);
+        assert!(app.toasts.iter().all(|toast| toast.undo_ktalk.is_none()));
     }
     #[test]
     fn title_toast_undo_restores_previous_title_and_is_offered_once() {

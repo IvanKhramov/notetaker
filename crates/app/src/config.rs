@@ -303,9 +303,20 @@ impl LlmSettings {
         Self::from_path(&path)
     }
 
-    fn from_path(path: &Path) -> Result<Self> {
+    pub(crate) fn from_path(path: &Path) -> Result<Self> {
         // Never echo config excerpts, including accidental secrets.
         let text = fs::read_to_string(path)?;
+        let value: toml::Value =
+            toml::from_str(&text).map_err(|_| anyhow::anyhow!("Некорректный LLM config.toml"))?;
+        if value
+            .as_table()
+            .is_some_and(|table| table.len() == 1 && table.contains_key("ktalk"))
+        {
+            return Ok(Self {
+                ktalk: notetaker_llm::ktalk::Settings::from_path(path)?,
+                ..Self::default()
+            });
+        }
         notetaker_llm::Config::parse(&text)?;
         toml::from_str(&text).map_err(|_| anyhow::anyhow!("Некорректный LLM config.toml"))
     }

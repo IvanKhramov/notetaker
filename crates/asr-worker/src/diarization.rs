@@ -2,6 +2,7 @@
 use std::{collections::BTreeMap, path::Path};
 
 use anyhow::{Context, Result, ensure};
+pub(crate) use notetaker_asr_proto::clean_ranges;
 use notetaker_asr_proto::{Diarization, SpeakerTurn, TimeRange};
 use sherpa_onnx::{
     OfflineSpeakerDiarization, OfflineSpeakerDiarizationConfig, SpeakerEmbeddingExtractor,
@@ -102,40 +103,6 @@ fn mean_embedding(
     }
     ensure!(count > 0, "not enough clean speech to enroll a voice");
     normalize(sum).context("invalid mean embedding")
-}
-
-/// Keep the clean parts of a turn, rather than rejecting a whole long turn
-/// because of one brief overlap. Prefer long evidence for stable centroids.
-pub(crate) fn clean_ranges(turns: &[SpeakerTurn], id: &str) -> Vec<TimeRange> {
-    let mut ranges = Vec::new();
-    for turn in turns.iter().filter(|t| t.speaker == id) {
-        let mut parts = vec![(turn.start_ms, turn.end_ms)];
-        for other in turns.iter().filter(|t| t.speaker != id) {
-            parts = parts
-                .into_iter()
-                .flat_map(|(start, end)| {
-                    if other.start_ms >= end || other.end_ms <= start {
-                        vec![(start, end)]
-                    } else {
-                        [
-                            (start, other.start_ms.min(end)),
-                            (other.end_ms.max(start), end),
-                        ]
-                        .into_iter()
-                        .filter(|(a, b)| b > a)
-                        .collect()
-                    }
-                })
-                .collect();
-        }
-        ranges.extend(
-            parts
-                .into_iter()
-                .map(|(start_ms, end_ms)| TimeRange { start_ms, end_ms }),
-        );
-    }
-    ranges.sort_by_key(|r| std::cmp::Reverse(r.end_ms - r.start_ms));
-    ranges
 }
 
 pub(crate) fn cluster_embedding(

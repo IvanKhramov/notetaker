@@ -257,11 +257,12 @@ impl Client {
     }
     pub fn transcript(&self, id: &str) -> Result<Transcript> {
         let transcript: Transcript = self.get(&["api", "recordings", id, "transcript"], &[])?;
-        ensure!(
-            transcript.status == "complete",
-            "Транскрипция Толка ещё не готова"
-        );
-        transcript.validate()?;
+        if transcript.status != "complete" {
+            return Err(super::TranscriptNotReady.into());
+        }
+        transcript
+            .validate()
+            .map_err(|error| super::InvalidTranscript(error.to_string()))?;
         Ok(transcript)
     }
 }

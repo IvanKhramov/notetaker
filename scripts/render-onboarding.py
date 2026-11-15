@@ -108,7 +108,7 @@ impl Panel { pub fn fixture(&mut self,state:&AppState) {
 impl NotetakerApp {
     pub fn fixture(state: AppState, screen: usize) -> Self {
         let scene=screen;
-        let screen = match screen {59=>5,60=>4,61=>11,62=>23,63=>24,64=>4,65=>5,66=>7,67=>3,_=>screen};
+        let screen = match screen {59=>5,60=>4,61=>11,62=>23,63=>24,64=>4,65=>5,66=>7,67=>3,68=>7,69=>7,70=>5,71=>5,72=>5,_=>screen};
         let mut app = Self::with_state(state);
         app.home = ![4,5,12,14,15].contains(&screen);
         if screen < 3 { app.quickstart.open = true; app.quickstart.step = screen; }
@@ -220,6 +220,31 @@ impl NotetakerApp {
             }).collect();
         }
 
+        if (68..=72).contains(&scene) {
+            app.state.ktalk.address="https://neutral.ktalk.ru".into();
+            app.state.ktalk.settings=Some(notetaker_llm::ktalk::Settings {base_url:app.state.ktalk.address.clone(),credential_id:"neutral".into(),api_key_env:None,extra:Default::default()});
+            app.state.ktalk.people=vec![notetaker_core::person_from_name("Анна Петрова").unwrap()];
+            if scene<=69 {
+                app.show_settings=true;app.settings_panel.section=crate::settings::Section::Ktalk;
+                if scene==68 {app.state.ktalk.address.clear();app.state.ktalk.settings=None;}
+                else {app.state.ktalk.saved=true;app.state.ktalk.status="Подключено: Олег Сидоров".into();}
+            } else {
+                let path=app.state.selected.clone().unwrap();
+                let (local,plan)=crate::ktalk_fixture::plan();
+                let document=app.state.documents.get_mut(&path).unwrap();
+                document.data.meeting.update_meta(|meta| {meta.started_at=plan.recording.created_date;meta.ended_at=Some(meta.started_at+chrono::Duration::minutes(5));}).unwrap();
+                document.data.meeting.write_transcript(&local).unwrap();
+                document.data=crate::worker::DocumentData::read(document.data.meeting.clone()).unwrap();
+                let task=crate::ktalk::Task {meeting:document.data.meeting.clone(),ended:plan.recording.created_date+chrono::Duration::minutes(5),progress:Default::default()};
+                if scene==70 {
+                    app.state.ktalk.preview_open=true;app.state.ktalk.preview=Some((task,crate::ktalk::Outcome::Preview(Box::new(plan))));
+                } else {
+                    let message=crate::ktalk::run(crate::ktalk::Job::Apply {task,plan:Box::new(plan),voices:false},&notetaker_llm::OsCredentialStore);
+                    app.state.ktalk_result(message);
+                    if scene==71 {app.state.ktalk.successes.clear();} else {app.state.settings.voice_library=true;app.state.settings_draft.voice_library=true;}
+                }
+            }
+        }
         if scene==65 {
             app.state.recording.phase=Phase::Recording;app.state.recording.path=app.state.selected.clone();
             app.state.recording.started=Some(Instant::now()-Duration::from_secs(123));app.state.recording.levels=[0.15,0.0];
@@ -245,7 +270,7 @@ main = r'''
 #![allow(dead_code)]
 MODULES
 use eframe::egui;
-struct Preview { app: ui::NotetakerApp, frames: usize, output: std::path::PathBuf, screen: usize, started: Option<f64>, captured: bool }
+struct Preview { app: ui::NotetakerApp, frames: usize, output: std::path::PathBuf, screen: usize, started: Option<f64>, captured: bool, _commands: std::sync::mpsc::Receiver<worker::Command> }
 impl eframe::App for Preview {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         // Use the real UI, but never call its logic/worker polling.
@@ -254,6 +279,9 @@ impl eframe::App for Preview {
         ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("fixture-meeting-menu"), self.screen == 15));
         ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("preview-expand-settings"),self.screen==37 || self.screen==38));
         ui.ctx().data_mut(|data| {data.insert_temp(egui::Id::unique("fixture-speaker-menu"),self.screen==58);data.insert_temp(egui::Id::unique("fixture-rename-form"),self.screen==58);});
+        if (self.screen==68 || self.screen==69) && ui.ctx().content_rect().height()<600.0 {
+            ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("fixture-recording-settings-offset"),70.0_f32));
+        }
         if self.screen==66 && ui.ctx().content_rect().height()<600.0 {
             ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("fixture-recording-settings-offset"),240.0_f32));
         }
@@ -313,7 +341,7 @@ fn main() -> eframe::Result {
         theme::install(&cc.egui_ctx);
         if dark { theme::Theme::Dark } else { theme::Theme::Light }.apply(&cc.egui_ctx);
         cc.egui_ctx.set_zoom_factor(zoom);
-        let (tx, _) = std::sync::mpsc::channel(); let (_, rx) = std::sync::mpsc::channel();
+        let (tx, commands) = std::sync::mpsc::channel(); let (_, rx) = std::sync::mpsc::channel();
         let mut state = state::AppState::with_channels(tx, rx);
         state.ready = true;
         state.settings.user_name = "Иван".into();
@@ -355,7 +383,7 @@ fn main() -> eframe::Result {
         state.tasks=library.list_tasks(None,None,false).unwrap();
         assert!(!state.tasks.is_empty(),"task fixtures must contain indexed tasks");
         state.connections.load(&state.llm);
-        Ok(Box::new(Preview { app: ui::NotetakerApp::fixture(state, screen), frames: 0, output: output.into(), screen, started:None,captured:false }))
+        Ok(Box::new(Preview { app: ui::NotetakerApp::fixture(state, screen), frames: 0, output: output.into(), screen, started:None,captured:false,_commands:commands }))
     }))
 }
 '''.replace("MODULES", "\n".join(modules))
@@ -377,7 +405,7 @@ if shutil.disk_usage(root).free < 2 * 1024**3:
 # Resolve the derived harness root against the copied workspace lock before its locked build.
 subprocess.run(["cargo", "metadata", "--offline", "--format-version", "1", "--manifest-path", str(harness / "Cargo.toml")], cwd=root, env=env, check=True, stdout=subprocess.DEVNULL)
 subprocess.run(["cargo", "build", "--locked", "--manifest-path", str(harness / "Cargo.toml")], cwd=root, env=env, check=True)
-names = ["welcome", "name", "connections", "home", "note", "transcript", "general", "recording", "calendars", "ai", "search", "storage", "recording-pill", "connections-expanded", "delete-confirm", "meeting-menu", "toast", "empty-library", "narrow-settings", "recording-bar", "chat", "tasks", "people", "person", "series", "digest", "folders", "diagnostics", "tracker-preview", "new-recording", "rename", "regenerate", "capture-warning", "widgets", "update-card", "folder-delete", "merge-people", "folders-advanced", "ai-expanded", "performance-transcript", "performance-meetings", "performance-live", "chat-meeting-empty", "chat-library-empty", "chat-recipes", "chat-recording", "recording-silence", "recording-final-pass", "recording-ready", "recording-not-ready", "summary-skipped", "calendar-reminder-link", "calendar-reminder-no-link", "calendar-upcoming", "calendar-help", "direct-task-checkboxes", "direct-template-bar", "direct-template-picker", "direct-speaker-menu", "compact-transcript", "compact-summary", "compact-storage", "compact-person", "compact-series", "one-step-bar", "one-step-countdown", "one-step-settings", "one-step-auto-title"]
+names = ["welcome", "name", "connections", "home", "note", "transcript", "general", "recording", "calendars", "ai", "search", "storage", "recording-pill", "connections-expanded", "delete-confirm", "meeting-menu", "toast", "empty-library", "narrow-settings", "recording-bar", "chat", "tasks", "people", "person", "series", "digest", "folders", "diagnostics", "tracker-preview", "new-recording", "rename", "regenerate", "capture-warning", "widgets", "update-card", "folder-delete", "merge-people", "folders-advanced", "ai-expanded", "performance-transcript", "performance-meetings", "performance-live", "chat-meeting-empty", "chat-library-empty", "chat-recipes", "chat-recording", "recording-silence", "recording-final-pass", "recording-ready", "recording-not-ready", "summary-skipped", "calendar-reminder-link", "calendar-reminder-no-link", "calendar-upcoming", "calendar-help", "direct-task-checkboxes", "direct-template-bar", "direct-template-picker", "direct-speaker-menu", "compact-transcript", "compact-summary", "compact-storage", "compact-person", "compact-series", "one-step-bar", "one-step-countdown", "one-step-settings", "one-step-auto-title", "ktalk-settings-empty", "ktalk-settings-connected", "ktalk-preview", "ktalk-transcript", "ktalk-success"]
 def render(spec):
     index, name, theme, width, height, zoom = spec
     actual_width = 760 if name == "narrow-settings" and zoom == 1.0 else width

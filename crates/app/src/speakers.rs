@@ -236,6 +236,9 @@ pub fn rename_menu(
                     choose(ui, name.clone(), false);
                 }
             } else {
+                if transcript.ktalk_sources.contains_key(id) {
+                    crate::ktalk::merge_menu(ui, transcript.speaker_name(id));
+                }
                 if let Some(suggestion) = transcript.speaker_suggestions.get(id)
                     && crate::theme::button(
                         ui,

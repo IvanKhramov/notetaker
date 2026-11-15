@@ -204,6 +204,40 @@ pub fn write_message(writer: &mut impl Write, message: &impl Serialize) -> io::R
     writer.flush()
 }
 
+/// Keep the clean parts of a turn, rather than rejecting a whole long turn
+/// because of one brief overlap. Prefer long evidence for stable centroids.
+pub fn clean_ranges(turns: &[SpeakerTurn], id: &str) -> Vec<TimeRange> {
+    let mut ranges = Vec::new();
+    for turn in turns.iter().filter(|t| t.speaker == id) {
+        let mut parts = vec![(turn.start_ms, turn.end_ms)];
+        for other in turns.iter().filter(|t| t.speaker != id) {
+            parts = parts
+                .into_iter()
+                .flat_map(|(start, end)| {
+                    if other.start_ms >= end || other.end_ms <= start {
+                        vec![(start, end)]
+                    } else {
+                        [
+                            (start, other.start_ms.min(end)),
+                            (other.end_ms.max(start), end),
+                        ]
+                        .into_iter()
+                        .filter(|(a, b)| b > a)
+                        .collect()
+                    }
+                })
+                .collect();
+        }
+        ranges.extend(
+            parts
+                .into_iter()
+                .map(|(start_ms, end_ms)| TimeRange { start_ms, end_ms }),
+        );
+    }
+    ranges.sort_by_key(|r| std::cmp::Reverse(r.end_ms - r.start_ms));
+    ranges
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

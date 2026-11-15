@@ -1,7 +1,9 @@
 //! Recording continues independently of the single, sequential ASR worker.
 mod asr;
 mod diarization;
+mod voices;
 pub use diarization::{DiarizationConfig, rediarize};
+pub use voices::remember_named_voices;
 mod audio;
 mod decode;
 mod echo;

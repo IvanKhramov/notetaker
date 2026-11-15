@@ -126,6 +126,26 @@ const STOP_WORDS: &[&str] = &[
 const GRID_MS: i64 = 100;
 const MAX_BINS: usize = 131_072;
 
+#[derive(Debug)]
+pub enum SelectionError {
+    NotFound,
+    Refused(String),
+    Ambiguous {
+        reason: String,
+        recordings: Vec<Recording>,
+    },
+}
+impl std::fmt::Display for SelectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => f.write_str("Подходящая запись Толка не найдена"),
+            Self::Refused(reason) => f.write_str(reason),
+            Self::Ambiguous { reason, .. } => f.write_str(reason),
+        }
+    }
+}
+impl std::error::Error for SelectionError {}
+
 // The search performs at most 3601 * 2048 word shifts/popcounts. Rasterization
 // follows interval union and costs O(intervals + bins) per timeline.
 fn estimate_offset(activity: &[Interval], speech: &[Interval], implied: i64) -> Result<i64> {
@@ -237,7 +257,7 @@ pub fn match_recording(
     }
     candidates.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.id.cmp(&b.1.id)));
     let Some((best, r)) = candidates.first() else {
-        anyhow::bail!("Подходящая запись Толка не найдена");
+        return Err(SelectionError::NotFound.into());
     };
     ensure!(
         best.checked_mul(2).ok_or_else(malformed)? >= duration_ms.min(i64::from(r.duration) * 1000),
@@ -253,7 +273,15 @@ pub fn match_recording(
             .map(|(_, r)| format!("{} ({})", r.title, r.created_date))
             .collect::<Vec<_>>()
             .join(", ");
-        anyhow::bail!("Неоднозначное совпадение записей Толка: {titles}");
+        return Err(SelectionError::Ambiguous {
+            reason: format!("Неоднозначное совпадение записей Толка: {titles}"),
+            recordings: candidates
+                .iter()
+                .filter(|(score, _)| *score as f64 >= *best as f64 * 0.9)
+                .map(|(_, recording)| (*recording).clone())
+                .collect(),
+        }
+        .into());
     }
     Ok((*r).clone())
 }
@@ -270,7 +298,13 @@ pub fn select_recording(
         .checked_sub_signed(chrono::Duration::days(1))
         .ok_or_else(malformed)?;
     let recordings = scan_recordings(|skip| client.recordings("", skip, 100), cutoff)?;
-    select_from_recordings(&recordings, meta.started_at, duration, explicit)
+    select_from_recordings(&recordings, meta.started_at, duration, explicit).map_err(|error| {
+        if error.is::<SelectionError>() {
+            error
+        } else {
+            SelectionError::Refused(error.to_string()).into()
+        }
+    })
 }
 
 const PAGE_LIMIT: usize = 30;
@@ -318,6 +352,7 @@ pub struct Row {
     pub segments: usize,
     pub seconds: f64,
 }
+#[derive(Debug)]
 pub struct Plan {
     pub recording: Recording,
     /// Add to a local timestamp to obtain a Tolk timestamp.
