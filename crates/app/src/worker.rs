@@ -347,7 +347,7 @@ pub enum Event {
     },
     Calendar {
         generation: u64,
-        result: Result<Vec<notetaker_core::calendar::CalendarEvent>, String>,
+        result: Result<Vec<notetaker_llm::calendar::SubscriptionStatus>, String>,
     },
     ChatChunk(String),
     ChatDone(Result<notetaker_llm::ChatResult, String>),

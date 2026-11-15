@@ -506,7 +506,7 @@ impl Panel {
                         "Хранение приватных URL недоступно на Linux."
                     });
                 });
-                ui.add_space(24.0);
+                ui.add_space(theme::SPACE[2]);
                 theme::settings_group(ui, "Подписки", |ui| {
                     let mut remove = None;
                     let mut secret_changed = false;
@@ -515,6 +515,12 @@ impl Panel {
                             ui.add_space(12.0);
                             edits.text(ui, "Название календаря", &mut calendar.name);
                             error(ui, calendar.validate());
+                            crate::calendar_ui::subscription_status(
+                                ui,
+                                state.calendar_reports.iter().find(|r| r.id == calendar.id),
+                                state.calendar_error.as_deref(),
+                                state.calendar_busy,
+                            );
                             let input =
                                 self.calendar_inputs.entry(calendar.id.clone()).or_default();
                             ui.add_enabled_ui(cfg!(any(windows, target_os = "macos")), |ui| {
@@ -605,21 +611,21 @@ impl Panel {
                             );
                         }
                     });
-                    let description = if state.calendar_status.is_empty() {
-                        "Обновление при запуске и каждые 10 минут.".to_owned()
-                    } else {
-                        format!(
-                            "Обновление при запуске и каждые 10 минут.\n{}",
-                            state.calendar_status
-                        )
-                    };
-                    theme::settings_row_desc(ui, "Обновление", Some(&description), |ui| {
+                    let description = "Обновление при запуске и каждые 10 минут.";
+                    theme::settings_row_desc(ui, "Обновление", Some(description), |ui| {
                         if ui
                             .add_enabled(
-                                !state.calendar_busy,
+                                crate::calendar_ui::refresh_enabled(
+                                    !state.settings.calendars.is_empty(),
+                                    state.calendar_busy,
+                                ),
                                 crate::theme::styled_button(
                                     crate::theme::Palette::of(ui),
-                                    "Обновить календари",
+                                    if state.calendar_busy {
+                                        "Обновляем…"
+                                    } else {
+                                        "Обновить календари"
+                                    },
                                     crate::theme::ButtonStyle::Secondary,
                                 ),
                             )
