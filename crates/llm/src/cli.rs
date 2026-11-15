@@ -180,13 +180,15 @@ fn run(
     ensure!(!cancel.cancelled(), "Создание конспекта отменено");
     let input_path = dir.join("stdin.txt");
     let output_path = dir.join("stdout.txt");
+    let error_path = dir.join("stderr.txt");
     fs::write(&input_path, prompt)?;
     let working_dir = dir.join("work");
     fs::create_dir(&working_dir)?;
     command
         .current_dir(working_dir)
         .stdin(File::open(input_path)?)
-        .stdout(File::create(&output_path)?);
+        .stdout(File::create(&output_path)?)
+        .stderr(File::create(&error_path)?);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -212,15 +214,40 @@ fn run(
         }
         thread::sleep(Duration::from_millis(50));
     };
-    ensure!(
-        status.success(),
-        "CLI завершился с ошибкой. Проверьте вход, модель и лимиты подписки."
-    );
+    if !status.success() {
+        // The CLI's own words name the cause: no sign-in, a missing
+        // prerequisite, an unknown model. The answer goes to stdout when the
+        // CLI reports in JSON, so look there when stderr is empty.
+        let said = [&error_path, &output_path]
+            .into_iter()
+            .map(|path| failure_tail(&fs::read_to_string(path).unwrap_or_default()))
+            .find(|text| !text.is_empty())
+            .unwrap_or_default();
+        anyhow::bail!(
+            "CLI завершился с ошибкой. Проверьте вход, модель и лимиты подписки.{}",
+            if said.is_empty() {
+                String::new()
+            } else {
+                format!(" Ответ CLI: {said}")
+            }
+        );
+    }
     ensure!(
         fs::metadata(&output_path)?.len() <= 16 * 1024 * 1024,
         "Слишком большой ответ CLI"
     );
     fs::read_to_string(output_path).context("Некорректный вывод CLI")
+}
+
+/// The last lines of what a failed CLI printed, short enough for a settings card.
+fn failure_tail(output: &str) -> String {
+    let lines: Vec<&str> = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let tail = lines[lines.len().saturating_sub(3)..].join(" ");
+    tail.chars().take(300).collect()
 }
 
 fn terminate(child: &mut std::process::Child) {
@@ -369,17 +396,39 @@ impl Provider for CliProvider {
     }
 }
 
-#[cfg(any(windows, test))]
-fn login_command(binary: &Path, kind: ProviderKind) -> Command {
-    let mut command = Command::new(binary);
+/// The sign-in arguments of each CLI. Both open the browser themselves.
+/// macOS only tells the user what to run, so it has no caller there.
+#[cfg(any(not(target_os = "macos"), test))]
+fn login_args(kind: ProviderKind) -> &'static [&'static str] {
     if kind == ProviderKind::CodexCli {
-        command.arg("login");
+        &["login"]
+    } else {
+        &["auth", "login"]
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x00000010); // CREATE_NEW_CONSOLE
-    }
+}
+
+/// The command line for `cmd.exe /D /S /K`: the window stays open after the
+/// CLI exits, so a failed sign-in leaves its error on the screen instead of
+/// a console that flashes and disappears. With `/S` cmd strips the outer
+/// quotes and runs the rest as written, which keeps spaces and `&` in the
+/// path literal.
+#[cfg(any(windows, test))]
+fn login_line(binary: &Path, kind: ProviderKind) -> String {
+    format!(
+        "\"\"{}\" {}\"",
+        binary.display(),
+        login_args(kind).join(" ")
+    )
+}
+
+#[cfg(windows)]
+fn login_command(binary: &Path, kind: ProviderKind) -> Command {
+    use std::os::windows::process::CommandExt;
+    let mut command = Command::new("cmd.exe");
+    command
+        .raw_arg("/D /S /K")
+        .raw_arg(login_line(binary, kind))
+        .creation_flags(0x00000010); // CREATE_NEW_CONSOLE
     command
 }
 
@@ -493,7 +542,7 @@ pub fn open_login(kind: ProviderKind) -> Result<()> {
         anyhow::bail!(
             "macOS: откройте Terminal и выполните {}. Затем повторите проверку подключения в notetaker.",
             if kind == ProviderKind::ClaudeCli {
-                "claude, затем /login"
+                "claude auth login"
             } else {
                 "codex login"
             }
@@ -502,10 +551,7 @@ pub fn open_login(kind: ProviderKind) -> Result<()> {
     #[cfg(not(any(windows, target_os = "macos")))]
     {
         let mut command = Command::new("x-terminal-emulator");
-        command.arg("-e").arg(binary);
-        if kind == ProviderKind::CodexCli {
-            command.arg("login");
-        }
+        command.arg("-e").arg(binary).args(login_args(kind));
         command
             .spawn()
             .context("Не удалось открыть терминал; выполните claude или codex login вручную")?;
@@ -760,15 +806,24 @@ mod login_tests {
     }
 
     #[test]
-    fn login_launches_the_binary_directly_with_separate_arguments() {
-        let path = Path::new(r"C:\Users\A & B\cli\codex.exe");
-        for (kind, args) in [
-            (ProviderKind::CodexCli, vec!["login"]),
-            (ProviderKind::ClaudeCli, vec![]),
-        ] {
-            let command = login_command(path, kind);
-            assert_eq!(command.get_program(), path.as_os_str());
-            assert_eq!(command.get_args().collect::<Vec<_>>(), args);
-        }
+    fn failure_tail_keeps_the_last_lines_and_is_bounded() {
+        assert_eq!(failure_tail(""), "");
+        assert_eq!(
+            failure_tail("one\n\n two \nthree\nfour\n"),
+            "two three four"
+        );
+        assert_eq!(failure_tail(&"я".repeat(1000)).chars().count(), 300);
+    }
+    #[test]
+    fn login_keeps_the_window_open_and_quotes_the_path_for_cmd() {
+        let path = Path::new(r"C:\Users\A & B\cli\tool.exe");
+        assert_eq!(
+            login_line(path, ProviderKind::CodexCli),
+            r#"""C:\Users\A & B\cli\tool.exe" login""#
+        );
+        assert_eq!(
+            login_line(path, ProviderKind::ClaudeCli),
+            r#"""C:\Users\A & B\cli\tool.exe" auth login""#
+        );
     }
 }
