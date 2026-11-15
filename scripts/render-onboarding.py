@@ -131,7 +131,7 @@ impl NotetakerApp {
             if screen==48 || screen==49 {app.show_record=true;app.state.llm_configured=screen==48;app.state.record_mode=notetaker_core::Mode::Local;}
             if screen==50 {
                 app.state.documents.get_mut(&path).unwrap().data.enhanced.clear();
-                app.state.skipped_summaries.insert(path);app.state.settings.auto_summary=true;
+                app.state.skipped_summaries.insert(path,"AI не подключён (Настройки → AI)".into());app.state.settings.auto_summary=true;
                 app.state.llm_configured=false;app.state.tab=Tab::Enhanced;
             }
         }

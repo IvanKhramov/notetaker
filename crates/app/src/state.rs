@@ -57,6 +57,7 @@ pub struct Recording {
     /// Latest peak of the microphone and of the system audio, 0..1.
     pub levels: [f32; 2],
     recovering: [bool; 2],
+    lost: [bool; 2],
     /// Since when each channel has delivered digital silence.
     silent_since: [Option<Instant>; 2],
     audio_warnings: AudioWarnings,
@@ -97,6 +98,8 @@ impl Recording {
             Phase::Idle => return None,
             Phase::Starting if self.importing => "Открываю аудиофайл".into(),
             Phase::Starting => "Начинаю запись".into(),
+            Phase::Recording if self.lost[0] => "Запись · Микрофон не записывается".into(),
+            Phase::Recording if self.lost[1] => "Запись · Звук собеседников не записывается".into(),
             Phase::Recording if self.recovering[0] => {
                 "Запись · Микрофон потерян, переподключаю".into()
             }
@@ -116,7 +119,9 @@ impl Recording {
         Some(RecordingStatus {
             text,
             warning: self.phase == Phase::Recording
-                && (self.recovering.iter().any(|v| *v) || self.silence_notice().is_some()),
+                && (self.lost.iter().any(|v| *v)
+                    || self.recovering.iter().any(|v| *v)
+                    || self.silence_notice().is_some()),
             progress: (self.phase == Phase::Finalizing)
                 .then_some(self.progress)
                 .flatten(),
@@ -170,12 +175,28 @@ impl Recording {
                 } else {
                     1
                 };
+                if self.lost[index] {
+                    return;
+                }
                 self.recovering[index] = !restored;
                 if *restored {
                     self.silent_since[index] = None;
                 }
             }
-            PipelineEvent::CaptureEvent(CaptureEvent::Error { .. }) | PipelineEvent::Error(_) => {}
+            PipelineEvent::CaptureEvent(
+                CaptureEvent::Error { channel, .. } | CaptureEvent::Stopped { channel },
+            ) => {
+                if self.phase == Phase::Recording {
+                    let index = if *channel == notetaker_capture::Channel::Mic {
+                        0
+                    } else {
+                        1
+                    };
+                    self.lost[index] = true;
+                    self.recovering[index] = false;
+                }
+            }
+            PipelineEvent::Error(_) => {}
             PipelineEvent::CaptureEvent(
                 CaptureEvent::Discontinuity { .. } | CaptureEvent::TimestampError { .. },
             ) => self.audio_warnings.pending += 1,
@@ -188,9 +209,7 @@ impl Recording {
             }
             // Finished means the pipeline is done; RecordDone follows wait() and
             // the final reload. Keep editing locked until that reload arrives.
-            PipelineEvent::Finished { .. }
-            | PipelineEvent::LiveSegments(_)
-            | PipelineEvent::CaptureEvent(CaptureEvent::Stopped { .. }) => {}
+            PipelineEvent::Finished { .. } | PipelineEvent::LiveSegments(_) => {}
         }
     }
     pub fn request_stop(&mut self) {
@@ -342,7 +361,7 @@ pub struct AppState {
     pub generation_cancel: notetaker_llm::Cancellation,
     generation_is_cli: bool,
     pending_summary: Option<PathBuf>,
-    pub skipped_summaries: HashSet<PathBuf>,
+    pub skipped_summaries: HashMap<PathBuf, String>,
     pub ready: bool,
     pub settings_pending: bool,
     pub settings_autosave: crate::autosave::Autosave,
@@ -440,7 +459,7 @@ impl AppState {
             generation_cancel: notetaker_llm::Cancellation::default(),
             generation_is_cli: false,
             pending_summary: None,
-            skipped_summaries: HashSet::new(),
+            skipped_summaries: HashMap::new(),
             ready: false,
             settings_pending: false,
             settings_autosave: Default::default(),
@@ -769,15 +788,10 @@ impl AppState {
                 .find(|s| Some(s.pid) == self.process_id)
                 .map(|s| s.exe.clone().unwrap_or_else(|| s.name.clone()))
         });
-        let mut settings = self.settings.clone();
-        settings.model = self.record_model.clone();
-        settings.mode = self.record_mode;
-        settings.folder_mode_override = self.record_mode_edited.then_some(self.record_mode);
-        settings.folder = self.folder_filter.clone().filter(|s| !s.is_empty());
-        let event = self.selected_event.take().or_else(|| {
-            notetaker_core::calendar::overlapping(&self.calendar_events, chrono::Utc::now())
-                .cloned()
-        });
+        let settings = self.recording_settings();
+        let event = self.recording_event();
+        self.selected_event = None;
+        let brief = self.recording_brief(event.as_ref());
         let typed = !self.title.trim().is_empty()
             && self.prefilled_title.as_deref() != Some(self.title.as_str());
         let title = if let Some(event) = event.as_ref().filter(|_| !typed) {
@@ -800,17 +814,7 @@ impl AppState {
         self.send(Command::Record(RecordRequest {
             settings,
             title,
-            brief: self
-                .brief
-                .clone()
-                .filter(|brief| {
-                    self.save_brief
-                        && event.as_ref().is_some_and(|event| {
-                            event.link.uid == brief.event.link.uid
-                                && event.start == brief.event.start
-                        })
-                })
-                .map(Box::new),
+            brief,
             event,
             process_id: self.process_id,
             app,
@@ -999,11 +1003,7 @@ impl AppState {
             return;
         }
         self.flush();
-        let mut settings = self.settings.clone();
-        settings.model = self.record_model.clone();
-        settings.mode = self.record_mode;
-        settings.folder_mode_override = self.record_mode_edited.then_some(self.record_mode);
-        settings.folder = self.folder_filter.clone().filter(|s| !s.is_empty());
+        let settings = self.recording_settings();
         self.recording = Recording {
             phase: Phase::Starting,
             importing: true,
@@ -1085,18 +1085,79 @@ impl AppState {
             self.start_recording();
         }
     }
-    pub fn summary_readiness(&self, mode: notetaker_core::Mode) -> Result<(), String> {
+    fn recording_settings(&self) -> Settings {
+        let mut settings = self.settings.clone();
+        settings.model = self.record_model.clone();
+        settings.mode = self.record_mode;
+        settings.folder_mode_override = self.record_mode_edited.then_some(self.record_mode);
+        settings.folder = self.folder_filter.clone().filter(|s| !s.is_empty());
+        settings
+    }
+    fn recording_event(&self) -> Option<notetaker_core::calendar::CalendarEvent> {
+        self.selected_event.clone().or_else(|| {
+            notetaker_core::calendar::overlapping(&self.calendar_events, chrono::Utc::now())
+                .cloned()
+        })
+    }
+    fn recording_brief(
+        &self,
+        event: Option<&notetaker_core::calendar::CalendarEvent>,
+    ) -> Option<Box<notetaker_llm::Brief>> {
+        self.brief
+            .clone()
+            .filter(|brief| {
+                self.save_brief
+                    && event.is_some_and(|event| {
+                        event.link.uid == brief.event.link.uid && event.start == brief.event.start
+                    })
+            })
+            .map(Box::new)
+    }
+    pub fn summary_readiness(&self) -> Result<(), String> {
         if !self.settings.auto_summary {
             return Err("Автоконспект выключен в настройках записи".into());
         }
-        summary_provider(self.llm_configured, &self.llm, mode)
-            .map(|_| ())
-            .map_err(|e| format!("{e:#}"))
+        let check = || -> anyhow::Result<()> {
+            let library = notetaker_core::Library::open(&self.settings.library)?;
+            let event = self.recording_event();
+            let brief = self.recording_brief(event.as_ref());
+            let (meta, _) = worker::recording_metadata(
+                &library,
+                &self.recording_settings(),
+                &self.title,
+                event.as_ref(),
+                brief.as_deref(),
+            )?;
+            summary_provider(self.llm_configured, &self.llm, meta.mode)?;
+            Ok(())
+        };
+        check().map_err(|e| format!("{e:#}"))
+    }
+    fn schedule_summary(&mut self, path: PathBuf) {
+        if !self.settings.auto_summary {
+            return;
+        }
+        let Some(doc) = self.documents.get(&path) else {
+            return;
+        };
+        if !worker::summary_can_overwrite(&doc.data) {
+            return;
+        }
+        match summary_provider(self.llm_configured, &self.llm, doc.data.meta.mode) {
+            Err(error) => {
+                self.skipped_summaries.insert(path, format!("{error:#}"));
+            }
+            Ok(_) if self.pending_summary.is_some() => {
+                self.skipped_summaries
+                    .insert(path, "Другая встреча ожидает создания конспекта.".into());
+            }
+            Ok(_) => self.pending_summary = Some(path),
+        }
     }
     pub fn skipped_summary_notice(&self, path: &PathBuf) -> Option<(String, bool)> {
         let doc = self.documents.get(path)?;
         if !self.settings.auto_summary
-            || !self.skipped_summaries.contains(path)
+            || !self.skipped_summaries.contains_key(path)
             || !doc.data.enhanced.trim().is_empty()
             || doc.generation.is_some()
         {
@@ -1108,7 +1169,10 @@ impl AppState {
                     "Автоконспект был пропущен. AI готов, можно создать конспект.".into(),
                     true,
                 ),
-                Err(error) => (format!("Автоконспект пропущен: {error:#}"), false),
+                Err(_) => (
+                    format!("Автоконспект пропущен: {}", self.skipped_summaries[path]),
+                    false,
+                ),
             },
         )
     }
@@ -1395,7 +1459,10 @@ impl AppState {
                 if self.llm_configured && auto_summary_ready(true, &document.data, &self.llm) {
                     self.start_summary(path, true);
                 } else {
-                    self.skipped_summaries.insert(path);
+                    let reason =
+                        summary_provider(self.llm_configured, &self.llm, document.data.meta.mode)
+                            .expect_err("summary readiness rejected provider");
+                    self.skipped_summaries.insert(path, format!("{reason:#}"));
                 }
             }
         }
@@ -2033,8 +2100,8 @@ impl AppState {
                     } else {
                         self.documents.insert(path.clone(), Document::new(*data));
                     }
-                    if error.is_none() && self.settings.auto_summary {
-                        self.pending_summary = Some(path);
+                    if error.is_none() {
+                        self.schedule_summary(path);
                     }
                 }
                 self.detector.recording_stopped();
@@ -2617,6 +2684,7 @@ mod tests {
     #[test]
     fn import_locks_recording_and_reuses_final_summary_flow() {
         let (mut state, commands, _root, path) = fixture();
+        state.llm_configured = true;
         state.ready = true;
         state.import_recording("recording.mp4".into());
         assert!(state.recording.busy());
@@ -3375,7 +3443,7 @@ mod tests {
         state.llm_configured = false;
         state.pending_summary = Some(path.clone());
         state.poll();
-        assert!(state.skipped_summaries.contains(&path));
+        assert!(state.skipped_summaries.contains_key(&path));
         let notice = state.skipped_summary_notice(&path).unwrap();
         assert!(notice.0.contains("AI не подключён"));
         assert!(!notice.1);
@@ -3392,6 +3460,7 @@ mod tests {
         assert!(state.error.as_ref().unwrap().contains("AI не подключён"));
         state.llm_configured = true;
         state.llm.providers[0].base_url = "https://example.invalid/v1".into();
+        state.schedule_summary(path.clone());
         let notice = state.skipped_summary_notice(&path).unwrap();
         assert!(notice.0.contains("loopback"));
         assert!(!notice.0.contains("Hybrid"));
@@ -3427,8 +3496,202 @@ mod tests {
         drop(commands);
     }
     #[test]
+    fn readiness_uses_calendar_folder_mode_and_explicit_override() {
+        use notetaker_core::{
+            Mode,
+            calendar::{CalendarEvent, EventLink},
+            folders::{CalendarRule, FolderSettings},
+        };
+        let (mut state, _commands, root, _) = fixture();
+        state.settings.library = root.path().into();
+        state.settings.mode = Mode::Hybrid;
+        state.record_mode = Mode::Hybrid;
+        state.llm_configured = true;
+        state.llm.providers[0].base_url = "https://example.invalid/v1".into();
+        let library = notetaker_core::Library::open(root.path()).unwrap();
+        let mut folders = library.load_folders().unwrap();
+        folders.value.insert(
+            "Private".into(),
+            FolderSettings {
+                mode: Some(Mode::Local),
+                rules: vec![CalendarRule {
+                    title_contains: "Review".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+        library
+            .save_folders(&folders.value, folders.revision)
+            .unwrap();
+        let now = chrono::Utc::now();
+        state.calendar_events.push(CalendarEvent {
+            link: EventLink {
+                uid: "review".into(),
+                title: "Review".into(),
+                attendees: vec![],
+                call_url: None,
+            },
+            start: now - chrono::Duration::minutes(1),
+            end: now + chrono::Duration::minutes(20),
+            all_day: false,
+            organizer: None,
+        });
+        assert!(state.summary_readiness().unwrap_err().contains("loopback"));
+        let event = state.recording_event();
+        let (meta, _) = worker::recording_metadata(
+            &library,
+            &state.recording_settings(),
+            "Review",
+            event.as_ref(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(meta.mode, Mode::Local);
+        assert_eq!(meta.folder.as_deref(), Some("Private"));
+        state.record_mode_edited = true;
+        assert!(state.summary_readiness().is_ok());
+        let (meta, _) = worker::recording_metadata(
+            &library,
+            &state.recording_settings(),
+            "Review",
+            event.as_ref(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(meta.mode, Mode::Hybrid);
+        state.record_mode_edited = false;
+        state.calendar_events.clear();
+        state.folder_filter = Some("Private".into());
+        assert!(state.summary_readiness().unwrap_err().contains("loopback"));
+        let ctx = eframe::egui::Context::default();
+        crate::theme::install(&ctx);
+        let reason = state.summary_readiness().unwrap_err();
+        let output = crate::test_ui::frame(&ctx, vec![], &mut |ui| {
+            ui.label(&reason);
+        });
+        crate::test_ui::text_rect(&output.shapes, &reason);
+        output.drop_without_applying_deltas();
+    }
+    #[test]
+    fn consecutive_recordings_keep_each_skip_reason_while_notes_are_saving() {
+        let (mut state, commands, root, first) = fixture();
+        state.settings.library = root.path().into();
+        state.ready = true;
+        state.documents.get_mut(&first).unwrap().saving = true;
+        let meeting = state.documents[&first].data.meeting.clone();
+        state.apply(Event::RecordDone {
+            path: Some(first.clone()),
+            document: Some(Box::new(DocumentData::read(meeting).unwrap())),
+            error: None,
+        });
+        assert!(state.skipped_summaries[&first].contains("AI не подключён"));
+        state.start_recording();
+        assert!(
+            commands
+                .try_iter()
+                .any(|cmd| matches!(cmd, Command::Record(_)))
+        );
+        assert!(state.recording.busy());
+        let library = notetaker_core::Library::open(root.path()).unwrap();
+        let meeting = library
+            .create_meeting(notetaker_core::MeetingMeta::new("B", chrono::Utc::now()))
+            .unwrap();
+        let second = meeting.path().to_owned();
+        state.selected = Some(second.clone());
+        state.apply(Event::RecordDone {
+            path: Some(second.clone()),
+            document: Some(Box::new(DocumentData::read(meeting).unwrap())),
+            error: None,
+        });
+        let ctx = eframe::egui::Context::default();
+        crate::theme::install(&ctx);
+        for path in [&first, &second] {
+            assert!(state.skipped_summaries[path].contains("AI не подключён"));
+            let notice = state.skipped_summary_notice(path).unwrap();
+            let output = crate::test_ui::frame(&ctx, vec![], &mut |ui| {
+                crate::ui::summary_skip_callout(ui, &notice, false);
+            });
+            crate::test_ui::text_rect(&output.shapes, &notice.0);
+            output.drop_without_applying_deltas();
+        }
+        assert!(state.pending_summary.is_none());
+        assert!(state.enhancing.is_none());
+        state.llm_configured = true;
+        state.schedule_summary(first.clone());
+        state.schedule_summary(second.clone());
+        assert_eq!(state.pending_summary, Some(first));
+        assert!(state.skipped_summaries[&second].contains("Другая встреча"));
+    }
+    #[test]
+    fn stopped_channel_stays_lost_but_recovery_success_clears_warning() {
+        use notetaker_capture::Channel as CaptureChannel;
+        let mut recording = Recording {
+            phase: Phase::Recording,
+            ..Default::default()
+        };
+        recording.apply(&PipelineEvent::CaptureEvent(CaptureEvent::Recovery {
+            channel: CaptureChannel::System,
+            restored: false,
+        }));
+        assert!(recording.status().unwrap().text.contains("переподключаю"));
+        recording.apply(&PipelineEvent::CaptureEvent(CaptureEvent::Error {
+            channel: CaptureChannel::System,
+            message: "device lost".into(),
+        }));
+        recording.apply(&PipelineEvent::CaptureEvent(CaptureEvent::Stopped {
+            channel: CaptureChannel::System,
+        }));
+        recording.apply(&PipelineEvent::Levels {
+            mic: 0.2,
+            system: 0.0,
+        });
+        recording.apply(&PipelineEvent::CaptureEvent(CaptureEvent::Recovery {
+            channel: CaptureChannel::System,
+            restored: true,
+        }));
+        let status = recording.status().unwrap();
+        assert!(status.warning);
+        assert!(status.text.contains("Звук собеседников не записывается"));
+        assert!(!status.text.contains("переподключаю"));
+        let ctx = eframe::egui::Context::default();
+        crate::theme::install(&ctx);
+        let output = crate::test_ui::frame(&ctx, vec![], &mut |ui| {
+            crate::theme::recording_status(ui, &status.text, status.warning, None);
+        });
+        crate::test_ui::text_rect(&output.shapes, &status.text);
+        output.drop_without_applying_deltas();
+        recording.phase = Phase::Finalizing;
+        assert!(recording.lost[1]);
+        recording = Recording {
+            phase: Phase::Recording,
+            ..Default::default()
+        };
+        assert!(!recording.status().unwrap().warning);
+        recording.apply(&PipelineEvent::CaptureEvent(CaptureEvent::Recovery {
+            channel: CaptureChannel::Mic,
+            restored: false,
+        }));
+        recording.apply(&PipelineEvent::CaptureEvent(CaptureEvent::Recovery {
+            channel: CaptureChannel::Mic,
+            restored: true,
+        }));
+        assert!(!recording.status().unwrap().warning);
+        recording.apply(&PipelineEvent::CaptureEvent(CaptureEvent::Stopped {
+            channel: CaptureChannel::Mic,
+        }));
+        assert!(
+            recording
+                .status()
+                .unwrap()
+                .text
+                .contains("Микрофон не записывается")
+        );
+    }
+    #[test]
     fn final_pass_queues_auto_summary_but_failure_does_not() {
         let (mut state, _commands, _root, path) = fixture();
+        state.llm_configured = true;
         let meeting = state.documents[&path].data.meeting.clone();
         state.apply(Event::RecordDone {
             path: Some(path.clone()),

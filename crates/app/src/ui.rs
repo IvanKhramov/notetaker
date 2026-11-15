@@ -2022,7 +2022,7 @@ impl NotetakerApp {
             theme::form_field(ui,"Название",None,|ui|ui.add(theme::text_field(&mut self.state.title).desired_width(f32::INFINITY)));
             let mode_description=mode_label(self.state.record_mode);
             theme::form_field(ui,"Режим",Some(mode_description),|ui| {self.state.record_mode_edited |= mode_selector(ui,&mut self.state.record_mode);});
-            let readiness = self.state.summary_readiness(self.state.record_mode);
+            let readiness = self.state.summary_readiness();
             ui.horizontal_wrapped(|ui| {
                 let text = match &readiness { Ok(()) => "Конспект создастся автоматически после Стоп".to_owned(), Err(reason) => format!("Без автоконспекта: {reason}") };
                 ui.label(RichText::new(text).size(theme::SMALL).color(Palette::of(ui).muted));
