@@ -196,7 +196,7 @@ pub struct Document {
     pub summary_status: Option<SummaryStatus>,
 }
 impl Document {
-    fn new(data: DocumentData) -> Self {
+    pub(crate) fn new(data: DocumentData) -> Self {
         let template = data
             .meta
             .template
@@ -905,7 +905,17 @@ impl AppState {
         });
     }
     pub fn ask(&mut self) {
-        if self.chat.busy || self.unsaved() || self.settings_pending || self.recording.busy() {
+        let live = self.chat.scope.as_ref().and_then(|meeting| {
+            (self.recording.phase == Phase::Recording
+                && self.recording.path.as_deref() == Some(meeting.path()))
+            .then(|| self.documents.get(meeting.path()))
+            .flatten()
+            .map(|doc| (doc.data.notes.clone(), doc.data.transcript.clone()))
+        });
+        if self.chat.busy
+            || self.settings_pending
+            || (live.is_none() && (self.unsaved() || self.recording.busy()))
+        {
             return;
         }
         self.chat.pending = std::mem::take(&mut self.chat.question);
@@ -916,6 +926,7 @@ impl AppState {
         self.send(Command::Chat {
             root: self.settings.library.clone(),
             scope: self.chat.scope.clone(),
+            live,
             folder: self.folder_filter.clone(),
             question: self.chat.pending.clone(),
             history: self.chat.messages.iter().map(|m| m.turn.clone()).collect(),
@@ -2198,6 +2209,33 @@ mod tests {
             segment.clone(),
         ])));
         state.apply(Event::Pipeline(PipelineEvent::LiveSegments(vec![segment])));
+        state.chat.open(
+            Some(
+                state.documents[&state.recording.path.clone().unwrap()]
+                    .data
+                    .meeting
+                    .clone(),
+            ),
+            "Запись".into(),
+        );
+        state
+            .documents
+            .get_mut(state.recording.path.as_ref().unwrap())
+            .unwrap()
+            .data
+            .notes = "Личная заметка".into();
+        state.chat.question = "Что решили?".into();
+        state.ask();
+        let Command::Chat {
+            live: Some((notes, transcript)),
+            ..
+        } = _commands.try_recv().unwrap()
+        else {
+            panic!("live chat snapshot");
+        };
+        assert_eq!(notes, "Личная заметка");
+        assert!(transcript.named_text().contains("Новая строка"));
+        state.chat.busy = false;
         assert_eq!(
             state
                 .recording

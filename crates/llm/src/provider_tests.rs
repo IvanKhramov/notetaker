@@ -555,3 +555,54 @@ fn reasoning_models_use_completion_limit_without_changing_compatible_servers() {
         );
     }
 }
+
+#[test]
+fn live_chat_sends_accumulated_transcript_and_current_notes() {
+    let root = tempfile::tempdir().unwrap();
+    let library = notetaker_core::Library::open(root.path()).unwrap();
+    let meeting = library
+        .create_meeting(notetaker_core::MeetingMeta::new(
+            "Запись",
+            chrono::Utc::now(),
+        ))
+        .unwrap();
+    meeting.write_notes("Старая заметка").unwrap();
+    let mut transcript = meeting.read_transcript().unwrap();
+    transcript.segments.push(notetaker_core::Segment {
+        id: uuid::Uuid::now_v7(),
+        speaker: notetaker_core::SpeakerId("me".into()),
+        channel: notetaker_core::Channel::Mic,
+        start_ms: 1000,
+        end_ms: 2000,
+        text: "Накопленная реплика".into(),
+        source: notetaker_core::Source::Live,
+        edited: false,
+        lang: None,
+    });
+    let mock = Mock::start(
+        "200 OK",
+        "application/json",
+        r#"{"choices":[{"message":{"content":"Решение [1]"}}]}"#,
+        "",
+    );
+    let config = crate::Config::parse(&format!("[defaults]\nlocal='local'\nhybrid='local'\n[[providers]]\nid='local'\nkind='openai'\nbase_url='{}'\nmodel='test'", mock.base)).unwrap();
+    crate::ask(
+        &library,
+        crate::ChatScope::Live {
+            meeting: &meeting,
+            notes: "Текущая личная заметка",
+            transcript: &transcript,
+        },
+        "Что решили?",
+        &[],
+        &config,
+        crate::Cancellation::default(),
+        &mut |_| {},
+    )
+    .unwrap();
+    let (_, body) = mock.handle.join().unwrap();
+    let request = body.to_string();
+    assert!(request.contains("Текущая личная заметка"));
+    assert!(request.contains("Накопленная реплика"));
+    assert!(!request.contains("Старая заметка"));
+}

@@ -170,6 +170,8 @@ pub struct NotetakerApp {
     applied_zoom: Option<f32>,
     chat_page: bool,
     ask_text: String,
+    recipes: crate::chat::Recipes,
+    focus_chat: bool,
     focus_search: bool,
     /// Narrow windows only: the navigation is shown on demand.
     sidebar_open: bool,
@@ -235,6 +237,8 @@ impl NotetakerApp {
             applied_zoom: None,
             chat_page: false,
             ask_text: String::new(),
+            recipes: Default::default(),
+            focus_chat: false,
             focus_search: false,
             sidebar_open: false,
             maintenance: Default::default(),
@@ -565,7 +569,66 @@ impl NotetakerApp {
     fn bottom_bar(&mut self, ui: &mut egui::Ui) {
         let p = Palette::of(ui);
         let note = !self.home && !self.chat_page && !self.people.active() && !self.state.tasks_open;
+        if !self.chat_page {
+            let scope = if note {
+                self.state
+                    .selected
+                    .as_ref()
+                    .and_then(|p| self.state.documents.get(p))
+            } else {
+                None
+            };
+            if self.state.chat.folder != self.state.folder_filter {
+                self.state.chat.messages.clear();
+                self.state.chat.folder = self.state.folder_filter.clone();
+            }
+            self.state.chat.open(
+                scope.map(|d| d.data.meeting.clone()),
+                scope.map(|d| d.data.meta.title.clone()).unwrap_or_default(),
+            );
+        }
+        let live = self.state.recording.phase == Phase::Recording
+            && self
+                .state
+                .chat
+                .scope
+                .as_ref()
+                .is_some_and(|m| Some(m.path()) == self.state.recording.path.as_deref());
+        let available = !self.state.recording.busy() || live;
+        if !available {
+            self.focus_chat = false;
+        }
+        let can_ask = self.state.ready
+            && !self.state.chat.busy
+            && available
+            && (live || !self.state.unsaved())
+            && !self.state.settings_pending;
         let mut ask = false;
+        if available {
+            ui.add_enabled_ui(can_ask, |ui| {
+                ask |= self
+                    .recipes
+                    .show(ui, &mut self.ask_text, &self.state.settings.library);
+                if self.state.chat.messages.is_empty()
+                    && !self.state.chat.busy
+                    && !self.ask_text.starts_with('/')
+                {
+                    ui.horizontal_wrapped(|ui| {
+                        for prompt in
+                            crate::chat::suggestions(self.state.chat.scope.is_some(), live)
+                        {
+                            if ui
+                                .add(theme::styled_button(p, prompt, ButtonStyle::Ghost).wrap())
+                                .clicked()
+                            {
+                                self.ask_text = (*prompt).into();
+                                ask = true;
+                            }
+                        }
+                    });
+                }
+            });
+        }
         let mut stop = false;
         let bar = theme::bar(p).show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -622,14 +685,10 @@ impl NotetakerApp {
                         self.state.inventory_pending = true;
                         self.state.send(Command::Inventory);
                     }
-                    if !self.ask_text.trim().is_empty() {
+                    if !self.ask_text.trim().is_empty() && !self.ask_text.starts_with('/') {
                         ask |= ui
                             .add_enabled(
-                                self.state.ready
-                                    && !self.state.chat.busy
-                                    && !busy
-                                    && !self.state.unsaved()
-                                    && !self.state.settings_pending,
+                                can_ask,
                                 crate::theme::styled_button(
                                     crate::theme::Palette::of(ui),
                                     "Спросить",
@@ -639,12 +698,13 @@ impl NotetakerApp {
                             .on_disabled_hover_text("Дождитесь сохранения встречи")
                             .clicked();
                     }
-                    if busy {
+                    if !available {
                         return;
                     }
                     let response = ui.add_sized(
                         [ui.available_width().max(24.0), 32.0],
                         crate::theme::text_field(&mut self.ask_text)
+                            .id(egui::Id::unique("chat-input"))
                             .frame(egui::Frame::NONE)
                             .align(egui::Align2::LEFT_CENTER)
                             .hint_text(if phase == Phase::Finalizing {
@@ -658,14 +718,22 @@ impl NotetakerApp {
                             } else if let Some(notice) = self.state.recording.silence_notice() {
                                 notice.to_owned()
                             } else if busy {
-                                "Идёт запись. Чат доступен после неё.".to_owned()
+                                "Спросить по текущей записи…".to_owned()
                             } else if note || (self.chat_page && self.state.chat.scope.is_some()) {
                                 "Спросить про эту встречу…".to_owned()
+                            } else if self.state.folder_filter.is_some() {
+                                "Спросить по папке…".to_owned()
                             } else {
                                 "Спросить по всем встречам…".to_owned()
                             }),
                     );
-                    ask |= response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    if self.focus_chat {
+                        response.request_focus();
+                        self.focus_chat = false;
+                    }
+                    ask |= !self.ask_text.starts_with('/')
+                        && response.lost_focus()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 });
             });
         });
@@ -676,29 +744,7 @@ impl NotetakerApp {
         if stop {
             self.state.toggle_recording();
         }
-        if ask
-            && !self.ask_text.trim().is_empty()
-            && self.state.ready
-            && !self.state.chat.busy
-            && !self.state.recording.busy()
-            && !self.state.unsaved()
-            && !self.state.settings_pending
-        {
-            if !self.chat_page {
-                let scope = if note {
-                    self.state
-                        .selected
-                        .as_ref()
-                        .and_then(|p| self.state.documents.get(p))
-                        .map(|d| (d.data.meeting.clone(), d.data.meta.title.clone()))
-                } else {
-                    None
-                };
-                self.state.chat.open(
-                    scope.as_ref().map(|(m, _)| m.clone()),
-                    scope.map(|(_, t)| t).unwrap_or_default(),
-                );
-            }
+        if ask && !self.ask_text.trim().is_empty() && can_ask {
             self.state.chat.question = std::mem::take(&mut self.ask_text);
             self.state.ask();
             self.chat_page = true;
@@ -2317,6 +2363,17 @@ impl NotetakerApp {
                 self.state.tab = Tab::Enhanced;
             }
         }
+        if !self.show_settings
+            && !self.show_record
+            && self.rename.is_none()
+            && !self.confirm_delete
+            && !self.confirm_regenerate
+            && ctx.memory(|m| m.top_modal_layer().is_none())
+            && ui.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::J))
+        {
+            self.focus_chat = true;
+            self.state.chat.open = true;
+        }
         if ui.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::K)) {
             self.people.close();
             self.state.tasks_open = false;
@@ -2399,7 +2456,14 @@ impl NotetakerApp {
                 ui.horizontal(|ui| {
                     ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
                     ui.allocate_ui_with_layout(
-                        egui::vec2(width, 48.0),
+                        egui::vec2(
+                            width,
+                            if self.ask_text.starts_with('/') {
+                                220.0
+                            } else {
+                                48.0
+                            },
+                        ),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| self.bottom_bar(ui),
                     );
@@ -4610,5 +4674,68 @@ mod toast_lifetime_tests {
             assert_eq!(queue[0].text, "error 96");
         }
         assert_eq!(queue[4].text, "warning 99");
+    }
+}
+
+#[cfg(test)]
+mod chat_shortcut_tests {
+    use super::*;
+    #[test]
+    fn command_j_focuses_chat_on_home_folder_meeting_and_live_but_not_modal() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let (mut state, _commands, _events) = crate::test_ui::state();
+        state.ready = true;
+        let root = tempfile::tempdir().unwrap();
+        state.settings.library = root.path().into();
+        let library = notetaker_core::Library::open(root.path()).unwrap();
+        let meeting = library
+            .create_meeting(notetaker_core::MeetingMeta::new("Тест", chrono::Utc::now()))
+            .unwrap();
+        let path = meeting.path().to_owned();
+        state.documents.insert(
+            path.clone(),
+            crate::state::Document::new(crate::worker::DocumentData::read(meeting).unwrap()),
+        );
+        state.selected = Some(path.clone());
+        let mut app = NotetakerApp::with_state(state);
+        for scope in 0..4 {
+            app.home = scope < 2;
+            app.state.folder_filter = (scope == 1).then(|| "Команда".into());
+            if scope == 3 {
+                app.state.recording.path = Some(path.clone());
+                app.state.recording.phase = Phase::Recording;
+            }
+            ctx.memory_mut(|m| m.surrender_focus(egui::Id::unique("chat-input")));
+            let key = egui::Event::Key {
+                key: egui::Key::J,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::COMMAND,
+            };
+            crate::test_ui::frame(&ctx, vec![key], &mut |ui| app.frame(ui))
+                .drop_without_applying_deltas();
+            assert!(
+                ctx.memory(|m| m.has_focus(egui::Id::unique("chat-input"))),
+                "scope {scope}"
+            );
+        }
+        app.state.recording.phase = Phase::Idle;
+        app.show_record = true;
+        ctx.memory_mut(|m| m.surrender_focus(egui::Id::unique("chat-input")));
+        crate::test_ui::frame(
+            &ctx,
+            vec![egui::Event::Key {
+                key: egui::Key::J,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::COMMAND,
+            }],
+            &mut |ui| app.frame(ui),
+        )
+        .drop_without_applying_deltas();
+        assert!(!ctx.memory(|m| m.has_focus(egui::Id::unique("chat-input"))));
     }
 }

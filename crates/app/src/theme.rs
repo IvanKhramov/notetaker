@@ -587,8 +587,13 @@ pub struct Button<'a> {
     icon: Option<&'a str>,
     min_size: egui::Vec2,
     trailing: Option<&'a str>,
+    wrap: bool,
 }
 impl<'a> Button<'a> {
+    pub fn wrap(mut self) -> Self {
+        self.wrap = true;
+        self
+    }
     pub fn icon(mut self, glyph: &'a str) -> Self {
         self.icon = Some(glyph);
         self
@@ -605,14 +610,22 @@ impl<'a> Button<'a> {
 impl egui::Widget for Button<'_> {
     fn ui(self, ui: &mut egui::Ui) -> egui::Response {
         let p = Palette::of(ui);
-        let text =
-            ui.painter()
-                .layout_no_wrap(self.text.to_owned(), medium(BUTTON), Color32::PLACEHOLDER);
         let leading = if self.icon.is_some() { 22.0 } else { 0.0 };
         let trailing = if self.trailing.is_some() { 24.0 } else { 0.0 };
+        let width = if self.wrap {
+            (ui.available_width() - 24.0 - leading - trailing).max(1.0)
+        } else {
+            f32::INFINITY
+        };
+        let text = ui.painter().layout(
+            self.text.to_owned(),
+            medium(BUTTON),
+            Color32::PLACEHOLDER,
+            width,
+        );
         let size = egui::vec2(
             text.size().x + 24.0 + leading + trailing,
-            self.min_size.y.max(COMPACT_HEIGHT),
+            self.min_size.y.max(COMPACT_HEIGHT).max(text.size().y + 8.0),
         )
         .max(self.min_size);
         let (rect, response) = ui.allocate_at_least(size, egui::Sense::click());
@@ -712,6 +725,7 @@ pub fn styled_button<'a>(_: Palette, text: &'a str, variant: ButtonStyle) -> But
         icon,
         min_size: egui::vec2(0.0, CONTROL_HEIGHT),
         trailing: None,
+        wrap: false,
     }
 }
 /// Shared menu anchor preserves egui's popup keyboard handling.
