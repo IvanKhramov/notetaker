@@ -382,25 +382,44 @@ fn complete_final(
     title_requested: bool,
 ) -> Result<GeneratedNotes> {
     let raw = complete_with_warnings(provider, request, &mut |_| {}, warnings)?;
-    let (line, body) = raw.split_once('\n').unwrap_or((&raw, ""));
-    let generated = if let Some(title) = line.trim_start().strip_prefix(TITLE_PREFIX.trim_end()) {
-        let title = title.trim();
-        GeneratedNotes {
-            text: body.into(),
-            title: (title_requested && valid_title(title)).then(|| title.into()),
-        }
-    } else {
-        GeneratedNotes {
-            text: raw,
-            title: None,
-        }
-    };
+    let generated = split_title(raw, title_requested);
     ensure!(
         !generated.text.trim().is_empty(),
         "Модель вернула пустой конспект"
     );
     on_text(&generated.text);
     Ok(generated)
+}
+
+/// Takes the service line out of an answer that was asked for a title.
+/// An answer that was not asked for one is never touched: a template may
+/// legitimately produce a line that starts with the same marker. Models put
+/// the line after a blank line or a short preamble, so the first lines are
+/// searched, and only that one line is removed.
+fn split_title(raw: String, title_requested: bool) -> GeneratedNotes {
+    let marker = TITLE_PREFIX.trim_end();
+    let mut offset = 0;
+    let found = raw
+        .split_inclusive('\n')
+        .take(5)
+        .find_map(|line| {
+            let start = offset;
+            offset += line.len();
+            line.trim_start()
+                .strip_prefix(marker)
+                .map(|title| (start, offset, title.trim().to_owned()))
+        })
+        .filter(|_| title_requested);
+    match found {
+        Some((start, end, title)) => GeneratedNotes {
+            text: format!("{}{}", &raw[..start], &raw[end..]),
+            title: valid_title(&title).then_some(title),
+        },
+        None => GeneratedNotes {
+            text: raw,
+            title: None,
+        },
+    }
 }
 
 fn valid_title(title: &str) -> bool {
@@ -884,6 +903,31 @@ mod auto_title_tests {
         );
         assert!(meeting.read_meta().unwrap().needs_auto_title());
         assert_eq!(meeting.read_enhanced().unwrap(), "Старый конспект");
+    }
+    #[test]
+    fn title_line_is_taken_only_when_asked_and_wherever_it_sits_at_the_top() {
+        let line = "NOTETAKER_TITLE: План релиза";
+        // Not asked: a template may produce such a line itself.
+        let kept = format!("{line}\n## Итоги\nТекст");
+        let notes = split_title(kept.clone(), false);
+        assert_eq!((notes.text, notes.title), (kept, None));
+        // After a blank line and after a preamble the line is removed alone.
+        for (raw, text) in [
+            (format!("\n{line}\n## Итоги\nТекст"), "\n## Итоги\nТекст"),
+            (
+                format!("Вот конспект.\r\n{line}\r\n## Итоги\r\nТекст"),
+                "Вот конспект.\r\n## Итоги\r\nТекст",
+            ),
+            (format!("## Итоги\n{line}"), "## Итоги\n"),
+        ] {
+            let notes = split_title(raw, true);
+            assert_eq!(notes.text, text);
+            assert_eq!(notes.title.as_deref(), Some("План релиза"));
+        }
+        // Deep in the body it is ordinary text.
+        let deep = format!("1\n2\n3\n4\n5\n{line}\n");
+        let notes = split_title(deep.clone(), true);
+        assert_eq!((notes.text, notes.title), (deep, None));
     }
     #[test]
     fn missing_title_preserves_the_entire_summary_and_malformed_metadata_never_leaks() {
