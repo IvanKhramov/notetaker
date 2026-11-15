@@ -78,6 +78,8 @@ impl Panel { pub fn fixture(&mut self,state:&AppState) {
     }); }
 } }
 """
+    if path.stem == "calendar_ui":
+        text = text.replace('theme::disclosure("Где взять ссылку")', 'theme::disclosure("Где взять ссылку").default_open(true)')
     if path.stem == "theme":
         text=text.replace('"../assets/',f'"{root / "crates/app/assets"}/')
         text=text.replace('#[path = "icons.rs"]',f'#[path = "{root / "crates/app/src/icons.rs"}"]')
@@ -135,6 +137,19 @@ impl NotetakerApp {
                 app.state.llm_configured=false;app.state.tab=Tab::Enhanced;
             }
         }
+        if (51..=54).contains(&screen) {
+            app.home=true;
+            app.state.settings.calendars.push(notetaker_llm::calendar::Subscription {id:"calendar-preview".into(),name:"Команда".into()});
+            app.state.settings_draft=app.state.settings.clone();
+            let now=chrono::Utc::now();
+            let event=notetaker_core::calendar::CalendarEvent {
+                link:notetaker_core::calendar::EventLink {uid:"entry".into(),title:"Планирование с командой".into(),attendees:vec![notetaker_core::calendar::Attendee{name:"Иван".into(),email:String::new()},notetaker_core::calendar::Attendee{name:"Алексей".into(),email:String::new()}],call_url:if screen==52 {None} else {Some("https://meet.google.com/example".into())}},
+                start:now+chrono::Duration::minutes(if screen==53 {30} else {3}),end:now+chrono::Duration::minutes(60),all_day:false,organizer:None};
+            app.state.calendar_events=vec![event.clone()];
+            if screen==51 || screen==52 {app.state.calendar_reminder=Some((event.link.uid.clone(),event.start));}
+            if screen==52 {app.state.recording.path=app.state.selected.clone();app.state.recording.phase=Phase::Recording;app.state.recording.started=Some(Instant::now()-Duration::from_secs(123));}
+            if screen==54 {app.show_settings=true;app.settings_panel.section=crate::settings::Section::Calendars;}
+        }
         if screen == 20 { app.chat_page=true; app.state.chat.open(None,String::new()); }
         if screen == 21 { app.state.tasks_open=true; }
         if (22..=25).contains(&screen) { app.people.fixture(&app.state.settings,screen); }
@@ -177,7 +192,7 @@ impl NotetakerApp {
     pub fn pill(ui: &mut egui::Ui) { recording_pill(ui, Duration::from_secs(123), 0.3); }
 }
 '''
-    if path.stem in {"ui", "state", "quickstart", "people", "organization", "maintenance", "trackers", "theme"}:
+    if path.stem in {"ui", "state", "quickstart", "people", "organization", "maintenance", "trackers", "theme", "calendar_ui"}:
         path = harness / "src" / path.name
         path.write_text(text)
     modules.append(f'#[path = "{path}"] mod {path.stem};')
@@ -310,7 +325,7 @@ if shutil.disk_usage(root).free < 2 * 1024**3:
 # Resolve the derived harness root against the copied workspace lock before its locked build.
 subprocess.run(["cargo", "metadata", "--offline", "--format-version", "1", "--manifest-path", str(harness / "Cargo.toml")], cwd=root, env=env, check=True, stdout=subprocess.DEVNULL)
 subprocess.run(["cargo", "build", "--locked", "--manifest-path", str(harness / "Cargo.toml")], cwd=root, env=env, check=True)
-names = ["welcome", "name", "connections", "home", "note", "transcript", "general", "recording", "calendars", "ai", "search", "storage", "recording-pill", "connections-expanded", "delete-confirm", "meeting-menu", "toast", "empty-library", "narrow-settings", "recording-bar", "chat", "tasks", "people", "person", "series", "digest", "folders", "diagnostics", "tracker-preview", "new-recording", "rename", "regenerate", "capture-warning", "widgets", "update-card", "folder-delete", "merge-people", "folders-advanced", "ai-expanded", "performance-transcript", "performance-meetings", "performance-live", "chat-meeting-empty", "chat-library-empty", "chat-recipes", "chat-recording", "recording-silence", "recording-final-pass", "recording-ready", "recording-not-ready", "summary-skipped"]
+names = ["welcome", "name", "connections", "home", "note", "transcript", "general", "recording", "calendars", "ai", "search", "storage", "recording-pill", "connections-expanded", "delete-confirm", "meeting-menu", "toast", "empty-library", "narrow-settings", "recording-bar", "chat", "tasks", "people", "person", "series", "digest", "folders", "diagnostics", "tracker-preview", "new-recording", "rename", "regenerate", "capture-warning", "widgets", "update-card", "folder-delete", "merge-people", "folders-advanced", "ai-expanded", "performance-transcript", "performance-meetings", "performance-live", "chat-meeting-empty", "chat-library-empty", "chat-recipes", "chat-recording", "recording-silence", "recording-final-pass", "recording-ready", "recording-not-ready", "summary-skipped", "calendar-reminder-link", "calendar-reminder-no-link", "calendar-upcoming", "calendar-help"]
 def render(spec):
     index, name, theme, width, height, zoom = spec
     actual_width = 760 if name == "narrow-settings" and zoom == 1.0 else width

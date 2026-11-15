@@ -3,6 +3,7 @@
 mod ai;
 mod attachments;
 mod autosave;
+mod calendar_ui;
 mod chat;
 mod config;
 #[cfg(any(windows, target_os = "macos"))]

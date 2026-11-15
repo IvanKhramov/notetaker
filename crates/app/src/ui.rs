@@ -484,14 +484,19 @@ impl NotetakerApp {
                         }
                         MeetingEntry::Upcoming(index, time) => {
                             let event = &self.state.calendar_events[*index];
-                            let meta = event.link.call_url.as_deref().map_or("", call_platform);
+                            let meta = crate::calendar_ui::call_link(event)
+                                .as_deref()
+                                .map_or("", call_platform);
                             let (_, record) = theme::meeting_row(
                                 ui,
                                 (&event.link.uid, event.start.timestamp()),
                                 time,
                                 &event.link.title,
                                 meta,
-                                cfg!(any(windows, target_os = "macos")) && self.can_record(),
+                                Some((
+                                    crate::calendar_ui::action_label(event),
+                                    cfg!(any(windows, target_os = "macos")) && self.can_record(),
+                                )),
                                 false,
                             );
                             if record {
@@ -506,7 +511,7 @@ impl NotetakerApp {
                                 time,
                                 &row.meta.title,
                                 row.meta.folder.as_deref().unwrap_or(""),
-                                false,
+                                None,
                                 self.organization.selected(row.meeting.path()),
                             );
                             let response = response.on_hover_text(if row.snippet.is_empty() {
@@ -2084,10 +2089,74 @@ impl NotetakerApp {
             self.show_settings = false;
         }
     }
-    fn call_notification(&mut self, ctx: &egui::Context) {
-        let Some(prompt) = self.state.call_prompt.clone() else {
+    fn interaction_blocked(&self, ctx: &egui::Context) -> bool {
+        self.show_settings
+            || self.show_record
+            || self.quickstart.open
+            || self.rename.is_some()
+            || self.confirm_delete
+            || self.confirm_regenerate
+            || self.image_viewer.is_some()
+            || ctx.memory(|m| m.top_modal_layer().is_some())
+    }
+    fn calendar_reminder_overlay(&mut self, ctx: &egui::Context, bounds: egui::Rect) {
+        if self.interaction_blocked(ctx) {
+            return;
+        }
+        let Some(event) = self.state.calendar_reminder().cloned() else {
             return;
         };
+        let bounds = bounds.shrink(theme::SPACE[3]);
+        let width = bounds.width().clamp(1.0, 340.0);
+        let action = egui::Area::new(egui::Id::unique("calendar-reminder"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(egui::pos2(bounds.right() - width, bounds.top()))
+            .constrain_to(bounds)
+            .show(ctx, |ui| {
+                ui.set_width(width);
+                crate::calendar_ui::reminder(
+                    ui,
+                    &event,
+                    cfg!(any(windows, target_os = "macos")) && self.can_record(),
+                )
+            })
+            .inner;
+        self.calendar_action(ctx, action);
+    }
+    fn calendar_action(&mut self, ctx: &egui::Context, action: crate::calendar_ui::Action) {
+        match action {
+            crate::calendar_ui::Action::Start => {
+                let Some(event) = self.state.calendar_reminder().cloned() else {
+                    return;
+                };
+                self.home = false;
+                self.state.start_event(event);
+                if self.state.recording.phase == Phase::Starting {
+                    ctx.send_viewport_cmd_to(
+                        egui::ViewportId::ROOT,
+                        egui::ViewportCommand::Visible(true),
+                    );
+                    ctx.send_viewport_cmd_to(
+                        egui::ViewportId::ROOT,
+                        egui::ViewportCommand::Minimized(false),
+                    );
+                }
+            }
+            crate::calendar_ui::Action::Dismiss => self.state.dismiss_calendar_reminder(),
+            crate::calendar_ui::Action::None => {}
+        }
+    }
+    fn call_notification(&mut self, ctx: &egui::Context) {
+        let calendar = self.state.calendar_reminder().cloned().filter(|_| {
+            !self.interaction_blocked(ctx)
+                && ctx.input(|i| {
+                    !i.viewport().focused.unwrap_or(true) || i.viewport().minimized.unwrap_or(false)
+                })
+        });
+        let prompt = self.state.call_prompt.clone();
+        if prompt.is_none() && calendar.is_none() {
+            return;
+        }
         let mut accept = false;
         let mut dismiss = false;
         let mut builder = egui::ViewportBuilder::default();
@@ -2105,13 +2174,18 @@ impl NotetakerApp {
                 .with_window_level(egui::WindowLevel::AlwaysOnTop)
                 .with_active(false),
             |ui, _| {
-                let p = Palette::of(ui);
-                egui::Frame::new()
-                    .fill(p.card)
-                    .stroke(egui::Stroke::new(1.0, p.border))
-                    .corner_radius(12)
-                    .inner_margin(16)
-                    .show(ui, |ui| {
+                if let Some(event) = &calendar {
+                    match crate::calendar_ui::reminder(
+                        ui,
+                        event,
+                        cfg!(any(windows, target_os = "macos")) && self.can_record(),
+                    ) {
+                        crate::calendar_ui::Action::Start => accept = true,
+                        crate::calendar_ui::Action::Dismiss => dismiss = true,
+                        crate::calendar_ui::Action::None => {}
+                    }
+                } else if let Some(prompt) = &prompt {
+                    theme::bar(Palette::of(ui)).show(ui, |ui| {
                         ui.set_width(318.0);
                         let (title, question, button) = match &prompt {
                             CallPrompt::Start {
@@ -2149,6 +2223,7 @@ impl NotetakerApp {
                                 theme::button(ui, "Не сейчас", ButtonStyle::Secondary).clicked();
                         });
                     });
+                }
                 if ui.input(|input| input.viewport().close_requested()) {
                     dismiss = true;
                     ui.ctx()
@@ -2156,7 +2231,18 @@ impl NotetakerApp {
                 }
             },
         );
-        if accept {
+        if calendar.is_some() {
+            self.calendar_action(
+                ctx,
+                if accept {
+                    crate::calendar_ui::Action::Start
+                } else if dismiss {
+                    crate::calendar_ui::Action::Dismiss
+                } else {
+                    crate::calendar_ui::Action::None
+                },
+            );
+        } else if accept {
             self.state.accept_call();
         } else if dismiss {
             self.state.dismiss_call();
@@ -2240,6 +2326,12 @@ impl NotetakerApp {
             }
         }
         if let Some(desktop) = &mut self.desktop {
+            if desktop
+                .set_reminder(self.state.calendar_reminder().is_some())
+                .is_err()
+            {
+                notetaker_runtime::diagnostics::event("tray reminder update failed");
+            }
             if desktop.set_recording(self.state.recording.busy()).is_err() {
                 notetaker_runtime::diagnostics::event("tray icon update failed");
             }
@@ -2336,7 +2428,10 @@ impl eframe::App for NotetakerApp {
         if self.state.can_exit() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-        if self.state.recording.busy() || self.state.call_prompt.is_some() {
+        if self.state.recording.busy()
+            || self.state.call_prompt.is_some()
+            || self.state.calendar_reminder().is_some()
+        {
             // Allow the UI to create the indicator when a hotkey starts a
             // recording while the root window is hidden.
             ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaintWhileHidden);
@@ -2388,12 +2483,7 @@ impl NotetakerApp {
                 self.state.tab = Tab::Enhanced;
             }
         }
-        if !self.show_settings
-            && !self.show_record
-            && self.rename.is_none()
-            && !self.confirm_delete
-            && !self.confirm_regenerate
-            && ctx.memory(|m| m.top_modal_layer().is_none())
+        if !self.interaction_blocked(&ctx)
             && ui.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::J))
         {
             self.focus_chat = true;
@@ -2459,11 +2549,13 @@ impl NotetakerApp {
             }
         }
         if self.show_settings {
+            let reminder_bounds = ui.available_rect_before_wrap();
             self.toast_anchor = Some(egui::pos2(
                 ui.available_rect_before_wrap().center().x,
                 ctx.content_rect().bottom() - 12.0,
             ));
             self.settings_dialog(ui);
+            self.calendar_reminder_overlay(&ctx, reminder_bounds);
             self.notifications(&ctx);
             self.indicator(&ctx);
             self.call_notification(&ctx);
@@ -2487,6 +2579,7 @@ impl NotetakerApp {
                     );
                 });
             });
+        let reminder_bounds = ui.available_rect_before_wrap();
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(p.bg).inner_margin(
                 if ctx.content_rect().height() < 600.0 {
@@ -2529,6 +2622,7 @@ impl NotetakerApp {
                     }
                 });
             });
+        self.calendar_reminder_overlay(&ctx, reminder_bounds);
         if let Some(uri) = self.image_viewer.clone() {
             let mut open = true;
             theme::modal(&ctx, "Изображение")
@@ -2629,20 +2723,23 @@ fn next_state_wake(state: &AppState, now: Instant) -> Option<Duration> {
                 .calendar_checked
                 .map(|at| (at + Duration::from_secs(600)).saturating_duration_since(now)),
         );
-        let utc = chrono::Utc::now();
-        for event in &state.calendar_events {
-            for time in [
-                event.start - chrono::Duration::minutes(5),
-                event.start,
-                event.end + chrono::Duration::seconds(1),
-            ] {
-                if time > utc
-                    && let Ok(delay) = (time - utc).to_std()
-                {
-                    deadlines.push(delay);
-                }
+    }
+    let utc = chrono::Utc::now();
+    for event in &state.calendar_events {
+        for time in [
+            event.start - chrono::Duration::minutes(5),
+            event.start,
+            event.end,
+        ] {
+            if time > utc
+                && let Ok(delay) = (time - utc).to_std()
+            {
+                deadlines.push(delay);
             }
         }
+    }
+    if state.calendar_reminder().is_some() {
+        deadlines.push(Duration::from_secs(30));
     }
     deadlines
         .into_iter()
@@ -2682,7 +2779,7 @@ fn recording_pill(ui: &mut egui::Ui, elapsed: Duration, level: f32) -> (bool, bo
     (background.clicked(), stop)
 }
 
-fn call_platform(url: &str) -> &str {
+fn call_platform(url: &str) -> &'static str {
     if url.contains("zoom.") {
         "Zoom"
     } else if url.contains("meet.google.") {
@@ -4783,4 +4880,123 @@ pub(crate) fn summary_skip_callout(
         }
     });
     (settings, create)
+}
+
+#[cfg(test)]
+mod calendar_review_tests {
+    use super::*;
+    fn app() -> (NotetakerApp, std::sync::mpsc::Receiver<Command>) {
+        let (mut state, commands, _events) = crate::test_ui::state();
+        state.ready = true;
+        state.quickstart.models.gigaam = crate::quickstart::Status::Ready;
+        state.quickstart.models.parakeet = crate::quickstart::Status::Ready;
+        let now = chrono::Utc::now();
+        let event = notetaker_core::calendar::CalendarEvent {
+            link: notetaker_core::calendar::EventLink {
+                uid: "review".into(),
+                title: "Встреча".into(),
+                attendees: vec![],
+                call_url: Some("https://zoom.us/old".into()),
+            },
+            start: now + chrono::Duration::minutes(3),
+            end: now + chrono::Duration::hours(1),
+            all_day: false,
+            organizer: None,
+        };
+        state.calendar_events = vec![event];
+        state.update_calendar_reminder(now);
+        (NotetakerApp::with_state(state), commands)
+    }
+    fn has_reminder_title(output: &egui::FullOutput) -> bool {
+        fn contains_title(shape: &egui::epaint::Shape) -> bool {
+            match shape {
+                egui::epaint::Shape::Text(text) => text.galley.text() == "Встреча",
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().any(contains_title),
+                _ => false,
+            }
+        }
+        output
+            .shapes
+            .iter()
+            .any(|shape| contains_title(&shape.shape))
+    }
+    #[test]
+    fn reminder_waits_for_dialog_quickstart_and_settings_to_close() {
+        let (mut app, _commands) = app();
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let bounds = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        for blocked in 0..3 {
+            app.show_record = blocked == 0;
+            app.quickstart.open = blocked == 1;
+            app.show_settings = blocked == 2;
+            for _ in 0..2 {
+                let output = crate::test_ui::frame(&ctx, vec![], &mut |ui| {
+                    app.calendar_reminder_overlay(ui.ctx(), bounds);
+                    app.call_notification(ui.ctx());
+                });
+                assert!(!has_reminder_title(&output));
+                output.drop_without_applying_deltas();
+            }
+            assert!(app.state.calendar_reminder().is_some());
+        }
+        app.show_settings = false;
+        app.show_record = false;
+        app.quickstart.open = false;
+        // A generic modal uses the same condition as the chat shortcut.
+        for _ in 0..2 {
+            crate::test_ui::frame(&ctx, vec![], &mut |ui| {
+                egui::Modal::new(egui::Id::unique("review-modal")).show(ui.ctx(), |ui| {
+                    ui.label("Диалог");
+                });
+            })
+            .drop_without_applying_deltas();
+        }
+        let output = crate::test_ui::frame(&ctx, vec![], &mut |ui| {
+            app.calendar_reminder_overlay(ui.ctx(), bounds);
+        });
+        assert!(!has_reminder_title(&output));
+        output.drop_without_applying_deltas();
+        let mut shown = false;
+        for _ in 0..3 {
+            let output = crate::test_ui::frame(&ctx, vec![], &mut |ui| {
+                app.calendar_reminder_overlay(ui.ctx(), bounds);
+            });
+            if has_reminder_title(&output) {
+                shown = true;
+            }
+            output.drop_without_applying_deltas();
+        }
+        assert!(shown);
+    }
+    #[test]
+    fn reminder_action_resolves_the_current_link() {
+        let (mut app, commands) = app();
+        app.state.calendar_events[0].link.call_url = Some("https://zoom.us/new".into());
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let output = crate::test_ui::frame(&ctx, vec![], &mut |ui| {
+            app.calendar_action(ui.ctx(), crate::calendar_ui::Action::Start);
+        });
+        output.drop_without_applying_deltas();
+        let mut opened = false;
+        let mut started = false;
+        for command in commands.try_iter() {
+            match command {
+                Command::OpenCall(url) => {
+                    assert_eq!(url, "https://zoom.us/new");
+                    opened = true;
+                }
+                Command::Record(request) => {
+                    assert_eq!(
+                        request.event.unwrap().link.call_url.as_deref(),
+                        Some("https://zoom.us/new")
+                    );
+                    started = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(opened && started);
+    }
 }

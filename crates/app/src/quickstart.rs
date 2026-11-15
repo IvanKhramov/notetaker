@@ -356,6 +356,7 @@ impl Panel {
                                     });
                                     if let Some(error) = &state.quickstart.calendar_error { ui.colored_label(Palette::of(ui).red, error); }
                                 } else { ui.label("Календарь подключён"); }
+                                crate::calendar_ui::setup_help(ui);
                                 if ui.add(theme::styled_button(Palette::of(ui),"Пропустить календарь",theme::ButtonStyle::Ghost).icon(theme::icons::X)).clicked() { self.calendar_url.clear(); }
                             });
                             crate::theme::disclosure("AI для конспектов").show(ui, |ui| {

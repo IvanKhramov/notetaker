@@ -225,6 +225,7 @@ pub enum Command {
         anchor: InsertAt,
     },
     Reveal(PathBuf),
+    OpenCall(String),
     Export {
         meeting: Meeting,
         text: String,
@@ -343,6 +344,7 @@ pub enum Event {
     },
     Exported(Result<PathBuf, String>),
     Revealed(Result<(), String>),
+    CallOpened(bool),
     Renamed {
         path: PathBuf,
         result: Result<String, String>,
@@ -681,6 +683,14 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                         path: meeting.path().to_owned(),
                         anchor,
                         results,
+                    });
+                }
+                Command::OpenCall(url) => {
+                    let events = events.clone();
+                    thread::spawn(move || {
+                        let allowed = notetaker_core::calendar::is_allowed_call_link(&url);
+                        let ok = allowed && open_call(&url);
+                        let _ = events.send(Event::CallOpened(ok));
                     });
                 }
                 Command::Reveal(path) => {
@@ -1566,6 +1576,17 @@ fn download(model: &str, events: &Events) -> Result<()> {
         "Загрузка завершилась с ошибкой ({status}); подробности выше"
     );
     Ok(())
+}
+
+fn open_call(url: &str) -> bool {
+    #[cfg(windows)]
+    {
+        notetaker_runtime::windows::open_url(url).is_ok()
+    }
+    #[cfg(unix)]
+    {
+        notetaker_runtime::unix::open_url(url).is_ok()
+    }
 }
 
 #[cfg(test)]

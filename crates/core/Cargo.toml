@@ -23,6 +23,7 @@ sha2 = "0.10"
 tempfile = "3"
 thiserror = "2"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
+url = "2.5.8"
 uuid = { version = "1", features = ["v7", "serde"] }
 notetaker-asr-proto = { path = "../asr-proto" }
 

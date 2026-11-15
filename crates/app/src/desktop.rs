@@ -24,6 +24,7 @@ pub enum Action {
 pub struct Desktop {
     tray: TrayIcon,
     recording: bool,
+    reminder: bool,
     manager: GlobalHotKeyManager,
     hotkeys: Vec<HotKey>,
     routes: Arc<Mutex<HashMap<u32, Action>>>,
@@ -97,6 +98,7 @@ impl Desktop {
         Ok(Self {
             tray,
             recording: false,
+            reminder: false,
             manager,
             hotkeys: Vec::new(),
             routes,
@@ -137,6 +139,17 @@ impl Desktop {
     }
     pub fn poll(&self) -> Vec<Action> {
         self.events.try_iter().collect()
+    }
+    pub fn set_reminder(&mut self, reminder: bool) -> Result<()> {
+        if self.reminder != reminder {
+            self.tray.set_tooltip(Some(if reminder {
+                "notetaker · Напоминание о встрече"
+            } else {
+                "notetaker"
+            }))?;
+            self.reminder = reminder;
+        }
+        Ok(())
     }
     pub fn set_recording(&mut self, recording: bool) -> Result<()> {
         if self.recording != recording {

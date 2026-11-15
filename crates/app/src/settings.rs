@@ -472,17 +472,6 @@ impl Panel {
                 });
                 ui.add_space(24.0);
                 theme::settings_group(ui, "Подписки", |ui| {
-                    edits.text(
-                        ui,
-                        "Часовой пояс без TZID",
-                        &mut state.settings_draft.calendar_timezone,
-                    );
-                    error(
-                        ui,
-                        notetaker_core::calendar::timezone(&state.settings_draft.calendar_timezone)
-                            .map(|_| ())
-                            .map_err(Into::into),
-                    );
                     let mut remove = None;
                     let mut secret_changed = false;
                     for calendar in &mut state.settings_draft.calendars {
@@ -522,6 +511,22 @@ impl Panel {
                             if let Some(message) = self.calendar_errors.get(&calendar.id) {
                                 ui.colored_label(Palette::of(ui).red, message);
                             }
+                            crate::calendar_ui::setup_help(ui);
+                            theme::disclosure("Для опытных").show(ui, |ui| {
+                                edits.text(
+                                    ui,
+                                    "Часовой пояс без TZID",
+                                    &mut state.settings_draft.calendar_timezone,
+                                );
+                                error(
+                                    ui,
+                                    notetaker_core::calendar::timezone(
+                                        &state.settings_draft.calendar_timezone,
+                                    )
+                                    .map(|_| ())
+                                    .map_err(Into::into),
+                                );
+                            });
                             if crate::theme::button(
                                 ui,
                                 "Удалить календарь",
