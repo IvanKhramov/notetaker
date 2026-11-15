@@ -274,7 +274,7 @@ impl Panel {
         if !self.selected.is_empty() {
             ui.small(format!(
                 "Выбрано: {}. Меню папки - переместить",
-                self.selected.len()
+                crate::wording::count(self.selected.len() as u64, crate::wording::MEETINGS)
             ));
             if crate::theme::button(ui, "Снять выбор", crate::theme::ButtonStyle::Ghost).clicked()
             {

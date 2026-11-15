@@ -36,6 +36,31 @@ struct Toast {
 /// Below this logical width the sidebar hides behind a "Меню" button.
 const NARROW_WIDTH: f32 = 760.0;
 
+#[derive(Default)]
+struct MeetingLayout {
+    compact: bool,
+    hide_prompts: bool,
+}
+impl MeetingLayout {
+    fn update(&mut self, height: f32) {
+        if height < 400.0 {
+            self.compact = true;
+        } else if height > 460.0 {
+            self.compact = false;
+        }
+        if !self.compact {
+            self.hide_prompts = false;
+        }
+    }
+    fn document_height(&mut self, height: f32, minimum: f32) {
+        if self.compact && height < minimum {
+            self.hide_prompts = true;
+        } else if height > minimum + 48.0 {
+            self.hide_prompts = false;
+        }
+    }
+}
+
 enum MeetingEntry {
     Header(String),
     Upcoming(usize, String),
@@ -142,6 +167,7 @@ pub struct NotetakerApp {
     notes_cache: NotesCache,
     meetings_cache: MeetingsCache,
     tasks_cache: TasksCache,
+    meeting_layout: MeetingLayout,
     meeting_tasks: Option<(u64, std::path::PathBuf, Vec<usize>)>,
     image_viewer: Option<String>,
     /// Asks before a regenerated summary replaces one the user edited by hand.
@@ -213,6 +239,7 @@ impl NotetakerApp {
             notes_cache: Default::default(),
             meetings_cache: Default::default(),
             tasks_cache: Default::default(),
+            meeting_layout: Default::default(),
             meeting_tasks: None,
             image_viewer: None,
             confirm_regenerate: false,
@@ -619,6 +646,7 @@ impl NotetakerApp {
                     .recipes
                     .show(ui, &mut self.ask_text, &self.state.settings.library);
                 if (fresh || self.state.chat.messages.is_empty())
+                    && !(note && self.meeting_layout.compact && self.meeting_layout.hide_prompts)
                     && !self.state.chat.busy
                     && let Some(prompt) = theme::prompt_chips(
                         ui,
@@ -1091,7 +1119,9 @@ impl NotetakerApp {
         }
     }
     fn meeting(&mut self, ui: &mut egui::Ui) {
-        if ui.ctx().content_rect().height() < 600.0 {
+        self.meeting_layout.update(ui.available_height());
+        let compact_header = self.meeting_layout.compact;
+        if compact_header {
             ui.spacing_mut().item_spacing.y = 4.0;
         }
         let Some(path) = self.state.selected.clone() else {
@@ -1151,6 +1181,53 @@ impl NotetakerApp {
             ui.spinner();
             return;
         };
+        let start = document.data.meta.started_at.with_timezone(&chrono::Local);
+        let participants = document
+            .data
+            .meta
+            .calendar_event
+            .as_ref()
+            .map(|e| e.attendees.len())
+            .unwrap_or_else(|| crate::speakers::timeline(document).timeline.speakers.len());
+        let audio_status = if locked {
+            "Аудио записывается".into()
+        } else {
+            crate::wording::audio_status(
+                document.data.audio_available,
+                document.data.meta.audio_expires_at,
+            )
+        };
+        let metadata = format!(
+            "{} · {}\nПапка: {}\n{}",
+            start.format("%d.%m.%Y · %H:%M"),
+            crate::wording::count(participants as u64, crate::wording::PARTICIPANTS),
+            document.data.meta.folder.as_deref().unwrap_or("Без папки"),
+            audio_status
+        );
+        let mut speaker_edit = None;
+        let mut rediarize = None;
+        let unavailable = if self.state.recording.busy() {
+            Some("Доступно после завершения записи")
+        } else if !document.data.system_audio {
+            Some("Аудио этой встречи не сохранено, пересчитать собеседников нельзя")
+        } else if document.speaker_ui.recalculating {
+            Some("Пересчитываю собеседников…")
+        } else if document.saving
+            || speaker_busy
+            || document.attachments_pending > 0
+            || self.state.enhancing.is_some()
+            || self.state.settings_pending
+            || self.state.recording.assist.bookmarks_pending > 0
+        {
+            Some("Дождитесь завершения текущей операции")
+        } else {
+            None
+        };
+        let editable = !locked
+            && !document.saving
+            && !speaker_busy
+            && document.attachments_pending == 0
+            && self.state.enhancing.is_none();
         let previous_template = document.template.clone();
         let mut document_toggle = None;
         let mut enhance = false;
@@ -1173,7 +1250,8 @@ impl NotetakerApp {
             if theme::icon_button(ui, theme::icons::CHEVRON_LEFT, "Встречи").clicked() {
                 self.home = true;
             }
-            if theme::button(ui, "Встречи", ButtonStyle::Ghost).clicked() {
+            if !compact_header && theme::button(ui, "Встречи", ButtonStyle::Ghost).clicked()
+            {
                 self.home = true;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1337,10 +1415,23 @@ impl NotetakerApp {
                                 }));
                                 row(ui, DocumentAction::Rename);
                                 row(ui, DocumentAction::Delete);
+                                ui.separator();
+                                ui.weak(&audio_status);
+                                if compact_header && self.state.tab == Tab::Transcript {
+                                    ui.separator();
+                                    let (count, edit) = crate::speakers::count_control(
+                                        ui,
+                                        document,
+                                        unavailable,
+                                        editable,
+                                    );
+                                    rediarize = count;
+                                    speaker_edit = edit;
+                                }
                             });
                     });
                 // Right-to-left layout: reverse so pinned buttons read in menu order.
-                for &item in pinned.iter().rev() {
+                for &item in pinned.iter().rev().filter(|_| !compact_header) {
                     if ui
                         .add_enabled(
                             enabled(item),
@@ -1357,6 +1448,22 @@ impl NotetakerApp {
                     {
                         action = Some(item);
                     }
+                }
+                if compact_header {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), theme::COMPACT_HEIGHT),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&document.data.meta.title)
+                                        .font(theme::semibold(theme::SUBHEADING)),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(format!("{}\n{}", document.data.meta.title, metadata));
+                        },
+                    );
                 }
             });
         });
@@ -1409,59 +1516,57 @@ impl NotetakerApp {
             Some(DocumentAction::Delete) => self.confirm_delete = true,
             None => {}
         }
-        let compact = ui.ctx().content_rect().height() < 600.0;
-        ui.add_space(if compact { 4.0 } else { 24.0 });
-        let mut title = egui::text::LayoutJob::simple(
-            document.data.meta.title.clone(),
-            theme::semibold(theme::TITLE),
-            Palette::of(ui).text,
-            ui.available_width(),
-        );
-        title.wrap.max_rows = 2;
-        ui.label(title).on_hover_text(&document.data.meta.title);
-        ui.add_space(if compact { 4.0 } else { 12.0 });
-        let start = document.data.meta.started_at.with_timezone(&chrono::Local);
-        let timeline = crate::speakers::timeline(document);
-        let participants = document
-            .data
-            .meta
-            .calendar_event
-            .as_ref()
-            .map(|e| e.attendees.len())
-            .unwrap_or(timeline.timeline.speakers.len());
+        let compact = compact_header;
+        if !compact {
+            ui.add_space(24.0);
+            let mut title = egui::text::LayoutJob::simple(
+                document.data.meta.title.clone(),
+                theme::semibold(theme::TITLE),
+                Palette::of(ui).text,
+                ui.available_width(),
+            );
+            title.wrap.max_rows = 2;
+            ui.label(title).on_hover_text(&document.data.meta.title);
+            ui.add_space(12.0);
+        }
         if document.template != previous_template {
             document.template_pending = !document.data.enhanced.trim().is_empty();
         }
-        ui.horizontal_wrapped(|ui| {
-            ui.label(
-                RichText::new(theme::icons::CALENDAR)
-                    .font(egui::FontId::new(
-                        16.0,
-                        egui::FontFamily::Name("icons".into()),
+        if !compact {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(theme::icons::CALENDAR)
+                        .font(egui::FontId::new(
+                            16.0,
+                            egui::FontFamily::Name("icons".into()),
+                        ))
+                        .color(Palette::of(ui).muted),
+                );
+                ui.label(
+                    RichText::new(start.format("%d.%m.%Y · %H:%M").to_string())
+                        .small()
+                        .color(Palette::of(ui).muted),
+                );
+                ui.label(
+                    RichText::new(theme::icons::USERS)
+                        .font(egui::FontId::new(
+                            16.0,
+                            egui::FontFamily::Name("icons".into()),
+                        ))
+                        .color(Palette::of(ui).muted),
+                );
+                ui.label(
+                    RichText::new(crate::wording::count(
+                        participants as u64,
+                        crate::wording::PARTICIPANTS,
                     ))
-                    .color(Palette::of(ui).muted),
-            );
-            ui.label(
-                RichText::new(start.format("%d.%m.%Y · %H:%M").to_string())
                     .small()
                     .color(Palette::of(ui).muted),
-            );
-            ui.label(
-                RichText::new(theme::icons::USERS)
-                    .font(egui::FontId::new(
-                        16.0,
-                        egui::FontFamily::Name("icons".into()),
-                    ))
-                    .color(Palette::of(ui).muted),
-            );
-            ui.label(
-                RichText::new(format!("Участники: {participants}"))
-                    .small()
-                    .color(Palette::of(ui).muted),
-            );
-            // Folder assignment keeps its existing atomic save and sync-conflict handling.
-            self.organization.meeting(ui, &mut self.state);
-        });
+                );
+                // Folder assignment keeps its existing atomic save and sync-conflict handling.
+                self.organization.meeting(ui, &mut self.state);
+            });
+        }
         ui.add_space(if compact { 4.0 } else { 16.0 });
         let Some(document) = self.state.documents.get_mut(&path) else {
             return;
@@ -1477,7 +1582,7 @@ impl NotetakerApp {
                     (Tab::Notes, "Заметки"),
                 ],
             );
-            if self.state.tab == Tab::Enhanced {
+            if !compact && self.state.tab == Tab::Enhanced {
                 ui.add_enabled_ui(can_enhance, |ui| {
                     theme::select("document-template")
                         .width(180.0)
@@ -1603,10 +1708,12 @@ impl NotetakerApp {
                 });
             });
         }
-        if document.summary_stale() && document.generation.is_none() {
+        if document.generation.is_none()
+            && let Some(notice) = document.summary_stale_notice()
+        {
             theme::callout(ui, theme::icons::INFO, |ui| {
                 ui.horizontal(|ui| {
-                    ui.weak("Заметки изменились после конспекта");
+                    ui.weak(notice);
                     enhance |= ui
                         .add_enabled(
                             can_enhance,
@@ -1673,34 +1780,24 @@ impl NotetakerApp {
             enhance |= create;
         }
         let mut images = Vec::new();
-        let mut speaker_edit = None;
-        let mut rediarize = None;
+        let minimum = if self.state.tab == Tab::Transcript {
+            self.transcript_cache
+                .rows
+                .offset(document.data.transcript.segments.len().min(3))
+                .max(96.0)
+        } else {
+            96.0
+        };
+        self.meeting_layout
+            .document_height(ui.available_height(), minimum);
+        self.transcript_cache.compact = compact;
         if self.state.tab == Tab::Transcript {
-            let unavailable = if self.state.recording.busy() {
-                Some("Доступно после завершения записи")
-            } else if !document.data.system_audio {
-                Some("Аудио этой встречи не сохранено, пересчитать собеседников нельзя")
-            } else if document.speaker_ui.recalculating {
-                Some("Пересчитываю собеседников…")
-            } else if document.saving
-                || speaker_busy
-                || document.attachments_pending > 0
-                || self.state.enhancing.is_some()
-                || self.state.settings_pending
-                || self.state.recording.assist.bookmarks_pending > 0
-            {
-                Some("Дождитесь завершения текущей операции")
-            } else {
-                None
-            };
-            let editable = !locked
-                && !document.saving
-                && !speaker_busy
-                && document.attachments_pending == 0
-                && self.state.enhancing.is_none();
-            let (count, toolbar_edit) =
-                crate::speakers::count_control(ui, document, unavailable, editable);
-            rediarize = count;
+            if !compact {
+                let (count, edit) =
+                    crate::speakers::count_control(ui, document, unavailable, editable);
+                rediarize = count;
+                speaker_edit = edit;
+            }
             speaker_edit = transcript_view(
                 ui,
                 &mut self.transcript_cache,
@@ -1713,7 +1810,7 @@ impl NotetakerApp {
                 editable,
                 global_allowed,
             )
-            .or(toolbar_edit);
+            .or(speaker_edit);
         } else if self.state.tab == Tab::Notes
             || locked
             || (document.data.enhanced.is_empty() && document.generation.is_none())
@@ -2674,7 +2771,14 @@ impl NotetakerApp {
         let reminder_bounds = ui.available_rect_before_wrap();
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(p.bg).inner_margin(
-                if ctx.content_rect().height() < 600.0 {
+                if !self.home
+                    && !self.chat_page
+                    && !self.people.active()
+                    && !self.state.tasks_open
+                    && self.meeting_layout.compact
+                {
+                    8
+                } else if ctx.content_rect().height() < 600.0 {
                     16
                 } else if ctx.content_rect().width() < 900.0 {
                     24
@@ -3793,7 +3897,8 @@ fn notes_editor(
 }
 #[derive(Default)]
 struct TranscriptCache {
-    key: Option<(Instant, notetaker_core::Revision, usize, bool, u64)>,
+    compact: bool,
+    key: Option<(Instant, notetaker_core::Revision, usize, bool, u64, bool)>,
     path: std::path::PathBuf,
     revision: u64,
     rows: crate::virtual_rows::VirtualRows,
@@ -3825,6 +3930,7 @@ impl TranscriptCache {
             document.data.transcript.segments.len(),
             live,
             document.speaker_ui.cache_revision,
+            self.compact,
         );
         let changed = self.key != Some(key) || self.path != path;
         let geometry = (width.to_bits(), zoom.to_bits());
@@ -3852,6 +3958,7 @@ impl TranscriptCache {
                         &segment.text,
                         document.data.transcript.speaker_name(&segment.speaker.0),
                         live,
+                        self.compact,
                     )),
                 ));
                 self.indices.insert(segment.id, index);
@@ -4015,6 +4122,9 @@ fn transcript_view(
                         })
                         .show(ui, |ui| {
                             ui.set_max_width(ui.available_width());
+                            if cache.compact {
+                                ui.spacing_mut().item_spacing.y = 0.0;
+                            }
                             ui.horizontal(|ui| {
                                 let name =
                                     document.data.transcript.speaker_name(&segment.speaker.0);
@@ -4111,7 +4221,7 @@ fn transcript_view(
                 scrolled = (viewport.top() - desired).abs() < 1.0;
             }
             let previous = cache.rows.offset(index + 1) - cache.rows.offset(index);
-            let measured = response.rect.height() + 16.0;
+            let measured = response.rect.height() + if cache.compact { 4.0 } else { 16.0 };
             cache.rows.set_height(index, measured);
             if (measured - previous).abs() >= 0.5 {
                 ui.ctx().request_repaint();
@@ -4134,7 +4244,11 @@ fn transcript_view(
         data.insert_temp(
             egui::Id::unique("transcript-viewport-width"),
             _viewport.inner_rect.width(),
-        )
+        );
+        data.insert_temp(
+            egui::Id::unique("transcript-viewport"),
+            _viewport.inner_rect,
+        );
     });
     if scrolled {
         document.speaker_ui.scroll_to = None;
@@ -5451,6 +5565,111 @@ mod direct_action_tests {
             .unwrap();
         app.state.poll();
         (completed, notes)
+    }
+    #[test]
+    fn compact_header_has_hysteresis_and_prompt_budget_is_stable() {
+        let mut layout = MeetingLayout::default();
+        for (height, expected) in [
+            (500.0, false),
+            (430.0, false),
+            (399.0, true),
+            (400.0, true),
+            (430.0, true),
+            (460.0, true),
+            (461.0, false),
+            (401.0, false),
+        ] {
+            layout.update(height);
+            assert_eq!(layout.compact, expected, "height={height}");
+        }
+        layout.update(300.0);
+        layout.document_height(95.0, 96.0);
+        assert!(layout.hide_prompts);
+        layout.document_height(125.0, 96.0);
+        assert!(layout.hide_prompts);
+        layout.document_height(145.0, 96.0);
+        assert!(!layout.hide_prompts);
+        layout.document_height(110.0, 96.0);
+        assert!(!layout.hide_prompts);
+    }
+    #[test]
+    fn compact_transcript_shows_three_complete_turns_at_150_percent() {
+        let (mut app, _commands, _events, _root) = fixture();
+        let path = app.state.selected.clone().unwrap();
+        let doc = app.state.documents.get_mut(&path).unwrap();
+        doc.data.transcript.segments = [
+            "Первый запуск должен быть коротким. Давайте оставим только самое нужное.",
+            "Согласен. Запись должна работать без выбора моделей. Остальное можно подключить позже.",
+            "Сделаем основной текст крупнее и проверим маленькое окно.",
+            "Календарь и AI оставим необязательными. Это поможет быстрее начать первую встречу.",
+        ].into_iter().enumerate().map(|(index,text)| notetaker_core::Segment {
+            id:uuid::Uuid::now_v7(), speaker:notetaker_core::SpeakerId(format!("speaker_{index}")),
+            channel:notetaker_core::Channel::System, start_ms:index as u64 * 10000,end_ms:index as u64 * 10000 + 9000,
+            text:text.into(), source:notetaker_core::Source::Final,edited:false,lang:None,
+        }).collect();
+        doc.changed();
+        app.state.tab = Tab::Transcript;
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        for _ in 0..8 {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(640.0, 427.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| app.frame(ui),
+            )
+            .drop_without_applying_deltas();
+        }
+        let viewport = ctx
+            .data(|data| data.get_temp::<egui::Rect>(egui::Id::unique("transcript-viewport")))
+            .unwrap();
+        for segment in app.state.documents[&path]
+            .data
+            .transcript
+            .segments
+            .iter()
+            .take(3)
+        {
+            let response = ctx
+                .read_response(transcript_text_id(&path, segment.id))
+                .unwrap();
+            assert!(
+                response.rect.top() >= viewport.top()
+                    && response.rect.bottom() <= viewport.bottom(),
+                "turn={} rect={:?} viewport={viewport:?}",
+                segment.start_ms,
+                response.rect
+            );
+        }
+    }
+    #[test]
+    fn compact_meeting_keeps_tabs_and_removes_header_template_select() {
+        let (mut app, _commands, _events, _root) = fixture();
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        for _ in 0..4 {
+            let out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(640.0, 427.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| app.frame(ui),
+            );
+            assert!(app.meeting_layout.compact);
+            for label in ["Конспект", "Транскрипт", "Заметки"] {
+                let rect = crate::test_ui::text_rect(&out.shapes, label);
+                assert!(rect.bottom() < 427.0);
+            }
+            assert!(!out.shapes.iter().any(|shape| matches!(&shape.shape,egui::epaint::Shape::Text(text) if text.galley.text().contains("Общий"))));
+            out.drop_without_applying_deltas();
+        }
     }
     #[test]
     fn summary_checkbox_click_space_failure_and_notes_use_atomic_source() {

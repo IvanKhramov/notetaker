@@ -247,6 +247,7 @@ pub struct SummaryStatus {
     template: String,
     input: String,
     stale: bool,
+    notice: Option<String>,
 }
 
 pub struct Document {
@@ -300,13 +301,30 @@ impl Document {
             return status.stale;
         }
         let stale = stamp.stale(&self.data.notes, &self.data.transcript, &self.template);
+        let notice = stale.then(|| {
+            match stamp.changed_parts(&self.data.notes, &self.data.transcript, &self.template) {
+                Some(parts) if !parts.is_empty() => {
+                    format!("Изменения после конспекта: {}", parts.join(", "))
+                }
+                _ => "Исходные данные конспекта изменились".into(),
+            }
+        });
         self.summary_status = Some(SummaryStatus {
             changed_at: self.changed_at,
             template: self.template.clone(),
             input: stamp.input.clone(),
             stale,
+            notice,
         });
         stale
+    }
+    pub fn summary_stale_notice(&mut self) -> Option<&str> {
+        if !self.summary_stale() {
+            return None;
+        }
+        self.summary_status
+            .as_ref()
+            .and_then(|status| status.notice.as_deref())
     }
     fn save(&mut self) -> Option<Save> {
         if self.saving || self.speaker_ui.busy || self.attachments_pending > 0 || !self.dirty.any()
@@ -1879,6 +1897,7 @@ impl AppState {
                     let reloaded = result.reloaded.as_deref();
                     if let Some(data) = reloaded {
                         doc.data.system_audio = data.system_audio;
+                        doc.data.audio_available = data.audio_available;
                     }
                     // Keep edits made after enqueueing the save. If they also
                     // conflict, their next save preserves them before reloading.
@@ -2160,6 +2179,7 @@ impl AppState {
                     if let Some(doc) = self.documents.get_mut(&path) {
                         doc.data.meta = data.meta;
                         doc.data.system_audio = data.system_audio;
+                        doc.data.audio_available = data.audio_available;
                         let bookmarks = doc.data.transcript.bookmarks.clone();
                         doc.data.transcript = data.transcript;
                         for bookmark in bookmarks {
@@ -3819,6 +3839,54 @@ mod tests {
             commands.try_recv().unwrap(),
             Command::Settings { .. }
         ));
+    }
+    #[test]
+    fn stale_notice_names_each_changed_part_and_legacy_data_stays_generic() {
+        let (mut state, _commands, _root, path) = fixture();
+        let doc = state.documents.get_mut(&path).unwrap();
+        let stamp = notetaker_core::SummaryStamp::new(
+            &doc.data.notes,
+            &doc.data.transcript,
+            &doc.template,
+            "summary",
+        );
+        doc.data.meta.summary = Some(stamp.clone());
+        assert_eq!(doc.summary_stale_notice(), None);
+        doc.data.notes.push_str("edited");
+        doc.changed();
+        assert_eq!(
+            doc.summary_stale_notice(),
+            Some("Изменения после конспекта: заметки")
+        );
+        doc.data.notes.clear();
+        doc.changed();
+        doc.data
+            .transcript
+            .speaker_names
+            .insert("speaker_1".into(), "Анна".into());
+        doc.changed();
+        assert_eq!(
+            doc.summary_stale_notice(),
+            Some("Изменения после конспекта: транскрипт")
+        );
+        doc.template = "standup".into();
+        assert_eq!(
+            doc.summary_stale_notice(),
+            Some("Изменения после конспекта: транскрипт, шаблон")
+        );
+        doc.data.notes.push_str("edited");
+        doc.changed();
+        assert_eq!(
+            doc.summary_stale_notice(),
+            Some("Изменения после конспекта: заметки, транскрипт, шаблон")
+        );
+        let old = serde_json::json!({"input":stamp.input,"enhanced":stamp.enhanced});
+        doc.data.meta.summary = Some(serde_json::from_value(old).unwrap());
+        doc.changed();
+        assert_eq!(
+            doc.summary_stale_notice(),
+            Some("Исходные данные конспекта изменились")
+        );
     }
     #[test]
     fn stale_chip_tracks_notes_and_template_changes_with_cached_status() {

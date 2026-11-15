@@ -31,6 +31,7 @@ mod updates;
 #[path = "updates_macos.rs"]
 mod updates;
 mod virtual_rows;
+mod wording;
 mod worker;
 
 // Installer self-check. CI runners have no OpenGL, so it must not open a window; it

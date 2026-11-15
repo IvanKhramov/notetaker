@@ -1,4 +1,5 @@
 //! People, series and digest screens. Disk and LLM work stays off the UI thread.
+use crate::wording::{self, MEETINGS, MINUTES, TASKS, TURNS, UTTERANCES, count};
 use crate::{config::Settings, state::AppState, theme, worker::Command};
 use chrono::{Datelike, Timelike};
 use eframe::egui;
@@ -109,10 +110,10 @@ impl PersonDerived {
             .collect::<Vec<_>>()
             .join(", ");
         self.statistics = format!(
-            "Время речи: {} мин · реплик: {} · ходов: {} · длинный монолог: {} с",
-            page.talk_ms / 60000,
-            page.segment_count,
-            page.turns,
+            "Время речи: {} · {} · {} · длинный монолог: {} с",
+            count(page.talk_ms / 60000, MINUTES),
+            count(page.segment_count as u64, UTTERANCES),
+            count(page.turns as u64, TURNS),
             page.longest_monologue_ms / 1000
         );
         for (target, tasks) in self
@@ -144,7 +145,7 @@ impl PersonDerived {
                             .format("%d.%m.%Y"),
                         meeting.meta.title
                     ),
-                    meeting.excerpt(),
+                    wording::short_excerpt(&meeting.summary),
                     meeting.path.clone(),
                 )
             })
@@ -423,9 +424,9 @@ impl Panel {
         ui.horizontal_wrapped(|ui| {
             if ui
                 .link(format!(
-                    "Серия: {} · {} встреч",
+                    "Серия: {} · {}",
                     series.title,
-                    series.meetings.len()
+                    count(series.meetings.len() as u64, MEETINGS)
                 ))
                 .clicked()
             {
@@ -470,7 +471,7 @@ impl Panel {
                     .collect(),
             };
             crate::theme::disclosure("С прошлой встречи").show(ui, |ui| {
-                ui.label(carry.markdown());
+                ui.label(wording::excerpt(&carry.markdown()));
                 if meta.mode == Mode::Hybrid && previous.meta.mode == Mode::Local {
                     ui.weak("Источник Локально: при вставке встреча станет Локально");
                 }
@@ -802,7 +803,7 @@ impl Panel {
                 .clicked();
         });
         if !self.brief.is_empty() {
-            ui.label(&self.brief);
+            ui.label(wording::excerpt(&self.brief));
             if crate::theme::button(ui, "Копировать сводку", crate::theme::ButtonStyle::Ghost)
                 .clicked()
             {
@@ -902,9 +903,9 @@ impl Panel {
                         if ui
                             .link(
                                 egui::RichText::new(format!(
-                                    "{} · {} встреч",
+                                    "{} · {}",
                                     series.title,
-                                    series.meetings.len()
+                                    count(series.meetings.len() as u64, MEETINGS)
                                 ))
                                 .font(theme::semibold(theme::SUBHEADING)),
                             )
@@ -922,14 +923,14 @@ impl Panel {
                                 ui.scope(|ui| {
                                     if ui
                                         .link(format!(
-                                            "{} · {} · открытых задач: {}",
+                                            "{} · {} · Открыто: {}",
                                             meeting
                                                 .meta
                                                 .started_at
                                                 .with_timezone(&chrono::Local)
                                                 .format("%d.%m.%Y %H:%M"),
                                             meeting.meta.title,
-                                            meeting.open_tasks
+                                            count(meeting.open_tasks as u64, TASKS)
                                         ))
                                         .clicked()
                                     {
@@ -1076,7 +1077,7 @@ impl Panel {
                     state.send(Command::Reveal(path.clone()));
                 }
             });
-            ui.label(&digest.markdown);
+            ui.label(wording::excerpt(&digest.markdown));
         }
     }
 }

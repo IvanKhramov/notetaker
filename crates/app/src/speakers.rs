@@ -312,13 +312,17 @@ pub fn count_control(
     ui.horizontal_wrapped(|ui| {
         let response = if unavailable.is_some() {
             ui.label(
-                egui::RichText::new(format!("Собеседников: {}", cached.remote_count))
-                    .size(12.0)
-                    .color(Palette::of(ui).tertiary),
+                egui::RichText::new(crate::wording::count(
+                    cached.remote_count as u64,
+                    crate::wording::SPEAKERS,
+                ))
+                .size(12.0)
+                .color(Palette::of(ui).tertiary),
             )
         } else {
             ui.add_enabled_ui(true, |ui| {
-                let label = format!("Собеседников: {}", cached.remote_count);
+                let label =
+                    crate::wording::count(cached.remote_count as u64, crate::wording::SPEAKERS);
                 let button = theme::styled_button(Palette::of(ui), &label, ButtonStyle::Ghost)
                     .right_text(" ");
                 let (response, _) = theme::menu_button(ui, button, |ui| {
@@ -461,7 +465,10 @@ fn selection_controls(
         if state.selected.is_empty() {
             return;
         }
-        ui.weak(format!("Выбрано реплик: {}", state.selected.len()));
+        ui.weak(format!(
+            "Выбрано: {}",
+            crate::wording::count(state.selected.len() as u64, crate::wording::UTTERANCES)
+        ));
         ui.add_enabled_ui(!state.selected.is_empty(), |ui| {
             ui.menu_button("Это говорил...", |ui| {
                 let mut assign = |ui: &mut egui::Ui, speaker: String, name: Option<String>| {

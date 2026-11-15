@@ -187,6 +187,12 @@ pub struct CaptureIssue {
 pub struct SummaryStamp {
     pub input: String,
     pub enhanced: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_hash: Option<String>,
 }
 impl SummaryStamp {
     pub fn new(notes: &str, transcript: &Transcript, template: &str, enhanced: &str) -> Self {
@@ -196,6 +202,11 @@ impl SummaryStamp {
         Self {
             input: format!("{:x}", Sha256::digest(input)),
             enhanced: Self::digest(enhanced),
+            notes_hash: Some(Self::digest(notes)),
+            transcript_hash: Some(Self::digest(
+                &serde_json::to_string(transcript).expect("serializable transcript"),
+            )),
+            template_hash: Some(Self::digest(template)),
         }
     }
     fn digest(text: &str) -> String {
@@ -208,11 +219,106 @@ impl SummaryStamp {
     pub fn stale(&self, notes: &str, transcript: &Transcript, template: &str) -> bool {
         self.input != Self::new(notes, transcript, template, "").input
     }
+    /// Component hashes explain a stale decision; only `input` decides staleness.
+    pub fn changed_parts(
+        &self,
+        notes: &str,
+        transcript: &Transcript,
+        template: &str,
+    ) -> Option<Vec<&'static str>> {
+        let (Some(old_notes), Some(old_transcript), Some(old_template)) =
+            (&self.notes_hash, &self.transcript_hash, &self.template_hash)
+        else {
+            return None;
+        };
+        let current = Self::new(notes, transcript, template, "");
+        Some(
+            [
+                (Some(old_notes), current.notes_hash.as_ref(), "заметки"),
+                (
+                    Some(old_transcript),
+                    current.transcript_hash.as_ref(),
+                    "транскрипт",
+                ),
+                (Some(old_template), current.template_hash.as_ref(), "шаблон"),
+            ]
+            .into_iter()
+            .filter_map(|(old, new, label)| (old != new).then_some(label))
+            .collect(),
+        )
+    }
 }
 
 #[cfg(test)]
 mod summary_tests {
     use super::*;
+    #[test]
+    fn component_hashes_explain_changes_but_do_not_decide_staleness() {
+        let transcript = Transcript::default();
+        let mut stamp = SummaryStamp::new("notes", &transcript, "general", "summary");
+        assert_eq!(
+            stamp.changed_parts("edited", &transcript, "general"),
+            Some(vec!["заметки"])
+        );
+        let mut edited = transcript.clone();
+        edited
+            .speaker_names
+            .insert("speaker_1".into(), "Анна".into());
+        assert_eq!(
+            stamp.changed_parts("notes", &edited, "general"),
+            Some(vec!["транскрипт"])
+        );
+        assert_eq!(
+            stamp.changed_parts("notes", &transcript, "standup"),
+            Some(vec!["шаблон"])
+        );
+        assert_eq!(
+            stamp.changed_parts("edited", &edited, "standup"),
+            Some(vec!["заметки", "транскрипт", "шаблон"])
+        );
+        stamp.notes_hash = Some("different explanatory hash".into());
+        assert!(!stamp.stale("notes", &transcript, "general"));
+        stamp.input = "different decision hash".into();
+        assert!(stamp.stale("notes", &transcript, "general"));
+    }
+    #[test]
+    fn legacy_stamps_read_without_rewriting_and_unknown_fields_are_accepted() {
+        let transcript = Transcript::default();
+        let current = SummaryStamp::new("notes", &transcript, "general", "summary");
+        let legacy = serde_json::json!({"input":current.input,"enhanced":current.enhanced});
+        let old: SummaryStamp = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(old.notes_hash, None);
+        assert_eq!(old.changed_parts("edited", &transcript, "general"), None);
+        assert_eq!(serde_json::to_value(&old).unwrap(), legacy);
+        let root = tempfile::tempdir().unwrap();
+        let library = crate::Library::open(root.path()).unwrap();
+        let mut meta = MeetingMeta::new("Совместимость", Utc::now());
+        meta.summary = Some(old);
+        let meeting = library.create_meeting(meta).unwrap();
+        let path = meeting.path().join("meta.yaml");
+        let original = std::fs::read(&path).unwrap();
+        meeting.read_meta().unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), original);
+        #[derive(Deserialize)]
+        struct LegacyStamp {
+            input: String,
+            enhanced: String,
+        }
+        #[derive(Deserialize)]
+        struct LegacyMeta {
+            summary: LegacyStamp,
+        }
+        let mut modern = meeting.read_meta().unwrap();
+        modern.summary = Some(current.clone());
+        let mut value = serde_json::to_value(modern).unwrap();
+        value["future_field"] = serde_json::json!(true);
+        value["summary"]["future_field"] = serde_json::json!(true);
+        let parsed: MeetingMeta = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(parsed.summary, Some(current.clone()));
+        let older: LegacyMeta = serde_json::from_value(value).unwrap();
+        assert_eq!(older.summary.input, current.input);
+        assert_eq!(older.summary.enhanced, current.enhanced);
+    }
     #[test]
     fn stamp_detects_edits_and_survives_metadata_roundtrip() {
         let transcript = Transcript::default();
