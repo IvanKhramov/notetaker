@@ -347,6 +347,7 @@ impl Panel {
                             ui.heading("Подключить помощников?");
                             ui.label("Необязательно. Всё можно настроить позже.");
                             crate::theme::disclosure("Календарь").show(ui, |ui| {
+                                crate::calendar_ui::setup_help(ui);
                                 ui.label("Встречи из календаря появятся на главном экране.");
                                 if state.settings.calendars.is_empty() {
                                     ui.add_enabled_ui(cfg!(any(windows, target_os = "macos")), |ui| {

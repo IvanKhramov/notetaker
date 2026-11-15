@@ -491,7 +491,10 @@ impl NotetakerApp {
                                 time,
                                 &event.link.title,
                                 meta,
-                                cfg!(any(windows, target_os = "macos")) && self.can_record(),
+                                Some((
+                                    crate::calendar_ui::action_label(event),
+                                    cfg!(any(windows, target_os = "macos")) && self.can_record(),
+                                )),
                                 false,
                             );
                             if record {
@@ -506,7 +509,7 @@ impl NotetakerApp {
                                 time,
                                 &row.meta.title,
                                 row.meta.folder.as_deref().unwrap_or(""),
-                                false,
+                                None,
                                 self.organization.selected(row.meeting.path()),
                             );
                             let response = response.on_hover_text(if row.snippet.is_empty() {
@@ -2084,10 +2087,41 @@ impl NotetakerApp {
             self.show_settings = false;
         }
     }
+    fn calendar_action(
+        &mut self,
+        ctx: &egui::Context,
+        action: crate::calendar_ui::Action,
+        event: notetaker_core::calendar::CalendarEvent,
+    ) {
+        match action {
+            crate::calendar_ui::Action::Start => {
+                self.home = false;
+                self.state.start_event(event);
+                if self.state.recording.phase == Phase::Starting {
+                    ctx.send_viewport_cmd_to(
+                        egui::ViewportId::ROOT,
+                        egui::ViewportCommand::Visible(true),
+                    );
+                    ctx.send_viewport_cmd_to(
+                        egui::ViewportId::ROOT,
+                        egui::ViewportCommand::Minimized(false),
+                    );
+                }
+            }
+            crate::calendar_ui::Action::Dismiss => self.state.dismiss_calendar_reminder(),
+            crate::calendar_ui::Action::None => {}
+        }
+    }
     fn call_notification(&mut self, ctx: &egui::Context) {
-        let Some(prompt) = self.state.call_prompt.clone() else {
+        let calendar = self.state.calendar_reminder.clone().filter(|_| {
+            ctx.input(|i| {
+                !i.viewport().focused.unwrap_or(true) || i.viewport().minimized.unwrap_or(false)
+            })
+        });
+        let prompt = self.state.call_prompt.clone();
+        if prompt.is_none() && calendar.is_none() {
             return;
-        };
+        }
         let mut accept = false;
         let mut dismiss = false;
         let mut builder = egui::ViewportBuilder::default();
@@ -2105,13 +2139,18 @@ impl NotetakerApp {
                 .with_window_level(egui::WindowLevel::AlwaysOnTop)
                 .with_active(false),
             |ui, _| {
-                let p = Palette::of(ui);
-                egui::Frame::new()
-                    .fill(p.card)
-                    .stroke(egui::Stroke::new(1.0, p.border))
-                    .corner_radius(12)
-                    .inner_margin(16)
-                    .show(ui, |ui| {
+                if let Some(event) = &calendar {
+                    match crate::calendar_ui::reminder(
+                        ui,
+                        event,
+                        cfg!(any(windows, target_os = "macos")) && self.can_record(),
+                    ) {
+                        crate::calendar_ui::Action::Start => accept = true,
+                        crate::calendar_ui::Action::Dismiss => dismiss = true,
+                        crate::calendar_ui::Action::None => {}
+                    }
+                } else if let Some(prompt) = &prompt {
+                    theme::bar(Palette::of(ui)).show(ui, |ui| {
                         ui.set_width(318.0);
                         let (title, question, button) = match &prompt {
                             CallPrompt::Start {
@@ -2149,6 +2188,7 @@ impl NotetakerApp {
                                 theme::button(ui, "Не сейчас", ButtonStyle::Secondary).clicked();
                         });
                     });
+                }
                 if ui.input(|input| input.viewport().close_requested()) {
                     dismiss = true;
                     ui.ctx()
@@ -2156,7 +2196,19 @@ impl NotetakerApp {
                 }
             },
         );
-        if accept {
+        if let Some(event) = calendar {
+            self.calendar_action(
+                ctx,
+                if accept {
+                    crate::calendar_ui::Action::Start
+                } else if dismiss {
+                    crate::calendar_ui::Action::Dismiss
+                } else {
+                    crate::calendar_ui::Action::None
+                },
+                event,
+            );
+        } else if accept {
             self.state.accept_call();
         } else if dismiss {
             self.state.dismiss_call();
@@ -2240,6 +2292,12 @@ impl NotetakerApp {
             }
         }
         if let Some(desktop) = &mut self.desktop {
+            if desktop
+                .set_reminder(self.state.calendar_reminder.is_some())
+                .is_err()
+            {
+                notetaker_runtime::diagnostics::event("tray reminder update failed");
+            }
             if desktop.set_recording(self.state.recording.busy()).is_err() {
                 notetaker_runtime::diagnostics::event("tray icon update failed");
             }
@@ -2336,7 +2394,10 @@ impl eframe::App for NotetakerApp {
         if self.state.can_exit() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-        if self.state.recording.busy() || self.state.call_prompt.is_some() {
+        if self.state.recording.busy()
+            || self.state.call_prompt.is_some()
+            || self.state.calendar_reminder.is_some()
+        {
             // Allow the UI to create the indicator when a hotkey starts a
             // recording while the root window is hidden.
             ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaintWhileHidden);
@@ -2457,6 +2518,22 @@ impl NotetakerApp {
             if narrow && self.nav_key() != before {
                 self.sidebar_open = false;
             }
+        }
+        if let Some(event) = self.state.calendar_reminder.clone() {
+            egui::Panel::top("calendar-reminder")
+                .frame(
+                    egui::Frame::new()
+                        .fill(p.bg)
+                        .inner_margin(egui::Margin::symmetric(24, 8)),
+                )
+                .show(ui, |ui| {
+                    let action = crate::calendar_ui::reminder(
+                        ui,
+                        &event,
+                        cfg!(any(windows, target_os = "macos")) && self.can_record(),
+                    );
+                    self.calendar_action(&ctx, action, event.clone());
+                });
         }
         if self.show_settings {
             self.toast_anchor = Some(egui::pos2(
@@ -2629,20 +2706,23 @@ fn next_state_wake(state: &AppState, now: Instant) -> Option<Duration> {
                 .calendar_checked
                 .map(|at| (at + Duration::from_secs(600)).saturating_duration_since(now)),
         );
-        let utc = chrono::Utc::now();
-        for event in &state.calendar_events {
-            for time in [
-                event.start - chrono::Duration::minutes(5),
-                event.start,
-                event.end + chrono::Duration::seconds(1),
-            ] {
-                if time > utc
-                    && let Ok(delay) = (time - utc).to_std()
-                {
-                    deadlines.push(delay);
-                }
+    }
+    let utc = chrono::Utc::now();
+    for event in &state.calendar_events {
+        for time in [
+            event.start - chrono::Duration::minutes(5),
+            event.start,
+            event.end,
+        ] {
+            if time > utc
+                && let Ok(delay) = (time - utc).to_std()
+            {
+                deadlines.push(delay);
             }
         }
+    }
+    if state.calendar_reminder.is_some() {
+        deadlines.push(Duration::from_secs(30));
     }
     deadlines
         .into_iter()

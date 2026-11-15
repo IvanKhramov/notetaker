@@ -806,6 +806,9 @@ impl AppState {
             self.title.trim().to_owned()
         };
         self.call_prompt = None;
+        if let Some(event) = &event {
+            self.recording_event_started(event);
+        }
         self.recording = Recording {
             phase: Phase::Starting,
             process_id: self.process_id,
@@ -819,6 +822,43 @@ impl AppState {
             process_id: self.process_id,
             app,
         }));
+    }
+    pub fn dismiss_calendar_reminder(&mut self) {
+        if let Some(event) = self.calendar_reminder.take() {
+            self.reminded_events.insert((event.link.uid, event.start));
+        }
+    }
+    pub fn update_calendar_reminder(&mut self, now: chrono::DateTime<chrono::Utc>) {
+        if self
+            .calendar_reminder
+            .as_ref()
+            .is_some_and(|event| event.end <= now)
+        {
+            self.calendar_reminder = None;
+        }
+        if self.calendar_reminder.is_none() {
+            for event in &self.calendar_events {
+                if crate::calendar_ui::eligible(event, now)
+                    && self
+                        .reminded_events
+                        .insert((event.link.uid.clone(), event.start))
+                {
+                    self.calendar_reminder = Some(event.clone());
+                    break;
+                }
+            }
+        }
+    }
+    fn recording_event_started(&mut self, event: &notetaker_core::calendar::CalendarEvent) {
+        self.reminded_events
+            .insert((event.link.uid.clone(), event.start));
+        if self
+            .calendar_reminder
+            .as_ref()
+            .is_some_and(|r| r.link.uid == event.link.uid && r.start == event.start)
+        {
+            self.calendar_reminder = None;
+        }
     }
     pub fn start_event(&mut self, event: notetaker_core::calendar::CalendarEvent) {
         if !self.ready
@@ -835,6 +875,8 @@ impl AppState {
         {
             return;
         }
+        let call = crate::calendar_ui::call_link(&event);
+        let has_call = event.link.call_url.is_some();
         self.title.clear();
         self.prefilled_title = None;
         self.selected_event = Some(event);
@@ -842,6 +884,16 @@ impl AppState {
         self.record_mode = self.settings.mode;
         self.record_mode_edited = false;
         self.start_recording();
+        if self.recording.phase == Phase::Starting {
+            if let Some(url) = call {
+                self.send(Command::OpenCall(url));
+            } else if has_call {
+                self.notices.push((
+                    crate::theme::ToastLevel::Warning,
+                    "Ссылка звонка не разрешена. Запись продолжается.".into(),
+                ));
+            }
+        }
     }
     pub fn refresh_tasks(&mut self) {
         if self.tasks_busy || !self.ready || self.settings_pending {
@@ -1394,28 +1446,7 @@ impl AppState {
         self.poll_live();
         crate::quickstart::auto_download(self);
         self.poll_detection();
-        let now = chrono::Utc::now();
-        if self
-            .calendar_reminder
-            .as_ref()
-            .is_some_and(|event| event.start < now)
-        {
-            self.calendar_reminder = None;
-        }
-        if self.calendar_reminder.is_none() {
-            for event in &self.calendar_events {
-                if !event.all_day
-                    && event.start > now
-                    && event.start <= now + chrono::Duration::minutes(5)
-                    && self
-                        .reminded_events
-                        .insert((event.link.uid.clone(), event.start))
-                {
-                    self.calendar_reminder = Some(event.clone());
-                    break;
-                }
-            }
-        }
+        self.update_calendar_reminder(chrono::Utc::now());
         if self.ready
             && !self.settings.calendars.is_empty()
             && !self.exit_requested
@@ -1918,6 +1949,14 @@ impl AppState {
                     }
                 }
                 self.refresh();
+            }
+            Event::CallOpened(ok) => {
+                if !ok {
+                    self.notices.push((
+                        crate::theme::ToastLevel::Warning,
+                        "Не удалось открыть звонок. Запись продолжается.".into(),
+                    ));
+                }
             }
             Event::Revealed(result) => {
                 if let Err(error) = result {
@@ -3953,6 +3992,7 @@ mod calendar_tests {
     #[test]
     fn calendar_reminds_once_per_occurrence() {
         let (mut state, _) = fixture();
+        state.calendar_events[0].link.call_url = Some("https://meet.google.com/example".into());
         state.calendar_events[0].start = chrono::Utc::now() + chrono::Duration::minutes(4);
         state.poll();
         assert!(state.calendar_reminder.is_some());
@@ -3962,6 +4002,109 @@ mod calendar_tests {
         state.calendar_events[0].start += chrono::Duration::seconds(1);
         state.poll();
         assert!(state.calendar_reminder.is_some());
+    }
+    #[test]
+    fn reminder_window_dismissal_end_and_immediate_entry_are_consistent() {
+        let (mut state, commands) = fixture();
+        let now = chrono::Utc::now();
+        state.calendar_events[0].start = now + chrono::Duration::minutes(6);
+        state.calendar_events[0].link.call_url = Some("https://meet.google.com/example".into());
+        state.update_calendar_reminder(now);
+        assert!(state.calendar_reminder.is_none());
+        state.calendar_events[0].start = now + chrono::Duration::minutes(3);
+        state.calendar_events[0].all_day = true;
+        state.update_calendar_reminder(now);
+        assert!(state.calendar_reminder.is_none());
+        state.calendar_events[0].all_day = false;
+        let link = state.calendar_events[0].link.call_url.take();
+        state.calendar_events[0]
+            .link
+            .attendees
+            .push(notetaker_core::calendar::Attendee {
+                name: "Один участник".into(),
+                email: String::new(),
+            });
+        state.update_calendar_reminder(now);
+        assert!(state.calendar_reminder.is_none());
+        state.calendar_events[0].link.call_url = link;
+        state.update_calendar_reminder(now);
+        assert!(state.calendar_reminder.is_some());
+        state.dismiss_calendar_reminder();
+        state.update_calendar_reminder(now);
+        assert!(state.calendar_reminder.is_none());
+        state.calendar_events[0].start += chrono::Duration::seconds(1);
+        state.update_calendar_reminder(now);
+        assert!(state.calendar_reminder.is_some());
+        let event = state.calendar_reminder.clone().unwrap();
+        let ctx = eframe::egui::Context::default();
+        crate::theme::install(&ctx);
+        crate::test_ui::click(
+            &ctx,
+            &mut |ui| {
+                if crate::calendar_ui::reminder(ui, &event, true)
+                    == crate::calendar_ui::Action::Start
+                {
+                    state.start_event(event.clone());
+                }
+            },
+            "Войти и записать",
+        );
+        assert!(state.calendar_reminder.is_none());
+        let mut started = false;
+        let mut opened = false;
+        for command in commands.try_iter() {
+            match command {
+                Command::Record(request) => {
+                    assert_eq!(request.event.unwrap().start, event.start);
+                    started = true;
+                }
+                Command::OpenCall(url) => {
+                    assert_eq!(url, "https://meet.google.com/example");
+                    opened = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(started && opened);
+        state.update_calendar_reminder(now);
+        assert!(state.calendar_reminder.is_none());
+        state.recording.phase = Phase::Idle;
+        let mut event = event.clone();
+        event.start += chrono::Duration::minutes(1);
+        event.link.call_url = Some("https://evil.invalid/call".into());
+        state.start_event(event.clone());
+        assert!(
+            commands
+                .try_iter()
+                .all(|cmd| !matches!(cmd, Command::OpenCall(_)))
+        );
+        state.apply(Event::CallOpened(false));
+        assert!(
+            state
+                .notices
+                .iter()
+                .any(|(_, text)| text.contains("Не удалось открыть звонок"))
+        );
+        assert!(state.recording.busy());
+        event.link.call_url = None;
+        event.link.uid = "no-link".into();
+        event.link.attendees = vec![
+            notetaker_core::calendar::Attendee {
+                name: "А".into(),
+                email: "".into(),
+            },
+            notetaker_core::calendar::Attendee {
+                name: "Б".into(),
+                email: "".into(),
+            },
+        ];
+        state.calendar_events = vec![event.clone()];
+        state.calendar_reminder = None;
+        state.update_calendar_reminder(now);
+        assert_eq!(crate::calendar_ui::action_label(&event), "Начать запись");
+        assert!(state.calendar_reminder.is_some());
+        state.update_calendar_reminder(event.end);
+        assert!(state.calendar_reminder.is_none());
     }
     #[test]
     fn manual_call_prefill_and_explicit_event_preserve_title_rules() {

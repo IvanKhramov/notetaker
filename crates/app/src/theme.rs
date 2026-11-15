@@ -2179,7 +2179,7 @@ pub fn meeting_row(
     time: &str,
     title: &str,
     meta: &str,
-    action: bool,
+    action: Option<(&str, bool)>,
     selected: bool,
 ) -> (egui::Response, bool) {
     let p = Palette::of(ui);
@@ -2196,7 +2196,13 @@ pub fn meeting_row(
         p.muted,
     );
     let mut record = false;
-    let action_width = if action { 100.0 } else { 0.0 };
+    let action_width = action.map_or(0.0, |(label, _)| {
+        ui.painter()
+            .layout_no_wrap(label.into(), medium(BUTTON), p.text)
+            .size()
+            .x
+            + 32.0
+    });
     let meta_width = if meta.is_empty() {
         0.0
     } else {
@@ -2229,20 +2235,20 @@ pub fn meeting_row(
             p.tertiary,
         );
     }
-    if action {
+    if let Some((label, enabled)) = action {
         ui.scope_builder(
             egui::UiBuilder::new()
                 .id_salt(id)
                 .max_rect(egui::Rect::from_min_size(
-                    rect.right_center() - egui::vec2(96.0, 14.0),
-                    egui::vec2(96.0, 28.0),
+                    rect.right_center() - egui::vec2(action_width, 14.0),
+                    egui::vec2(action_width, 28.0),
                 ))
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
             |ui| {
                 record = ui
-                    .add(
-                        styled_button(p, "Записать", ButtonStyle::Ghost)
-                            .min_size(egui::vec2(0.0, 28.0)),
+                    .add_enabled(
+                        enabled,
+                        styled_button(p, label, ButtonStyle::Ghost).min_size(egui::vec2(0.0, 28.0)),
                     )
                     .clicked();
             },
