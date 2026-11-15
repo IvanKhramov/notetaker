@@ -2602,6 +2602,8 @@ mod tests {
             operation: crate::ai::Operation::Save,
             provider: provider.clone(),
             key: String::new(),
+            cancel: Default::default(),
+            verified: false,
         }));
         assert!(commands.try_recv().is_err());
         state.recording.phase = Phase::Idle;

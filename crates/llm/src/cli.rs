@@ -397,39 +397,12 @@ impl Provider for CliProvider {
 }
 
 /// The sign-in arguments of each CLI. Both open the browser themselves.
-/// macOS only tells the user what to run, so it has no caller there.
-#[cfg(any(not(target_os = "macos"), test))]
 fn login_args(kind: ProviderKind) -> &'static [&'static str] {
     if kind == ProviderKind::CodexCli {
         &["login"]
     } else {
         &["auth", "login"]
     }
-}
-
-/// The command line for `cmd.exe /D /S /K`: the window stays open after the
-/// CLI exits, so a failed sign-in leaves its error on the screen instead of
-/// a console that flashes and disappears. With `/S` cmd strips the outer
-/// quotes and runs the rest as written, which keeps spaces and `&` in the
-/// path literal.
-#[cfg(any(windows, test))]
-fn login_line(binary: &Path, kind: ProviderKind) -> String {
-    format!(
-        "\"\"{}\" {}\"",
-        binary.display(),
-        login_args(kind).join(" ")
-    )
-}
-
-#[cfg(windows)]
-fn login_command(binary: &Path, kind: ProviderKind) -> Command {
-    use std::os::windows::process::CommandExt;
-    let mut command = Command::new("cmd.exe");
-    command
-        .raw_arg("/D /S /K")
-        .raw_arg(login_line(binary, kind))
-        .creation_flags(0x00000010); // CREATE_NEW_CONSOLE
-    command
 }
 
 /// The vendor's own installer script. Both install into the user's profile and
@@ -528,35 +501,59 @@ pub fn install_cli(kind: ProviderKind) -> Result<()> {
     Ok(())
 }
 
-pub fn open_login(kind: ProviderKind) -> Result<()> {
+/// Signs in through the CLI's own command. No console window: the CLI opens
+/// the browser and waits for it, and the caller shows the wait and can cancel.
+pub fn login(kind: ProviderKind, cancel: &Cancellation) -> Result<()> {
     let binary = find_cli(kind).context("CLI не установлен")?;
-    #[cfg(windows)]
+    let mut command = background(&binary);
+    command.args(login_args(kind));
+    wait_login(command, Duration::from_secs(300), cancel)
+}
+
+fn wait_login(mut command: Command, timeout: Duration, cancel: &Cancellation) -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let output_path = dir.path().join("login.txt");
+    let output = File::create(&output_path)?;
+    command.stdout(output.try_clone()?).stderr(output);
+    #[cfg(unix)]
     {
-        login_command(&binary, kind)
-            .spawn()
-            .context("Не удалось открыть окно входа")?;
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
     }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = binary;
+    let mut child = command
+        .spawn()
+        .context("Не удалось запустить вход; проверьте установку CLI")?;
+    let started = Instant::now();
+    let status = loop {
+        if cancel.cancelled() {
+            terminate(&mut child);
+            anyhow::bail!("Вход отменён");
+        }
+        if started.elapsed() >= timeout {
+            terminate(&mut child);
+            anyhow::bail!("Вход не завершён за 5 минут. Повторите попытку");
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(error) => {
+                terminate(&mut child);
+                return Err(error).context("Не удалось дождаться входа");
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    };
+    if !status.success() {
+        let said = failure_tail(&fs::read_to_string(&output_path).unwrap_or_default());
         anyhow::bail!(
-            "macOS: откройте Terminal и выполните {}. Затем повторите проверку подключения в notetaker.",
-            if kind == ProviderKind::ClaudeCli {
-                "claude auth login"
+            "Вход не выполнен.{}",
+            if said.is_empty() {
+                String::new()
             } else {
-                "codex login"
+                format!(" Ответ CLI: {said}")
             }
         );
     }
-    #[cfg(not(any(windows, target_os = "macos")))]
-    {
-        let mut command = Command::new("x-terminal-emulator");
-        command.arg("-e").arg(binary).args(login_args(kind));
-        command
-            .spawn()
-            .context("Не удалось открыть терминал; выполните claude или codex login вручную")?;
-    }
-    #[cfg(not(target_os = "macos"))]
     Ok(())
 }
 
@@ -815,15 +812,38 @@ mod login_tests {
         assert_eq!(failure_tail(&"я".repeat(1000)).chars().count(), 300);
     }
     #[test]
-    fn login_keeps_the_window_open_and_quotes_the_path_for_cmd() {
-        let path = Path::new(r"C:\Users\A & B\cli\tool.exe");
-        assert_eq!(
-            login_line(path, ProviderKind::CodexCli),
-            r#"""C:\Users\A & B\cli\tool.exe" login""#
-        );
-        assert_eq!(
-            login_line(path, ProviderKind::ClaudeCli),
-            r#"""C:\Users\A & B\cli\tool.exe" auth login""#
-        );
+    fn login_arguments_are_the_sign_in_command_of_each_cli() {
+        assert_eq!(login_args(ProviderKind::CodexCli), ["login"]);
+        assert_eq!(login_args(ProviderKind::ClaudeCli), ["auth", "login"]);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn login_wait_reports_the_cli_error_and_stops_on_cancel_and_timeout() {
+        let shell = |script: &str| {
+            let mut command = background(Path::new("/bin/sh"));
+            command.args(["-c", script]);
+            command
+        };
+        let long = Duration::from_secs(30);
+        assert!(wait_login(shell("exit 0"), long, &Cancellation::default()).is_ok());
+        let error = wait_login(
+            shell("echo first; echo browser is missing >&2; exit 3"),
+            long,
+            &Cancellation::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("browser is missing"), "{error}");
+        let cancel = Cancellation::default();
+        cancel.cancel();
+        let error = wait_login(shell("sleep 30"), long, &cancel).unwrap_err();
+        assert_eq!(error.to_string(), "Вход отменён");
+        let error = wait_login(
+            shell("sleep 30"),
+            Duration::from_millis(200),
+            &Cancellation::default(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("5 минут"));
     }
 }

@@ -24,6 +24,11 @@ pub struct Action {
     pub operation: Operation,
     pub provider: ProviderSettings,
     pub key: String,
+    /// Stops a sign-in that is waiting for the browser.
+    pub cancel: Cancellation,
+    /// The connection was checked since its last change, so making it the
+    /// default does not need another request to the model.
+    pub verified: bool,
 }
 pub struct Response {
     pub index: usize,
@@ -43,6 +48,10 @@ struct Card {
     installed: bool,
     /// The vendor installer is running for this card.
     installing: bool,
+    /// A sign-in is waiting for the browser; `cancel` stops it.
+    signing_in: bool,
+    cancel: Cancellation,
+    verified: bool,
     edited: Option<Instant>,
     key_editing: bool,
     save_error: bool,
@@ -95,6 +104,9 @@ impl Default for Connections {
             save_error: false,
             installed: cli.is_none_or(|kind| notetaker_llm::find_cli(kind).is_some()),
             installing: false,
+            signing_in: false,
+            cancel: Cancellation::default(),
+            verified: false,
             key: String::new(),
             models: Vec::new(),
             status: "Не подключено".into(),
@@ -148,6 +160,8 @@ impl Connections {
                         operation: Operation::Save,
                         provider: card.provider.clone(),
                         key: card.key.clone(),
+                        cancel: Cancellation::default(),
+                        verified: false,
                     });
                 }
                 Err(error) => {
@@ -184,6 +198,14 @@ impl Connections {
         let card = &mut self.cards[response.index];
         card.busy = false;
         card.installing = false;
+        card.signing_in = false;
+        // A saved change is unchecked again; a failed call proves nothing.
+        card.verified = response.result.is_ok()
+            && match response.operation {
+                Operation::Check | Operation::Default | Operation::Login => true,
+                Operation::Models => card.verified,
+                Operation::Save | Operation::Install => false,
+            };
         card.installed = card
             .cli
             .is_none_or(|kind| notetaker_llm::find_cli(kind).is_some());
@@ -197,12 +219,11 @@ impl Connections {
                     card.status = "Установлено. Теперь войдите в подписку".into();
                     return;
                 }
-                if response.operation == Operation::Login {
-                    card.status = "Не подключено. После входа нажмите Проверить".into();
-                    return;
-                }
                 card.status = if response.operation == Operation::Save {
                     "Сохранено · соединение не проверено".into()
+                } else if response.operation == Operation::Login {
+                    // The latency of a sign-in is the user's time in the browser.
+                    "Подключено".into()
                 } else {
                     format!("Подключено · {} мс", response.latency.as_millis())
                 };
@@ -278,18 +299,20 @@ impl Connections {
                     operation = Some(Operation::Default);
                 }
             });
-            if card.busy {
-                ui.spinner();
-            }
+            busy_row(ui, card);
             if let Some(operation) = operation {
                 card.busy = true;
                 card.installing = operation == Operation::Install;
+                card.signing_in = operation == Operation::Login;
+                card.cancel = Cancellation::default();
                 card.edited = None;
                 actions.push(Action {
                     index: *selected,
                     operation,
                     provider: card.provider.clone(),
                     key: card.key.clone(),
+                    cancel: card.cancel.clone(),
+                    verified: card.verified,
                 });
             }
         }
@@ -374,12 +397,14 @@ impl Connections {
                     card.edited = Some(Instant::now() + if typing { Duration::from_millis(700) } else { Duration::ZERO });
                 }
                 if key_blur || (blur && card.edited.is_some()) { card.edited = Some(Instant::now()); }
-                if card.busy { ui.spinner(); }
+                busy_row(ui, card);
                 if let Some(operation) = operation {
                     card.busy = true;
                     card.installing = operation == Operation::Install;
+                    card.signing_in = operation == Operation::Login;
+                    card.cancel = Cancellation::default();
                     if matches!(operation, Operation::Save | Operation::Default) { card.edited = None; }
-                    actions.push(Action { index, operation, provider: card.provider.clone(), key: if card.key_editing { String::new() } else { card.key.clone() } });
+                    actions.push(Action { index, operation, provider: card.provider.clone(), key: if card.key_editing { String::new() } else { card.key.clone() }, cancel: card.cancel.clone(), verified: card.verified });
                 }
             }); }); });
         }
@@ -418,6 +443,24 @@ fn status_line(ui: &mut egui::Ui, status: &str) {
 fn note(ui: &mut egui::Ui, text: &str) {
     let p = crate::theme::Palette::of(ui);
     ui.add(egui::Label::new(egui::RichText::new(text).size(12.0).color(p.muted)).wrap());
+}
+/// What a running operation is doing, and the way out of a sign-in.
+fn busy_row(ui: &mut egui::Ui, card: &Card) {
+    if !card.busy || card.installing {
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.spinner();
+        if card.signing_in {
+            ui.label("Жду вход в браузере…");
+            if crate::theme::button(ui, "Отмена", crate::theme::ButtonStyle::Ghost).clicked()
+            {
+                card.cancel.cancel();
+            }
+        } else {
+            ui.label("Проверяю подключение…");
+        }
+    });
 }
 /// What a subscription needs before it can be used: its CLI, then a login.
 fn cli_setup(
@@ -504,9 +547,9 @@ fn cli_setup(
         note(
             ui,
             if claude {
-                "Откроется окно входа и браузер. Войдите в аккаунт Claude, вернитесь и нажмите «Проверить». Если вход не удался, причина останется в окне."
+                "Откроется браузер. Войдите в аккаунт Claude, подключение проверится само."
             } else {
-                "Откроется окно входа и браузер. Войдите в ChatGPT, вернитесь и нажмите «Проверить». Если вход не удался, причина останется в окне."
+                "Откроется браузер. Войдите в ChatGPT, подключение проверится само."
             },
         );
         if ui
@@ -543,15 +586,20 @@ pub fn execute(mut action: Action) -> Response {
             return Ok(Vec::new());
         }
         if action.operation == Operation::Login {
-            notetaker_llm::open_login(config.kind)?;
-            return Ok(Vec::new());
+            // Falls through to the check below: a finished sign-in is verified at once.
+            notetaker_llm::login(config.kind, &action.cancel)?;
         }
         if config.kind.is_cli() {
+            if action.operation == Operation::Default && action.verified {
+                return Ok(Vec::new());
+            }
             let provider = CliProvider::new(config, Mode::Hybrid, Cancellation::default())?;
             provider.check_login()?;
             // Codex login status is local, so also verify model access with a tiny request.
-            if matches!(action.operation, Operation::Check | Operation::Default)
-                && action.provider.kind == "codex-cli"
+            if matches!(
+                action.operation,
+                Operation::Check | Operation::Default | Operation::Login
+            ) && action.provider.kind == "codex-cli"
             {
                 provider.check_completion()?;
             }
