@@ -1233,7 +1233,7 @@ impl NotetakerApp {
                                             ui,
                                             &mut document.template,
                                             name.clone(),
-                                            name,
+                                            template_name(&self.state.settings.library, name),
                                         )
                                         .clicked()
                                         {
@@ -1480,11 +1480,19 @@ impl NotetakerApp {
             if self.state.tab == Tab::Enhanced {
                 ui.add_enabled_ui(can_enhance, |ui| {
                     theme::select("document-template")
-                        .width(160.0)
-                        .selected_text(format!("Шаблон: {}", document.template))
+                        .width(180.0)
+                        .selected_text(template_value(
+                            ui,
+                            &template_name(&self.state.settings.library, &document.template),
+                        ))
                         .show_ui(ui, |ui| {
                             for name in &self.state.templates {
-                                theme::select_value(ui, &mut document.template, name.clone(), name);
+                                theme::select_value(
+                                    ui,
+                                    &mut document.template,
+                                    name.clone(),
+                                    template_name(&self.state.settings.library, name),
+                                );
                             }
                         });
                 });
@@ -1499,7 +1507,7 @@ impl NotetakerApp {
         {
             theme::callout(ui, theme::icons::FILE_TEXT, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(format!("Шаблон: {}", document.template));
+                    ui.label("Конспект создан по другому шаблону");
                     match readiness.as_ref().expect("open document") {
                         Ok(()) => {
                             enhance |= ui
@@ -1507,7 +1515,18 @@ impl NotetakerApp {
                                     can_enhance,
                                     theme::styled_button(
                                         Palette::of(ui),
-                                        "Пересоздать конспект",
+                                        if ui.ctx().content_rect().width() < 900.0 {
+                                            "Пересоздать".into()
+                                        } else {
+                                            format!(
+                                                "Пересоздать по шаблону «{}»",
+                                                template_name(
+                                                    &self.state.settings.library,
+                                                    &document.template
+                                                )
+                                            )
+                                        }
+                                        .as_str(),
                                         ButtonStyle::Primary,
                                     ),
                                 )
@@ -2869,6 +2888,35 @@ fn call_platform(url: &str) -> &'static str {
     }
 }
 
+pub(crate) fn template_name(root: &std::path::Path, id: &str) -> String {
+    match notetaker_llm::Template::load(root, id) {
+        Ok(template) => template.name,
+        Err(_) => "Ошибка чтения шаблона".into(),
+    }
+}
+fn template_value(ui: &egui::Ui, name: &str) -> egui::text::LayoutJob {
+    let p = Palette::of(ui);
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        theme::icons::FILE_TEXT,
+        0.0,
+        egui::TextFormat {
+            font_id: egui::FontId::new(theme::BUTTON, egui::FontFamily::Name("icons".into())),
+            color: p.muted,
+            ..Default::default()
+        },
+    );
+    job.append(
+        &format!(" {name}"),
+        0.0,
+        egui::TextFormat {
+            font_id: theme::medium(theme::BUTTON),
+            color: p.text,
+            ..Default::default()
+        },
+    );
+    job
+}
 fn note_line_key(line: &str) -> &str {
     let line = line
         .trim()
@@ -3138,12 +3186,19 @@ fn enhanced_document(
                                 );
                                 note_marker(ui.painter(), rect.center(), *task, ink);
                             }
-                            markdown_preview(ui, cache, markdown, viewer, false);
+                            markdown_preview(
+                                ui,
+                                cache,
+                                markdown,
+                                viewer,
+                                false,
+                                *task == Some(true),
+                            );
                         });
                     }
                     DocumentBlockKind::Markdown(markdown) => {
                         if let Some(action) =
-                            markdown_preview(ui, cache, markdown, viewer, can_toggle)
+                            markdown_preview(ui, cache, markdown, viewer, can_toggle, false)
                         {
                             toggle = Some(action);
                         }
@@ -3322,6 +3377,37 @@ fn attachment_strip(ui: &mut egui::Ui, images: &[String], viewer: &mut Option<St
     });
 }
 
+fn completed_markdown(text: &str) -> String {
+    let completed: std::collections::BTreeSet<_> =
+        notetaker_core::parse_tasks(text, chrono::Utc::now().date_naive())
+            .iter()
+            .filter(|task| task.completed)
+            .map(|task| task.line)
+            .collect();
+    text.split_inclusive('\n')
+        .enumerate()
+        .map(|(index, line)| {
+            if completed.contains(&(index + 1)) {
+                let offset = ["[x]", "[X]"]
+                    .into_iter()
+                    .filter_map(|marker| line.find(marker))
+                    .min()
+                    .expect("parsed completed marker")
+                    + 3;
+                let body = line[offset..].trim_start_matches(' ');
+                let end = body.trim_end_matches(['\r', '\n']);
+                format!(
+                    "{}~~{}~~{}",
+                    &line[..line.len() - body.len()],
+                    end,
+                    &body[end.len()..]
+                )
+            } else {
+                line.into()
+            }
+        })
+        .collect()
+}
 struct PreparedMarkdown {
     markdown: String,
     task_sources: Vec<(bool, usize)>,
@@ -3335,7 +3421,7 @@ impl PreparedMarkdown {
             .into_iter()
             .map(|(range, _)| text[range].to_owned())
             .collect();
-        let (markdown, uris) = preview_markdown(text, path);
+        let (markdown, uris) = preview_markdown(&completed_markdown(text), path);
         Self {
             markdown,
             task_sources: Vec::new(),
@@ -3350,6 +3436,7 @@ fn markdown_preview(
     prepared: &PreparedMarkdown,
     viewer: &mut Option<String>,
     can_toggle: bool,
+    completed: bool,
 ) -> Option<(bool, usize, bool)> {
     let clicked = std::rc::Rc::new(std::cell::Cell::new(None));
     let selected = clicked.clone();
@@ -3384,11 +3471,13 @@ fn markdown_preview(
     };
     let mut text = prepared.markdown.clone();
     let markdown_viewer = CommonMarkViewer::new().render_html_fn(Some(&render));
-    if can_toggle && !prepared.task_sources.is_empty() {
-        markdown_viewer.show_mut(ui, cache, &mut text);
-    } else {
-        markdown_viewer.show(ui, cache, &prepared.markdown);
-    }
+    theme::muted_strikethrough(ui, completed, |ui| {
+        if can_toggle && !prepared.task_sources.is_empty() {
+            markdown_viewer.show_mut(ui, cache, &mut text);
+        } else {
+            markdown_viewer.show(ui, cache, &prepared.markdown);
+        }
+    });
     if let Some(index) = clicked.get() {
         *viewer = prepared.uris[index].clone();
     }
@@ -5380,8 +5469,12 @@ mod direct_action_tests {
         let (mut app, commands, _events, _root) = fixture();
         let ctx = egui::Context::default();
         theme::install(&ctx);
-        crate::test_ui::click(&ctx, &mut |ui| app.frame(ui), "Шаблон: general");
-        crate::test_ui::click(&ctx, &mut |ui| app.frame(ui), "standup");
+        crate::test_ui::click(
+            &ctx,
+            &mut |ui| app.frame(ui),
+            &format!("{} Общий", theme::icons::FILE_TEXT),
+        );
+        crate::test_ui::click(&ctx, &mut |ui| app.frame(ui), "Стендап");
         let path = app.state.selected.clone().unwrap();
         assert!(app.state.documents[&path].template_pending);
         crate::test_ui::click(&ctx, &mut |ui| app.frame(ui), "Не сейчас");
@@ -5392,7 +5485,11 @@ mod direct_action_tests {
         assert!(output.shapes.iter().any(|shape|matches!(&shape.shape,egui::epaint::Shape::Text(text) if text.galley.text().contains("loopback"))));
         output.drop_without_applying_deltas();
         app.state.llm.providers[0].base_url = "http://localhost:11434/v1".into();
-        crate::test_ui::click(&ctx, &mut |ui| app.frame(ui), "Пересоздать конспект");
+        crate::test_ui::click(
+            &ctx,
+            &mut |ui| app.frame(ui),
+            "Пересоздать по шаблону «Стендап»",
+        );
         assert!(app.confirm_regenerate);
         crate::test_ui::click(&ctx, &mut |ui| app.frame(ui), "Пересоздать");
         assert!(
@@ -5436,9 +5533,17 @@ mod direct_action_tests {
             &doc.template,
             &doc.data.enhanced,
         ));
-        crate::test_ui::click(&ctx, &mut |ui| app.frame(ui), "Шаблон: general");
-        crate::test_ui::click(&ctx, &mut |ui| app.frame(ui), "standup");
-        crate::test_ui::click(&ctx, &mut |ui| app.frame(ui), "Пересоздать конспект");
+        crate::test_ui::click(
+            &ctx,
+            &mut |ui| app.frame(ui),
+            &format!("{} Общий", theme::icons::FILE_TEXT),
+        );
+        crate::test_ui::click(&ctx, &mut |ui| app.frame(ui), "Стендап");
+        crate::test_ui::click(
+            &ctx,
+            &mut |ui| app.frame(ui),
+            "Пересоздать по шаблону «Стендап»",
+        );
         assert!(!app.confirm_regenerate);
         assert!(
             commands
@@ -5459,8 +5564,12 @@ mod direct_action_tests {
             .data
             .enhanced
             .clear();
-        crate::test_ui::click(&ctx, &mut |ui| app.frame(ui), "Шаблон: general");
-        crate::test_ui::click(&ctx, &mut |ui| app.frame(ui), "standup");
+        crate::test_ui::click(
+            &ctx,
+            &mut |ui| app.frame(ui),
+            &format!("{} Общий", theme::icons::FILE_TEXT),
+        );
+        crate::test_ui::click(&ctx, &mut |ui| app.frame(ui), "Стендап");
         assert_eq!(app.state.documents[&path].template, "standup");
         assert!(!app.state.documents[&path].template_pending);
     }

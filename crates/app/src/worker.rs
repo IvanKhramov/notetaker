@@ -1116,7 +1116,7 @@ fn list_mode(
     }
     Ok((rows, note))
 }
-fn templates(root: &Path) -> Vec<String> {
+pub(crate) fn templates(root: &Path) -> Vec<String> {
     let mut names: Vec<String> = ["general", "one-on-one", "client-call", "standup"]
         .into_iter()
         .map(str::to_owned)

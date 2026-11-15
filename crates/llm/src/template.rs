@@ -60,35 +60,41 @@ impl Template {
     }
 
     pub fn builtin(name: &str) -> Option<Self> {
-        let (description, instruction) = match name {
+        let (display_name, description, instruction) = match name {
             "followup-team" => (
+                name,
                 "Сообщение в команду",
                 "Напиши короткое сообщение в команду на русском. Только решения и следующие действия: задача, ответственный, срок. Без вступления, благодарностей и воды. Не выдумывай отсутствующие сроки и имена.",
             ),
             "followup-client" => (
+                name,
                 "Сообщение клиенту",
                 "Напиши короткое сообщение клиенту на русском. Только согласованные решения, действия, ответственные и сроки. Исключи внутренние замечания, оценки, внутренние обсуждения и строки с пометкой internal или внутреннее. Без воды и выдуманных обязательств.",
             ),
             "general" => (
+                "Общий",
                 "General meeting notes",
                 "Для русского транскрипта используй заголовки: Кратко, Обсуждение, Решения, Задачи, Открытые вопросы. Только для английского транскрипта: Summary, Discussion, Decisions, Action items, Open questions. Сохраняй пользовательский план. Ответственных и сроки включай только из данных встречи.",
             ),
             "one-on-one" => (
+                "Один на один",
                 "One-on-one conversation",
                 "Для русского транскрипта используй заголовки: Как дела, Обсуждение, Обратная связь, Развитие и поддержка, Задачи. Только для английского транскрипта: Check-in, Discussion, Feedback, Growth and support, Next steps. Сохраняй повестку пользователя и различай обязательства участников.",
             ),
             "client-call" => (
+                "Звонок с клиентом",
                 "Client conversation",
                 "Для русского транскрипта используй заголовки: Цели клиента, Требования и ограничения, Обсуждение, Решения, Открытые вопросы, Задачи. Только для английского транскрипта: Client goals, Requirements and constraints, Discussion, Decisions, Open questions, Next steps. Различай запросы и согласованные обязательства.",
             ),
             "standup" => (
+                "Стендап",
                 "Daily team standup",
                 "Группируй по участникам. Для русского транскрипта используй заголовки: Сделано, Планы, Блокеры, Задачи. Только для английского транскрипта: Progress, Plans, Blockers, Follow-ups. Сохраняй приоритеты пользователя, не выдумывай имена.",
             ),
             _ => return None,
         };
         Some(Self {
-            name: name.into(),
+            name: display_name.into(),
             description: description.into(),
             instruction: if name.starts_with("followup-") {
                 instruction.into()
@@ -103,6 +109,28 @@ impl Template {
 
 #[cfg(test)]
 mod heading_tests {
+    #[test]
+    fn display_names_do_not_replace_ids_or_user_headers() {
+        for (id, name) in [
+            ("general", "Общий"),
+            ("one-on-one", "Один на один"),
+            ("client-call", "Звонок с клиентом"),
+            ("standup", "Стендап"),
+        ] {
+            assert_eq!(super::Template::builtin(id).unwrap().name, name);
+        }
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join(".templates")).unwrap();
+        std::fs::write(
+            root.path().join(".templates/general.md"),
+            "---\nname: Мой обзор\ndescription: Обзор\n---\nСвоя инструкция",
+        )
+        .unwrap();
+        assert_eq!(
+            super::Template::load(root.path(), "general").unwrap().name,
+            "Мой обзор"
+        );
+    }
     #[test]
     fn summary_headings_follow_transcript_language() {
         for id in ["general", "one-on-one", "client-call", "standup"] {

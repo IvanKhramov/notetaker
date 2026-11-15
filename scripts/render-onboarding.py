@@ -79,6 +79,7 @@ impl Panel { pub fn fixture(&mut self,state:&AppState) {
 } }
 """
     if path.stem == "speakers":
+        text = text.replace('let form_key = egui::Id::unique(("speaker-rename-form", meta.id, id));', 'let form_key = egui::Id::unique(("speaker-rename-form", meta.id, id)); if ui.ctx().data(|data|data.get_temp::<bool>(egui::Id::unique("fixture-rename-form")).unwrap_or(false)) {ui.data_mut(|data| {data.insert_temp(form_key,true);data.insert_temp(form_key.with("focus"),true);});}')
         text = text.replace(".close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)", '.open({let show=ui.ctx().data_mut(|data| {let id=egui::Id::unique("fixture-speaker-menu");let show=data.get_temp::<bool>(id).unwrap_or(false);data.insert_temp(id,false);show});show || egui::Popup::is_id_open(ui.ctx(), egui::Popup::menu(anchor).get_id())}).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)')
     if path.stem == "calendar_ui":
         text = text.replace('theme::disclosure("Где взять ссылку")', 'theme::disclosure("Где взять ссылку").default_open(true)')
@@ -227,7 +228,7 @@ impl eframe::App for Preview {
         ui.ctx().input_mut(|input| input.pointer = Default::default());
         ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("fixture-meeting-menu"), self.screen == 15));
         ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("preview-expand-settings"),self.screen==37 || self.screen==38));
-        ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("fixture-speaker-menu"),self.screen==58));
+        ui.ctx().data_mut(|data| {data.insert_temp(egui::Id::unique("fixture-speaker-menu"),self.screen==58);data.insert_temp(egui::Id::unique("fixture-rename-form"),self.screen==58);});
         self.app.ui(ui, frame);
         if self.screen==33 {
             let ctx=ui.ctx().clone();
