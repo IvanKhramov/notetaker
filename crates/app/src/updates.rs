@@ -204,6 +204,7 @@ impl Updates {
                 !busy && !preparing && !self.exit,
                 !preparing,
                 true,
+                &release.highlights(),
             );
             match action {
                 crate::theme::UpdateAction::Install => {

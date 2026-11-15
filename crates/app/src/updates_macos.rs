@@ -134,6 +134,7 @@ impl Updates {
             true,
             true,
             false,
+            &[],
         ) {
             crate::theme::UpdateAction::Install => {
                 let _ = notetaker_runtime::unix::open_url(&release.notes_url());
