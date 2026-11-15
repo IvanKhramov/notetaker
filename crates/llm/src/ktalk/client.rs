@@ -60,6 +60,8 @@ fn pace_requests(
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct User {
+    /// Present for participants. The profile of the key owner has only names.
+    #[serde(default)]
     pub key: String,
     #[serde(default)]
     pub firstname: String,
@@ -238,10 +240,7 @@ impl Client {
     }
     pub fn profile(&self) -> Result<User> {
         let user: User = self.get(&["api", "Users", "profile"], &[])?;
-        ensure!(
-            !user.key.is_empty() && !user.name().is_empty(),
-            "В профиле Толка отсутствует ID или имя"
-        );
+        ensure!(!user.name().is_empty(), "В профиле Толка отсутствует имя");
         Ok(user)
     }
     pub fn recordings(&self, query: &str, skip: usize, top: usize) -> Result<Vec<Recording>> {

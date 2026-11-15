@@ -419,7 +419,10 @@ pub fn plan(
         let b = tokens(&text);
         let common: BTreeSet<_> = a.intersection(&b).cloned().collect();
         let dice = 2.0 * common.len() as f64 / (a.len() + b.len()) as f64;
-        if dice >= 0.8 && common.len() >= 4 {
+        // Calibrated on a real call: two recognisers on the same sound agree
+        // on 0.44 to 1.0 of the informative words of a segment (median 0.83),
+        // and short segments sit at the low end. 0.8 confirmed only half of them.
+        if dice >= 0.6 && common.len() >= 3 {
             evidence.push((segment.start_ms as i64, segment.end_ms as i64));
             matched.extend(common);
         }
@@ -478,10 +481,7 @@ pub fn plan(
             continue;
         }
         if original == "me" {
-            ensure!(
-                !owner.key.is_empty() && !owner.name().is_empty(),
-                "Некорректный профиль Толка"
-            );
+            ensure!(!owner.name().is_empty(), "Некорректный профиль Толка");
             if local.speaker_suggestions.get("me") != Some(&owner.name()) {
                 after.speaker_voice_ids.remove("me");
             }
