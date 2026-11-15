@@ -446,8 +446,11 @@ pub(super) fn expand(
     let last = to.with_timezone(&start.zone).date_naive();
     loop {
         charge(budget)?;
-        if rule.period_start(index, start)? > last {
-            return Ok(());
+        // A period beyond the calendar's date range is beyond the window too:
+        // a huge INTERVAL must not discard the occurrences already found.
+        match rule.period_start(index, start) {
+            Ok(period) if period <= last => {}
+            _ => return Ok(()),
         }
         for wall in rule.candidates(index, start, budget)? {
             let begin = wall_utc(start.zone, wall)?;

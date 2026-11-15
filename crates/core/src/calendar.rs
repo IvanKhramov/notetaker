@@ -492,7 +492,9 @@ pub fn parse_ics_report(
                         .find(|p| p.name == "UID")
                         .ok_or(CalendarError("нет UID"))?;
                     Some((
-                        uid.value.clone(),
+                        // The same cleaning as the event's own UID, or an
+                        // override would not find the occurrence it replaces.
+                        bounded_id(&uid.value)?,
                         date(&recurrence.value, &recurrence.params, zone)?.utc()?,
                     ))
                 } else {

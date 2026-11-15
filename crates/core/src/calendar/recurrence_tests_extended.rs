@@ -361,3 +361,35 @@ fn configured_utc_alias_counts_daily_history_without_scanning_it() {
     assert!(report.skipped.is_empty());
     assert_eq!(report.events.len(), 4);
 }
+
+#[test]
+fn override_finds_its_occurrence_when_the_uid_has_trailing_space_and_a_huge_interval_keeps_the_first()
+ {
+    let moved = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:series-1 \r\nSUMMARY:Серия\r\nDTSTART:20261115T100000Z\r\nDTEND:20261115T103000Z\r\nRRULE:FREQ=DAILY;COUNT=2\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:series-1 \r\nSUMMARY:Серия\r\nRECURRENCE-ID:20261116T100000Z\r\nDTSTART:20261116T120000Z\r\nDTEND:20261116T123000Z\r\nEND:VEVENT\r\nEND:VCALENDAR";
+    let report = parse_ics_report(
+        moved,
+        utc("2026-11-15T00:00:00Z"),
+        utc("2026-11-17T00:00:00Z"),
+        chrono_tz::UTC,
+    )
+    .unwrap();
+    let starts: Vec<_> = report
+        .events
+        .iter()
+        .map(|e| e.start.format("%d %H:%M").to_string())
+        .collect();
+    assert_eq!(starts, ["15 10:00", "16 12:00"]);
+
+    let rare = event(
+        "DTSTART:20261115T100000Z\r\nDTEND:20261115T103000Z\r\nRRULE:FREQ=YEARLY;INTERVAL=1000000;COUNT=2",
+    );
+    let report = parse_ics_report(
+        &rare,
+        utc("2026-11-14T00:00:00Z"),
+        utc("2026-11-17T00:00:00Z"),
+        chrono_tz::UTC,
+    )
+    .unwrap();
+    assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+    assert_eq!(days(&report.events), ["2026-11-15"]);
+}
