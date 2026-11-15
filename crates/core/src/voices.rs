@@ -144,6 +144,43 @@ impl VoiceLibrary {
     pub fn name_available(&self, name: &str, linked: Option<&str>, own: bool) -> bool {
         self.identity(name, linked, own).is_ok()
     }
+    pub fn speaker_name_status(
+        &self,
+        transcript: &Transcript,
+        edit: &SpeakerEdit,
+        own_allowed: bool,
+    ) -> Option<String> {
+        let SpeakerEdit::Rename {
+            speaker,
+            name,
+            is_me,
+            everywhere,
+        } = edit
+        else {
+            return None;
+        };
+        let correcting = !everywhere
+            && !transcript.speaker_names.contains_key(speaker)
+            && transcript
+                .speaker_suggestions
+                .get(speaker)
+                .is_some_and(|guess| guess != name.trim());
+        let linked = if correcting {
+            None
+        } else {
+            transcript
+                .speaker_voice_ids
+                .get(speaker)
+                .map(String::as_str)
+        };
+        self.identity(
+            name,
+            linked,
+            *is_me || own_allowed && microphone_speaker(transcript, speaker),
+        )
+        .err()
+        .map(String::from)
+    }
     fn enroll(
         &mut self,
         key: VoiceKey<'_>,
@@ -286,20 +323,6 @@ impl Library {
         )
     }
 
-    pub fn cache_speaker_voice(
-        &self,
-        meeting: &Meeting,
-        speaker: &str,
-        embedding: Vec<f32>,
-    ) -> Result<()> {
-        let path = self.private_state_dir().join("voices.json");
-        let lock = meeting_lock(&path);
-        let _guard = lock.lock().unwrap_or_else(|error| error.into_inner());
-        let _files = self.lock_voice_files()?;
-        let mut cache = self.read_meeting_voices(meeting)?;
-        cache.embeddings.insert(speaker.into(), embedding);
-        write_json(&self.meeting_voices_path(meeting)?, &cache)
-    }
     fn lock_voice_files(&self) -> Result<Option<fs::File>> {
         fs::create_dir_all(self.private_state_dir())?;
         crate::storage::lock_meeting_files(&self.private_state_dir())
@@ -395,6 +418,9 @@ impl Library {
         }
         if cancelled() {
             return Err(crate::Error::SpeakerEdit("Операция Толка отменена".into()));
+        }
+        if count == 0 {
+            return Ok((count, skipped));
         }
         // On a crash between these two writes, the retry completes the bank write.
         write_json(&self.meeting_voices_path(meeting)?, &cache)?;
@@ -610,7 +636,7 @@ impl Library {
         edit: SpeakerEdit,
         voices_enabled: bool,
     ) -> Result<SpeakerEditResult> {
-        self.edit_speakers_owned(meeting, expected, edit, voices_enabled, false)
+        self.edit_speakers_owned(meeting, expected, edit, voices_enabled, false, None)
     }
     pub fn edit_speakers_owned(
         &self,
@@ -619,6 +645,7 @@ impl Library {
         edit: SpeakerEdit,
         voices_enabled: bool,
         own_mic_allowed: bool,
+        fresh_embedding: Option<Vec<f32>>,
     ) -> Result<SpeakerEditResult> {
         let loaded = meeting.load_transcript()?;
         if &loaded.value != expected {
@@ -764,15 +791,26 @@ impl Library {
                     let own_voice =
                         is_me || own_mic_allowed && microphone_speaker(&transcript, &speaker);
                     let linked = transcript.speaker_voice_ids.get(&speaker).cloned();
-                    let embedding = clusters
-                        .as_ref()
-                        .filter(|cache| cache.model == VOICE_MODEL)
-                        .and_then(|cache| cache.embeddings.get(&speaker))
-                        .filter(|embedding| cosine(embedding, embedding).is_some());
                     if voices.model == VOICE_MODEL {
                         match voices.identity(&name, linked.as_deref(), own_voice) {
                             Err(reason) => result.voice_status = reason.into(),
                             Ok(existing) => {
+                                if let Some(embedding) = fresh_embedding {
+                                    if cosine(&embedding, &embedding).is_none() {
+                                        return Err(crate::Error::SpeakerEdit(
+                                            "Некорректный отпечаток голоса".into(),
+                                        ));
+                                    }
+                                    if let Some(cache) = &mut clusters {
+                                        cache.embeddings.insert(speaker.clone(), embedding);
+                                    }
+                                }
+                                let embedding = clusters
+                                    .as_ref()
+                                    .filter(|cache| cache.model == VOICE_MODEL)
+                                    .and_then(|cache| cache.embeddings.get(&speaker))
+                                    .filter(|embedding| cosine(embedding, embedding).is_some());
+
                                 let index = if let Some(embedding) = embedding {
                                     Some(voices.enroll(
                                         linked.as_deref().map_or(VoiceKey::Name, VoiceKey::Linked),
@@ -800,7 +838,12 @@ impl Library {
                 }
             }
         }
-        meeting.save_transcript(&transcript, loaded.revision)?;
+        if transcript != *expected {
+            meeting.save_transcript(&transcript, loaded.revision)?;
+        }
+        if !result.voice_status.is_empty() {
+            return Ok(result);
+        }
         if let Some(clusters) = clusters {
             write_json(&self.meeting_voices_path(meeting)?, &clusters)?;
         }
@@ -973,6 +1016,7 @@ mod identity_tests {
                     },
                     true,
                     own,
+                    None,
                 )
                 .unwrap();
             text = meeting.read_transcript().unwrap();
@@ -985,6 +1029,59 @@ mod identity_tests {
         assert_eq!(bank.voices.len(), 1);
         assert!(!bank.voices[0].is_me);
         assert_eq!(bank.voices[0].embeddings, vec![vec![1.0, 0.0]]);
+    }
+    #[test]
+    fn a_collision_rechecked_at_commit_cannot_write_a_fresh_guest_embedding() {
+        let (_root, library, meeting, mut text) = fixture();
+        text.rename_speaker("ktalk-guest", "Анна");
+        meeting.write_transcript(&text).unwrap();
+        let guest = SpeakerEdit::Rename {
+            speaker: "ktalk-guest".into(),
+            name: "Анна".into(),
+            is_me: false,
+            everywhere: false,
+        };
+        assert!(
+            library
+                .read_voices()
+                .unwrap()
+                .speaker_name_status(&text, &guest, false)
+                .is_none()
+        );
+        library
+            .edit_speakers(
+                &meeting,
+                &text,
+                SpeakerEdit::Rename {
+                    speaker: "s1".into(),
+                    name: "Анна".into(),
+                    is_me: false,
+                    everywhere: false,
+                },
+                true,
+            )
+            .unwrap();
+        text = meeting.read_transcript().unwrap();
+        let bank = library.private_state_dir().join("voices.json");
+        let cache = library.meeting_voices_path(&meeting).unwrap();
+        let transcript = meeting.path().join("transcript.json");
+        let before = [
+            fs::read(&bank).unwrap(),
+            fs::read(&cache).unwrap(),
+            fs::read(&transcript).unwrap(),
+        ];
+        let result = library
+            .edit_speakers_owned(&meeting, &text, guest, true, false, Some(vec![0.5, 0.5]))
+            .unwrap();
+        assert_eq!(result.voice_status, VOICE_NAME_TAKEN);
+        assert_eq!(
+            [
+                fs::read(bank).unwrap(),
+                fs::read(cache).unwrap(),
+                fs::read(transcript).unwrap()
+            ],
+            before
+        );
     }
     #[test]
     fn restarted_enrollment_is_idempotent_and_creates_no_ledger() {

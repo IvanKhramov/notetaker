@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[derive(Clone, Default)]
@@ -37,12 +37,60 @@ impl Control {
         *self.asr.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SyncId {
+    pub meeting: uuid::Uuid,
+    pub revision: Revision,
+}
+#[derive(Clone, Copy)]
+struct Moment {
+    wall: DateTime<Utc>,
+    monotonic: Instant,
+}
+impl Moment {
+    fn now() -> Self {
+        Self {
+            wall: Utc::now(),
+            monotonic: Instant::now(),
+        }
+    }
+}
+struct EnrollmentClock {
+    started: Instant,
+    applied: std::collections::HashMap<SyncId, Instant>,
+}
+impl Default for EnrollmentClock {
+    fn default() -> Self {
+        Self {
+            started: Instant::now(),
+            applied: Default::default(),
+        }
+    }
+}
+impl EnrollmentClock {
+    fn ready(&self, pending: &PendingEnrollment, now: Moment) -> bool {
+        if let Some(applied) = self.applied.get(&pending.sync()) {
+            now.monotonic.saturating_duration_since(*applied) >= Duration::from_secs(120)
+        } else {
+            now.monotonic.saturating_duration_since(self.started) >= Duration::from_secs(120)
+                && now.wall >= pending.not_before
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingEnrollment {
     pub meeting: uuid::Uuid,
     pub recording_id: String,
     pub revision: Revision,
     pub not_before: DateTime<Utc>,
+}
+impl PendingEnrollment {
+    fn sync(&self) -> SyncId {
+        SyncId {
+            meeting: self.meeting,
+            revision: self.revision,
+        }
+    }
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Progress {
@@ -116,11 +164,13 @@ impl Task {
 }
 #[derive(Clone)]
 pub struct Undo {
+    pub sync: SyncId,
     pub meeting: Meeting,
     pub before: Transcript,
     pub after: Revision,
 }
 pub struct Applied {
+    pub applied_at: Instant,
     pub document: Box<DocumentData>,
     pub undo: Undo,
     pub segments: usize,
@@ -232,8 +282,9 @@ pub struct State {
     pub enroll_pending: Option<Task>,
     pub voice_offer_seen: bool,
     pub undo_pending: Option<Undo>,
-    pub undo_visible: BTreeMap<PathBuf, Revision>,
-    undo_closed: BTreeMap<PathBuf, Revision>,
+    pub undo_visible: std::collections::HashSet<SyncId>,
+    undo_closed: std::collections::HashSet<SyncId>,
+    clock: EnrollmentClock,
     pub load_root: Option<PathBuf>,
     pub address: String,
     key: String,
@@ -246,21 +297,21 @@ impl State {
     pub fn editing(&self, path: &Path) -> bool {
         self.busy_path.as_deref() == Some(path)
     }
-    fn enrollment_ready(&self, task: &Task, now: DateTime<Utc>) -> bool {
+    fn enrollment_ready(&self, task: &Task, now: Moment) -> bool {
         task.progress.enrol_pending
             && task
                 .progress
                 .pending_enrollment
                 .as_ref()
                 .is_some_and(|pending| {
-                    now >= pending.not_before
-                        && self.undo_visible.get(task.meeting.path()) != Some(&pending.revision)
-                        && !self.successes.iter().any(|(undo, _)| {
-                            undo.meeting.path() == task.meeting.path()
-                                && undo.after == pending.revision
-                        })
+                    self.clock.ready(pending, now)
+                        && !self.undo_visible.contains(&pending.sync())
+                        && !self
+                            .successes
+                            .iter()
+                            .any(|(undo, _)| undo.sync == pending.sync())
                 })
-            && task.progress.next.is_none_or(|next| next <= now)
+            && task.progress.next.is_none_or(|next| next <= now.wall)
     }
     pub fn next(&self, now: DateTime<Utc>, blocked: impl Fn(&Path) -> bool) -> Option<Task> {
         if self.busy || !self.saved || !self.settings.as_ref().is_some_and(Settings::auto_sync) {
@@ -327,8 +378,8 @@ pub fn pickup(root: &Path, now: DateTime<Utc>) -> Result<Vec<Task>> {
     let mut tasks = Vec::new();
     for meeting in library.list_meetings()? {
         let meta = meeting.read_meta()?;
-        let Some(ended) = meta.ended_at else { continue };
         let mut progress = read_progress(&meeting)?;
+        let ended = meta.ended_at.unwrap_or(meta.started_at);
         if progress.enrol_pending && progress.pending_enrollment.is_none() {
             progress.enrol_pending = false;
             persist(&Task {
@@ -340,19 +391,12 @@ pub fn pickup(root: &Path, now: DateTime<Utc>) -> Result<Vec<Task>> {
         if !progress.recorded_here && !progress.enrol_pending {
             continue;
         }
-        if ended > now {
-            continue;
-        }
-        if ended < now - chrono::Duration::hours(24) {
-            if progress.enrol_pending {
-                progress.enrol_pending = false;
-                progress.pending_enrollment = None;
-                persist(&Task {
-                    meeting,
-                    ended,
-                    progress,
-                })?;
-            }
+        if progress.enrol_pending {
+            progress.done = true;
+        } else if meta.ended_at.is_none()
+            || ended > now
+            || ended < now - chrono::Duration::hours(24)
+        {
             continue;
         }
         if !meeting.read_transcript()?.ktalk_sources.is_empty() {
@@ -557,6 +601,7 @@ fn apply_names(
 }
 fn apply(task: &mut Task, plan: &Plan, voices: bool, control: &Control) -> Result<Applied> {
     let (applied, segments) = apply_names(task, plan, voices, control)?;
+    let applied_at = Instant::now();
     let meeting = task.meeting.clone();
     let mut voice_status = if voices {
         "Голоса будут сохранены после закрытия уведомления, не раньше чем через 2 минуты".into()
@@ -569,8 +614,15 @@ fn apply(task: &mut Task, plan: &Plan, voices: bool, control: &Control) -> Resul
     task.progress.enrol_status = voice_status.clone();
     persist(task)?;
     Ok(Applied {
+        applied_at,
         document: Box::new(DocumentData::read(meeting.clone())?),
         undo: Undo {
+            sync: task
+                .progress
+                .pending_enrollment
+                .as_ref()
+                .context("Нет запроса сверки")?
+                .sync(),
             meeting: meeting.clone(),
             before: applied.before,
             after: applied.after.revision,
@@ -639,11 +691,22 @@ pub fn run_control(job: Job, store: &dyn CredentialStore, control: &Control) -> 
                 edit,
             } => {
                 let mut voice_status = String::new();
+                let library = Library::open(meeting.path().parent().context("Нет библиотеки")?)?;
+                let own_allowed = recorded_here(&meeting)?;
+                let mut fresh_embedding = None;
                 let mut voices = true;
-                if let notetaker_core::SpeakerEdit::Rename { speaker, .. } = &edit {
+                if let Some(reason) =
+                    library
+                        .read_voices()?
+                        .speaker_name_status(&expected, &edit, own_allowed)
+                {
+                    voice_status = reason;
+                    voices = false;
+                }
+                if voices && let notetaker_core::SpeakerEdit::Rename { speaker, .. } = &edit {
                     let progress = read_progress(&meeting)?;
                     if let Some(ranges) = progress.guest_ranges.get(speaker) {
-                        let prepare = (|| -> Result<()> {
+                        let prepare = (|| -> Result<Vec<f32>> {
                             control.check()?;
                             let config = notetaker_pipeline::AsrConfig::new("auto")?;
                             let mut process = crate::worker::background_process(&config.binary);
@@ -659,10 +722,9 @@ pub fn run_control(job: Job, store: &dyn CredentialStore, control: &Control) -> 
                                     Duration::from_secs(300),
                                     handle,
                                 )?;
-                            notetaker_pipeline::cache_named_voice(
+                            notetaker_pipeline::named_voice_embedding(
                                 &meeting,
                                 &expected,
-                                speaker,
                                 ranges,
                                 |wav, ranges| {
                                     control.check()?;
@@ -673,21 +735,24 @@ pub fn run_control(job: Job, store: &dyn CredentialStore, control: &Control) -> 
                                 || control.token.is_cancelled(),
                             )
                         })();
-                        if let Err(error) = prepare {
-                            voice_status = format!("Голос не запомнен: {error:#}");
-                            voices = false;
+                        match prepare {
+                            Ok(embedding) => fresh_embedding = Some(embedding),
+                            Err(error) => {
+                                voice_status = format!("Голос не запомнен: {error:#}");
+                                voices = false;
+                            }
                         }
                     }
                 }
                 control.check()?;
-                let library = Library::open(meeting.path().parent().context("Нет библиотеки")?)?;
                 let result = library
                     .edit_speakers_owned(
                         &meeting,
                         &expected,
                         edit,
                         voices,
-                        recorded_here(&meeting)?,
+                        own_allowed,
+                        fresh_embedding,
                     )
                     .map_err(|error| error.to_string());
                 Message::Named {
@@ -839,18 +904,6 @@ pub fn run_control(job: Job, store: &dyn CredentialStore, control: &Control) -> 
                     task.progress.enrol_status =
                         "Транскрипт изменился после сверки; обучение пропущено".into();
                     persist(&task)?;
-                    return Ok(Message::Enrolled {
-                        path: task.meeting.path().into(),
-                        status: task.progress.enrol_status.clone(),
-                        task,
-                    });
-                }
-                if task
-                    .progress
-                    .pending_enrollment
-                    .as_ref()
-                    .is_some_and(|pending| Utc::now() < pending.not_before)
-                {
                     return Ok(Message::Enrolled {
                         path: task.meeting.path().into(),
                         status: task.progress.enrol_status.clone(),
@@ -1471,12 +1524,42 @@ pub fn transcript_ui(ui: &mut eframe::egui::Ui, state: &mut crate::state::AppSta
 }
 
 impl crate::state::AppState {
+    pub fn ktalk_end_undo(&mut self, path: &Path) {
+        if let Some(pending) = self
+            .ktalk
+            .tasks
+            .get(path)
+            .and_then(|task| task.progress.pending_enrollment.as_ref())
+        {
+            self.ktalk.undo_closed.insert(pending.sync());
+            self.ktalk.undo_visible.remove(&pending.sync());
+        }
+    }
+    pub fn ktalk_sync_current(&self, undo: &Undo) -> bool {
+        !self.ktalk.undo_closed.contains(&undo.sync)
+            && self
+                .ktalk
+                .tasks
+                .get(undo.meeting.path())
+                .is_none_or(|task| {
+                    task.progress
+                        .pending_enrollment
+                        .as_ref()
+                        .is_some_and(|pending| pending.sync() == undo.sync)
+                })
+            && self
+                .documents
+                .get(undo.meeting.path())
+                .is_none_or(|doc| doc.data.revisions.transcript == undo.after)
+    }
     pub fn ktalk_can_undo(&self, undo: &Undo) -> bool {
-        self.ktalk.undo_closed.get(undo.meeting.path()) != Some(&undo.after)
-            && (self.ktalk.undo_visible.get(undo.meeting.path()) == Some(&undo.after)
-                || self.ktalk.undo_pending.as_ref().is_some_and(|pending| {
-                    pending.meeting.path() == undo.meeting.path() && pending.after == undo.after
-                }))
+        self.ktalk_sync_current(undo)
+            && (self.ktalk.undo_visible.contains(&undo.sync)
+                || self
+                    .ktalk
+                    .undo_pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.sync == undo.sync))
             && self
                 .documents
                 .get(undo.meeting.path())
@@ -1487,6 +1570,9 @@ impl crate::state::AppState {
                 })
     }
     pub fn ktalk_job(&mut self, job: Job) {
+        self.ktalk_job_at(job, Moment::now());
+    }
+    fn ktalk_job_at(&mut self, job: Job, now: Moment) {
         if self.ktalk.busy || self.settings_pending {
             return;
         }
@@ -1496,13 +1582,14 @@ impl crate::state::AppState {
         if let Job::Resume(task, _) = &job
             && let Some(pending) = &task.progress.pending_enrollment
         {
-            if !self.ktalk.enrollment_ready(task, Utc::now()) {
+            if !self.ktalk.enrollment_ready(task, now) {
                 return;
             }
-            self.ktalk
-                .undo_closed
-                .insert(task.meeting.path().into(), pending.revision);
-            self.ktalk.undo_visible.remove(task.meeting.path());
+            self.ktalk.undo_closed.insert(pending.sync());
+            self.ktalk.undo_visible.remove(&pending.sync());
+        }
+        if let Job::Name { meeting, .. } = &job {
+            self.ktalk_end_undo(meeting.path());
         }
         self.ktalk.biometric = matches!(
             &job,
@@ -1576,6 +1663,9 @@ impl crate::state::AppState {
         }
     }
     pub fn poll_ktalk(&mut self) {
+        self.poll_ktalk_at(Moment::now());
+    }
+    fn poll_ktalk_at(&mut self, now: Moment) {
         if self.exit_requested
             || !self.ready
             || self.settings_pending
@@ -1610,7 +1700,7 @@ impl crate::state::AppState {
                 .tasks
                 .values()
                 .find(|task| {
-                    self.ktalk.enrollment_ready(task, Utc::now())
+                    self.ktalk.enrollment_ready(task, now)
                         && self
                             .documents
                             .get(task.meeting.path())
@@ -1623,15 +1713,13 @@ impl crate::state::AppState {
                 .cloned()
             && let Some(settings) = self.ktalk.settings.clone()
         {
-            if task.ended + chrono::Duration::hours(24) < Utc::now() {
-                self.ktalk_job(Job::SkipEnrollment(task, String::new()));
-            } else if !self.settings.voice_library {
+            if !self.settings.voice_library {
                 self.ktalk_job(Job::SkipEnrollment(
                     task,
                     "Библиотека голосов выключена".into(),
                 ));
             } else {
-                self.ktalk_job(Job::Resume(task, settings));
+                self.ktalk_job_at(Job::Resume(task, settings), now);
             }
             return;
         }
@@ -1746,6 +1834,24 @@ impl crate::state::AppState {
                     Outcome::Applied(applied) => {
                         self.ktalk.inspected.insert(path.clone());
                         let applied = *applied;
+                        self.ktalk
+                            .clock
+                            .applied
+                            .insert(applied.undo.sync, applied.applied_at);
+                        self.ktalk
+                            .successes
+                            .retain(|(undo, _)| undo.sync.meeting != applied.undo.sync.meeting);
+                        self.ktalk
+                            .undo_visible
+                            .retain(|sync| sync.meeting != applied.undo.sync.meeting);
+                        if self
+                            .ktalk
+                            .undo_pending
+                            .as_ref()
+                            .is_some_and(|undo| undo.sync.meeting == applied.undo.sync.meeting)
+                        {
+                            self.ktalk.undo_pending = None;
+                        }
                         if let Some(document) = self.documents.get_mut(&path) {
                             document.data.transcript = applied.document.transcript;
                             document.data.revisions.transcript =
@@ -1879,49 +1985,39 @@ mod tests {
         );
     }
     #[test]
-    fn enrollment_waits_for_both_timer_and_toast_then_closes_undo() {
+    fn monotonic_timer_ignores_wall_clock_jumps_and_waits_for_the_exact_toast() {
         let (_root, mut task, plan) = fixture();
         let applied = apply(&mut task, &plan, true, &Control::default()).unwrap();
         let pending = task.progress.pending_enrollment.as_ref().unwrap();
+        let start = Moment {
+            wall: pending.not_before - chrono::Duration::seconds(120),
+            monotonic: applied.applied_at,
+        };
         let (mut state, _commands, _events) = crate::test_ui::state();
         state
             .ktalk
-            .undo_visible
-            .insert(task.meeting.path().into(), pending.revision);
-        assert!(state.ktalk_can_undo(&applied.undo));
-        assert!(
-            !state
-                .ktalk
-                .enrollment_ready(&task, pending.not_before - chrono::Duration::seconds(1))
-        );
-        assert!(
-            !state
-                .ktalk
-                .enrollment_ready(&task, pending.not_before + chrono::Duration::minutes(1))
-        );
-        state.ktalk.undo_visible.clear();
-        assert!(
-            !state
-                .ktalk
-                .enrollment_ready(&task, pending.not_before - chrono::Duration::seconds(1))
-        );
-        assert!(state.ktalk.enrollment_ready(&task, pending.not_before));
-        let mut ready = task.clone();
-        ready
-            .progress
-            .pending_enrollment
-            .as_mut()
-            .unwrap()
-            .not_before = Utc::now() - chrono::Duration::seconds(1);
-        state.ktalk_job(Job::Resume(ready, settings()));
-        state
-            .ktalk
-            .undo_visible
-            .insert(task.meeting.path().into(), pending.revision);
+            .clock
+            .applied
+            .insert(applied.undo.sync, start.monotonic);
+        state.ktalk.undo_visible.insert(applied.undo.sync);
+        let forward = Moment {
+            wall: start.wall + chrono::Duration::minutes(5),
+            monotonic: start.monotonic + Duration::from_secs(15),
+        };
+        assert!(!state.ktalk.enrollment_ready(&task, forward));
+        let elapsed = Moment {
+            wall: start.wall - chrono::Duration::hours(1),
+            monotonic: start.monotonic + Duration::from_secs(121),
+        };
+        assert!(!state.ktalk.enrollment_ready(&task, elapsed));
+        state.ktalk.undo_visible.remove(&applied.undo.sync);
+        assert!(state.ktalk.enrollment_ready(&task, elapsed));
+        state.ktalk_job_at(Job::Resume(task.clone(), settings()), elapsed);
+        state.ktalk.undo_visible.insert(applied.undo.sync);
         assert!(!state.ktalk_can_undo(&applied.undo));
     }
     #[test]
-    fn restart_preserves_only_the_timer_and_never_offers_undo() {
+    fn restart_waits_for_both_session_time_and_the_stored_deadline_without_undo() {
         let (root, mut task, plan) = fixture();
         let applied = apply(&mut task, &plan, true, &Control::default()).unwrap();
         let pending = task.progress.pending_enrollment.as_ref().unwrap().clone();
@@ -1932,18 +2028,183 @@ mod tests {
             Some(&pending)
         );
         let (state, _commands, _events) = crate::test_ui::state();
+        let start = state.ktalk.clock.started;
         assert!(!state.ktalk_can_undo(&applied.undo));
-        assert!(
-            !state
-                .ktalk
-                .enrollment_ready(restored, pending.not_before - chrono::Duration::seconds(1))
+        for (seconds, wall, expected) in [
+            (15, pending.not_before + chrono::Duration::minutes(5), false),
+            (
+                121,
+                pending.not_before - chrono::Duration::seconds(1),
+                false,
+            ),
+            (121, pending.not_before, true),
+        ] {
+            assert_eq!(
+                state.ktalk.enrollment_ready(
+                    restored,
+                    Moment {
+                        wall,
+                        monotonic: start + Duration::from_secs(seconds)
+                    }
+                ),
+                expected
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(&pending)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .len(),
+            4
         );
-        assert!(state.ktalk.enrollment_ready(restored, pending.not_before));
-        let reply = run(Job::Resume(restored.clone(), settings()), &Store::default());
-        assert!(matches!(reply, Message::Enrolled { .. }));
-        assert!(read_progress(&task.meeting).unwrap().enrol_pending);
-        let json = serde_json::to_value(&pending).unwrap();
-        assert_eq!(json.as_object().unwrap().len(), 4);
+    }
+    #[test]
+    fn closing_an_older_sync_does_not_release_the_newer_toast() {
+        let (_root, mut task, plan) = fixture();
+        let first = apply(&mut task, &plan, true, &Control::default()).unwrap();
+        let older = first.undo.sync;
+        task.meeting
+            .update_transcript(|text| {
+                text.rename_speaker("me", "Новое имя");
+            })
+            .unwrap();
+        let pending = task.progress.pending_enrollment.as_mut().unwrap();
+        pending.revision = task.meeting.load_transcript().unwrap().revision;
+        let newer = pending.sync();
+        let mut state = State::default();
+        let start = Instant::now();
+        state.clock.applied.insert(newer, start);
+        state.undo_visible.extend([older, newer]);
+        state.undo_visible.remove(&older);
+        let now = Moment {
+            wall: Utc::now() + chrono::Duration::minutes(5),
+            monotonic: start + Duration::from_secs(121),
+        };
+        assert!(!state.enrollment_ready(&task, now));
+        state.undo_visible.remove(&newer);
+        assert!(state.enrollment_ready(&task, now));
+    }
+    #[test]
+    fn pending_pickup_ignores_age_and_future_meeting_end_times() {
+        for hours in [25, -25] {
+            let (root, mut task, plan) = fixture();
+            apply(&mut task, &plan, true, &Control::default()).unwrap();
+            let wall = task.ended + chrono::Duration::hours(hours);
+            let mut picked = pickup(root.path(), wall).unwrap();
+            assert_eq!(picked.len(), 1);
+            assert!(picked[0].progress.enrol_pending);
+            if hours < 0 {
+                picked = pickup(root.path(), Utc::now()).unwrap();
+                assert_eq!(picked.len(), 1);
+            }
+            let restored = picked.pop().unwrap();
+            assert!(pending_matches(&restored).unwrap());
+            let (mut state, commands, _events) = crate::test_ui::state();
+            state.ready = true;
+            state.settings.voice_library = true;
+            state.ktalk.saved = true;
+            state.ktalk.settings = Some(settings());
+            state
+                .ktalk
+                .tasks
+                .insert(restored.meeting.path().into(), restored);
+            let now = Moment {
+                wall: wall.max(Utc::now()) + chrono::Duration::minutes(3),
+                monotonic: state.ktalk.clock.started + Duration::from_secs(121),
+            };
+            state.poll_ktalk_at(now);
+            let job = commands
+                .try_iter()
+                .find_map(|command| match command {
+                    crate::worker::Command::Ktalk(job, _) => Some(job),
+                    _ => None,
+                })
+                .unwrap();
+            assert!(matches!(*job, Job::Resume(..)));
+            let reply = run(*job, &Store::default());
+            assert!(
+                matches!(reply, Message::Enrolled { status, .. } if status.contains("Аудио не хранится"))
+            );
+            assert!(
+                read_progress(&task.meeting)
+                    .unwrap()
+                    .pending_enrollment
+                    .is_none()
+            );
+        }
+    }
+    #[test]
+    fn a_guest_name_collision_writes_neither_embedding_nor_transcript() {
+        let (root, mut task, plan) = fixture();
+        apply(&mut task, &plan, true, &Control::default()).unwrap();
+        let library = Library::open(root.path()).unwrap();
+        let text = task.meeting.read_transcript().unwrap();
+        let guest = task.progress.guest_ranges.keys().next().unwrap().clone();
+        let name = text.speaker_names[&guest].clone();
+        library
+            .remember_tolk_voices(
+                &task.meeting,
+                &text,
+                vec![notetaker_core::VoiceSample {
+                    speaker: "ktalk-another-person".into(),
+                    name: name.clone(),
+                    embedding: vec![1.0, 0.0],
+                    own: false,
+                }],
+                task.meeting.load_transcript().unwrap().revision,
+                || false,
+            )
+            .unwrap();
+        let bank = library.private_state_dir().join("voices.json");
+        let cache = library.private_state_dir().join(format!(
+            "speaker-embeddings/{}.json",
+            task.meeting.read_meta().unwrap().id
+        ));
+        let before = [
+            std::fs::read(&bank).unwrap(),
+            std::fs::read(&cache).unwrap(),
+            std::fs::read(task.meeting.path().join("transcript.json")).unwrap(),
+        ];
+        let (mut state, commands, _events) = crate::test_ui::state();
+        state
+            .ktalk
+            .undo_visible
+            .insert(task.progress.pending_enrollment.as_ref().unwrap().sync());
+        state
+            .ktalk
+            .tasks
+            .insert(task.meeting.path().into(), task.clone());
+        state.ktalk_job(Job::Name {
+            meeting: task.meeting.clone(),
+            expected: text,
+            edit: notetaker_core::SpeakerEdit::Rename {
+                speaker: guest,
+                name,
+                is_me: false,
+                everywhere: false,
+            },
+        });
+        assert!(state.ktalk.undo_visible.is_empty());
+        let job = commands
+            .try_iter()
+            .find_map(|command| match command {
+                crate::worker::Command::Ktalk(job, _) => Some(job),
+                _ => None,
+            })
+            .unwrap();
+        let reply = run(*job, &Store::default());
+        assert!(
+            matches!(reply, Message::Named { voice_status, result, .. } if voice_status == notetaker_core::VOICE_NAME_TAKEN && result.is_ok())
+        );
+        assert_eq!(
+            [
+                std::fs::read(bank).unwrap(),
+                std::fs::read(cache).unwrap(),
+                std::fs::read(task.meeting.path().join("transcript.json")).unwrap()
+            ],
+            before
+        );
     }
     #[test]
     fn edits_or_undo_drop_pending_before_any_network_or_embedding() {
@@ -2082,8 +2343,13 @@ mod tests {
         let message = run(Job::Resume(task.clone(), settings()), &Store::default());
         assert!(matches!(message, Message::Enrolled { .. }));
         assert!(read_progress(&task.meeting).unwrap().enrol_pending);
-        pickup(root.path(), task.ended + chrono::Duration::hours(25)).unwrap();
-        assert!(!read_progress(&task.meeting).unwrap().enrol_pending);
+        assert_eq!(
+            pickup(root.path(), task.ended + chrono::Duration::hours(25))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(read_progress(&task.meeting).unwrap().enrol_pending);
     }
     #[test]
     fn exit_cancels_the_operation_and_waits_for_its_completion() {
@@ -2125,7 +2391,10 @@ mod tests {
         state.ktalk.settings = Some(settings);
         state.ktalk.saved = true;
         state.ktalk.tasks.insert(task.meeting.path().into(), task);
-        state.poll_ktalk();
+        state.poll_ktalk_at(Moment {
+            wall: Utc::now(),
+            monotonic: state.ktalk.clock.started + Duration::from_secs(121),
+        });
         assert!(commands.try_iter().any(|command| matches!(command, crate::worker::Command::Ktalk(job, _) if matches!(*job, Job::Resume(..)))));
     }
     #[test]

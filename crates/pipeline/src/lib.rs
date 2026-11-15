@@ -3,7 +3,7 @@ mod asr;
 mod diarization;
 mod voices;
 pub use diarization::{DiarizationConfig, rediarize};
-pub use voices::{cache_named_voice, remember_named_voices};
+pub use voices::{named_voice_embedding, remember_named_voices};
 mod audio;
 mod decode;
 mod echo;

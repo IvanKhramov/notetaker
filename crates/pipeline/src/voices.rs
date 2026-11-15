@@ -118,15 +118,14 @@ pub fn remember_named_voices(
     Ok(report)
 }
 
-/// Explicit manual naming can cache a guest's validated times without auto-enrolling it.
-pub fn cache_named_voice(
+/// Extract a guest's embedding without writing biometric state.
+pub fn named_voice_embedding(
     meeting: &Meeting,
     expected: &Transcript,
-    speaker: &str,
     ranges: &[(u64, u64)],
     mut embed: impl FnMut(&std::path::Path, Vec<TimeRange>) -> Result<Vec<f32>>,
     cancelled: impl Fn() -> bool,
-) -> Result<()> {
+) -> Result<Vec<f32>> {
     ensure!(
         meeting.system_audio_path().is_file(),
         "Аудио не хранится: голос не запомнен"
@@ -152,16 +151,13 @@ pub fn cache_named_voice(
         ranges.iter().map(|r| r.end_ms - r.start_ms).sum::<u64>() >= 6000,
         "Меньше 6 с чистой речи для голоса"
     );
-    let library = Library::open(meeting.path().parent().context("Нет библиотеки")?)?;
     let embedding = embed(&wav, ranges)?;
-    // Merge only the explicit sample; unrelated manual cluster samples remain valid.
     ensure!(
         meeting.read_transcript()? == *expected,
         "Транскрипт изменился: повторите именование"
     );
     ensure!(!cancelled(), "Операция Толка отменена");
-    library.cache_speaker_voice(meeting, speaker, embedding)?;
-    Ok(())
+    Ok(embedding)
 }
 #[cfg(test)]
 mod tests {
@@ -401,10 +397,9 @@ mod tests {
         });
         transcript.rename_speaker("ktalk-guest", "Гость");
         meeting.write_transcript(&transcript).unwrap();
-        cache_named_voice(
+        let embedding = named_voice_embedding(
             &meeting,
             &transcript,
-            "ktalk-guest",
             &[(0, 7000)],
             |_, _| Ok(vec![0.0, 1.0]),
             || false,
@@ -412,7 +407,7 @@ mod tests {
         .unwrap();
         assert!(library.read_voices().unwrap().voices.is_empty());
         library
-            .edit_speakers(
+            .edit_speakers_owned(
                 &meeting,
                 &transcript,
                 notetaker_core::SpeakerEdit::Rename {
@@ -422,6 +417,8 @@ mod tests {
                     everywhere: false,
                 },
                 true,
+                false,
+                Some(embedding),
             )
             .unwrap();
         assert_eq!(

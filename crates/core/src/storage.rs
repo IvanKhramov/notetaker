@@ -13,7 +13,9 @@ use tempfile::NamedTempFile;
 use crate::{MeetingMeta, Result, Transcript, migrate_transcript};
 
 /// Content revision, including whether the file existed when loaded.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct Revision(Option<[u8; 32]>);
 impl Revision {
     fn of(bytes: Option<&[u8]>) -> Self {

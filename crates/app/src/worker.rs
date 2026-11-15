@@ -897,6 +897,7 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                                     edit,
                                     voice_library_enabled,
                                     own_allowed,
+                                    None,
                                 )
                                 .map_err(|e| e.to_string())
                         });

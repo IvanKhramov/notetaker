@@ -2249,6 +2249,12 @@ impl NotetakerApp {
             );
         }
         while let Some((undo, segments)) = self.state.ktalk.successes.pop_front() {
+            self.toasts.retain(|toast| {
+                toast
+                    .undo_ktalk
+                    .as_ref()
+                    .is_none_or(|old| old.sync.meeting != undo.sync.meeting)
+            });
             push_toast(
                 &mut self.toasts,
                 Toast {
@@ -2323,11 +2329,17 @@ impl NotetakerApp {
             );
         }
         self.advance_toasts(ctx);
+        self.toasts.retain(|toast| {
+            toast
+                .undo_ktalk
+                .as_ref()
+                .is_none_or(|undo| self.state.ktalk_sync_current(undo))
+        });
         self.state.ktalk.undo_visible = self
             .toasts
             .iter()
             .filter_map(|toast| toast.undo_ktalk.as_ref())
-            .map(|undo| (undo.meeting.path().to_path_buf(), undo.after))
+            .map(|undo| undo.sync)
             .collect();
         if self.toasts.is_empty() && self.state.error.is_none() {
             return;
@@ -2399,7 +2411,7 @@ impl NotetakerApp {
                 }
                 if let Some(index) = dismiss {
                     if let Some(undo) = &self.toasts[index].undo_ktalk {
-                        self.state.ktalk.undo_visible.remove(undo.meeting.path());
+                        self.state.ktalk.undo_visible.remove(&undo.sync);
                     }
                     self.toasts.remove(index);
                 }
@@ -5421,10 +5433,8 @@ impl Toast {
 
 fn push_toast(queue: &mut VecDeque<Toast>, toast: Toast) {
     if let Some(existing) = queue.iter_mut().find(|t| {
-        t.undo_ktalk.as_ref().map(|u| u.meeting.path())
-            == toast.undo_ktalk.as_ref().map(|u| u.meeting.path())
-            && t.undo_ktalk.as_ref().map(|undo| undo.after)
-                == toast.undo_ktalk.as_ref().map(|undo| undo.after)
+        t.undo_ktalk.as_ref().map(|undo| undo.sync)
+            == toast.undo_ktalk.as_ref().map(|undo| undo.sync)
             && t.level == toast.level
             && t.text == toast.text
             && t.undo_title.as_ref().map(|undo| undo.meeting.path())
@@ -5487,6 +5497,10 @@ mod toast_lifetime_tests {
         for after in [first, second] {
             let mut message = toast(Instant::now(), ToastLevel::Success);
             message.undo_ktalk = Some(crate::ktalk::Undo {
+                sync: crate::ktalk::SyncId {
+                    meeting: meeting.read_meta().unwrap().id,
+                    revision: after,
+                },
                 meeting: meeting.clone(),
                 before: before.clone(),
                 after,
@@ -6084,6 +6098,81 @@ mod direct_action_tests {
         output.drop_without_applying_deltas();
         click_at(&ctx, &mut app, size, button.center());
         assert!(app.state.recording.stop_requested);
+    }
+    #[test]
+    fn a_new_sync_replaces_the_old_toast_and_revision_changes_remove_undo() {
+        let (mut app, _commands, _events, _root) = fixture();
+        let path = app.state.selected.clone().unwrap();
+        let meeting = app.state.documents[&path].data.meeting.clone();
+        let original = meeting.read_transcript().unwrap();
+        let id = meeting.read_meta().unwrap().id;
+        let first = meeting.load_transcript().unwrap().revision;
+        let old = crate::ktalk::Undo {
+            sync: crate::ktalk::SyncId {
+                meeting: id,
+                revision: first,
+            },
+            meeting: meeting.clone(),
+            before: original.clone(),
+            after: first,
+        };
+        app.state.ktalk.successes.push_back((old.clone(), 1));
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        crate::test_ui::frame(&ctx, vec![], &mut |ui| app.notifications(ui.ctx()))
+            .drop_without_applying_deltas();
+        assert_eq!(
+            app.toasts
+                .iter()
+                .filter(|toast| toast.undo_ktalk.is_some())
+                .count(),
+            1
+        );
+        meeting
+            .update_transcript(|text| {
+                text.rename_speaker("me", "Анна");
+            })
+            .unwrap();
+        let loaded = meeting.load_transcript().unwrap();
+        let newer = crate::ktalk::Undo {
+            sync: crate::ktalk::SyncId {
+                meeting: id,
+                revision: loaded.revision,
+            },
+            meeting: meeting.clone(),
+            before: original,
+            after: loaded.revision,
+        };
+        let document = app.state.documents.get_mut(&path).unwrap();
+        document.data.transcript = loaded.value;
+        document.data.revisions.transcript = loaded.revision;
+        app.state.ktalk.successes.push_back((newer.clone(), 1));
+        crate::test_ui::frame(&ctx, vec![], &mut |ui| app.notifications(ui.ctx()))
+            .drop_without_applying_deltas();
+        let toasts: Vec<_> = app
+            .toasts
+            .iter()
+            .filter_map(|toast| toast.undo_ktalk.as_ref())
+            .collect();
+        assert_eq!(toasts.len(), 1);
+        assert_eq!(toasts[0].sync, newer.sync);
+        app.state.ktalk.undo_visible.remove(&old.sync);
+        assert!(app.state.ktalk.undo_visible.contains(&newer.sync));
+        meeting
+            .update_transcript(|text| {
+                text.rename_speaker("me", "Другое имя");
+            })
+            .unwrap();
+        app.state
+            .documents
+            .get_mut(&path)
+            .unwrap()
+            .data
+            .revisions
+            .transcript = meeting.load_transcript().unwrap().revision;
+        crate::test_ui::frame(&ctx, vec![], &mut |ui| app.notifications(ui.ctx()))
+            .drop_without_applying_deltas();
+        assert!(app.toasts.iter().all(|toast| toast.undo_ktalk.is_none()));
     }
     #[test]
     fn ktalk_success_toast_queues_undo_while_busy_and_restores_the_transcript() {

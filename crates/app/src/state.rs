@@ -716,6 +716,7 @@ impl AppState {
         }
         // Saves are serialized ahead of the command. The worker checks the
         // expected transcript and refuses analysis after a failed/conflicting save.
+        self.ktalk_end_undo(&path);
         self.flush();
         let document = self.documents.get_mut(&path).expect("selected document");
         document.speaker_ui.busy = true;
