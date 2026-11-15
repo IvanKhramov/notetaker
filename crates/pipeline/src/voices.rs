@@ -12,7 +12,7 @@ pub fn remember_named_voices(
     transcript: &Transcript,
     evidence: &[VoiceEvidence],
     own_allowed: bool,
-    enrollment: notetaker_core::VoiceEnrollmentId,
+    expected: notetaker_core::Revision,
     mut embed: impl FnMut(&std::path::Path, Vec<TimeRange>) -> Result<Vec<f32>>,
     cancelled: impl Fn() -> bool,
 ) -> Result<Enrollment> {
@@ -88,11 +88,7 @@ pub fn remember_named_voices(
                 &voice.name
             };
             samples.push(VoiceSample {
-                speaker: if own {
-                    "me".into()
-                } else {
-                    voice.speaker.clone()
-                },
+                speaker: voice.speaker.clone(),
                 name: name.clone(),
                 embedding: embed(&wav, ranges)?,
                 own,
@@ -113,8 +109,11 @@ pub fn remember_named_voices(
     );
     ensure!(!cancelled(), "Операция Толка отменена");
     if !samples.is_empty() {
-        report.count = Library::open(meeting.path().parent().context("Нет библиотеки")?)?
-            .remember_tolk_voices(meeting, transcript, samples, enrollment, &cancelled)?;
+        let (count, skipped) =
+            Library::open(meeting.path().parent().context("Нет библиотеки")?)?
+                .remember_tolk_voices(meeting, transcript, samples, expected, &cancelled)?;
+        report.count = count;
+        report.skipped.extend(skipped);
     }
     Ok(report)
 }
@@ -216,7 +215,7 @@ mod tests {
         }
     }
     #[test]
-    fn registered_identities_with_equal_names_never_merge_or_pollute_own_voice() {
+    fn registered_namesakes_are_skipped_without_polluting_the_own_voice() {
         let (_root, library, meeting, transcript) = fixture();
         library
             .write_meeting_voices(
@@ -227,51 +226,26 @@ mod tests {
         library
             .remember_speakers_owned(&meeting, &transcript, true)
             .unwrap();
-        let own = library.read_voices().unwrap().voices[0].clone();
+        let before = library.read_voices().unwrap();
         let report = remember_named_voices(
             &meeting,
             &transcript,
             &[evidence("ktalk-a", true), evidence("ktalk-b", true)],
             false,
-            notetaker_core::VoiceEnrollmentId::new(
-                meeting.read_meta().unwrap().id,
-                meeting.load_transcript().unwrap().revision,
-            ),
+            meeting.load_transcript().unwrap().revision,
             |_, _| Ok(vec![0.0, 1.0, 0.0]),
             || false,
         )
         .unwrap();
-        assert_eq!(report.count, 2);
-        let voices = library.read_voices().unwrap();
-        assert_eq!(voices.voices.len(), 3);
-        assert_eq!(voices.voices.iter().find(|v| v.is_me).unwrap(), &own);
+        assert_eq!(report.count, 0);
+        assert_eq!(report.skipped.len(), 2);
         assert!(
-            voices
-                .voices
+            report
+                .skipped
                 .iter()
-                .any(|v| v.id.as_deref() == Some("ktalk-a") && !v.is_me)
+                .all(|reason| reason.contains(notetaker_core::VOICE_NAME_TAKEN))
         );
-        assert!(
-            voices
-                .voices
-                .iter()
-                .any(|v| v.id.as_deref() == Some("ktalk-b") && !v.is_me)
-        );
-        let again = remember_named_voices(
-            &meeting,
-            &transcript,
-            &[evidence("ktalk-a", true)],
-            false,
-            notetaker_core::VoiceEnrollmentId::new(
-                meeting.read_meta().unwrap().id,
-                meeting.load_transcript().unwrap().revision,
-            ),
-            |_, _| Ok(vec![0.0, 0.0, 1.0]),
-            || false,
-        )
-        .unwrap();
-        assert_eq!(again.count, 1);
-        assert_eq!(library.read_voices().unwrap().voices.len(), 3);
+        assert_eq!(library.read_voices().unwrap(), before);
     }
     #[test]
     fn guests_with_the_same_name_create_no_voice_records_and_foreign_mic_is_ignored() {
@@ -285,10 +259,7 @@ mod tests {
                 evidence("ktalk-guest-b", false),
             ],
             false,
-            notetaker_core::VoiceEnrollmentId::new(
-                meeting.read_meta().unwrap().id,
-                meeting.load_transcript().unwrap().revision,
-            ),
+            meeting.load_transcript().unwrap().revision,
             |_, _| {
                 called = true;
                 Ok(vec![1.0])
@@ -307,12 +278,10 @@ mod tests {
         owner.track = Some(Channel::Mic);
         owner.ranges = vec![(0, 7000)];
         let mut peer = evidence("ktalk-peer", true);
+        peer.name = "Анна Петрова".into();
         peer.ranges = vec![(10000, 17000)];
         let mut channels = Vec::new();
-        let id = notetaker_core::VoiceEnrollmentId::new(
-            meeting.read_meta().unwrap().id,
-            meeting.load_transcript().unwrap().revision,
-        );
+        let id = meeting.load_transcript().unwrap().revision;
         let result = remember_named_voices(
             &meeting,
             &transcript,
@@ -358,10 +327,7 @@ mod tests {
             &transcript,
             &[short, owner],
             true,
-            notetaker_core::VoiceEnrollmentId::new(
-                meeting.read_meta().unwrap().id,
-                meeting.load_transcript().unwrap().revision,
-            ),
+            meeting.load_transcript().unwrap().revision,
             |path, ranges| {
                 assert_eq!(path.file_name().unwrap(), "Mic.wav");
                 assert!(ranges.iter().all(|r| r.end_ms - r.start_ms <= 15000));
@@ -388,10 +354,7 @@ mod tests {
                 &Transcript::default(),
                 &[],
                 false,
-                notetaker_core::VoiceEnrollmentId::new(
-                    meeting.read_meta().unwrap().id,
-                    meeting.load_transcript().unwrap().revision
-                ),
+                meeting.load_transcript().unwrap().revision,
                 |_, _| {
                     called = true;
                     Ok(vec![1.0])
@@ -412,10 +375,7 @@ mod tests {
             &transcript,
             &[evidence("ktalk-a", true)],
             false,
-            notetaker_core::VoiceEnrollmentId::new(
-                meeting.read_meta().unwrap().id,
-                meeting.load_transcript().unwrap().revision,
-            ),
+            meeting.load_transcript().unwrap().revision,
             |_, _| {
                 cancelled.set(true);
                 Ok(vec![1.0, 0.0])

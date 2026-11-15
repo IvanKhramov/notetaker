@@ -2276,6 +2276,7 @@ impl AppState {
                     match &result {
                         Ok(result) => {
                             document.speaker_ui.undo = result.undo.clone();
+                            document.speaker_ui.voice_status = result.voice_status.clone();
                         }
                         Err(error) => {
                             self.error = Some(error.clone());
@@ -3848,6 +3849,7 @@ mod tests {
             result: Ok(notetaker_core::SpeakerEditResult {
                 undo: None,
                 renamed_meetings: Vec::new(),
+                voice_status: String::new(),
             }),
         });
         let document = &state.documents[&path];
@@ -3882,6 +3884,7 @@ mod tests {
             result: Ok(notetaker_core::SpeakerEditResult {
                 undo: None,
                 renamed_meetings: vec![other_path.clone()],
+                voice_status: String::new(),
             }),
         });
         assert!(!state.documents.contains_key(&other_path));

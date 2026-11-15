@@ -535,6 +535,10 @@ mod tests {
             .write_meeting_voices(&meeting, BTreeMap::from([("me".into(), vec![1.0, 0.0])]))
             .unwrap();
         let mut enrollment = Transcript::default();
+        let mut own_turn = transcript.segments[0].clone();
+        own_turn.speaker = SpeakerId("me".into());
+        own_turn.channel = Channel::Mic;
+        enrollment.segments.push(own_turn);
         enrollment.rename_speaker("me", "Иван");
         library
             .remember_speakers_owned(&meeting, &enrollment, true)

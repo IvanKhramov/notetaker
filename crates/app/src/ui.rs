@@ -2323,6 +2323,12 @@ impl NotetakerApp {
             );
         }
         self.advance_toasts(ctx);
+        self.state.ktalk.undo_visible = self
+            .toasts
+            .iter()
+            .filter_map(|toast| toast.undo_ktalk.as_ref())
+            .map(|undo| (undo.meeting.path().to_path_buf(), undo.after))
+            .collect();
         if self.toasts.is_empty() && self.state.error.is_none() {
             return;
         }
@@ -2392,6 +2398,9 @@ impl NotetakerApp {
                         .settings_edited(false, self.state.settings_autosave.llm);
                 }
                 if let Some(index) = dismiss {
+                    if let Some(undo) = &self.toasts[index].undo_ktalk {
+                        self.state.ktalk.undo_visible.remove(undo.meeting.path());
+                    }
                     self.toasts.remove(index);
                 }
                 if let Some(path) = reveal {
@@ -5414,6 +5423,8 @@ fn push_toast(queue: &mut VecDeque<Toast>, toast: Toast) {
     if let Some(existing) = queue.iter_mut().find(|t| {
         t.undo_ktalk.as_ref().map(|u| u.meeting.path())
             == toast.undo_ktalk.as_ref().map(|u| u.meeting.path())
+            && t.undo_ktalk.as_ref().map(|undo| undo.after)
+                == toast.undo_ktalk.as_ref().map(|undo| undo.after)
             && t.level == toast.level
             && t.text == toast.text
             && t.undo_title.as_ref().map(|undo| undo.meeting.path())
@@ -5453,6 +5464,40 @@ mod toast_lifetime_tests {
             last_tick: now,
             was_focused: false,
         }
+    }
+    #[test]
+    fn later_tolk_sync_with_the_same_message_keeps_its_own_undo() {
+        let root = tempfile::tempdir().unwrap();
+        let library = notetaker_core::Library::open(root.path()).unwrap();
+        let meeting = library
+            .create_meeting(notetaker_core::MeetingMeta::new(
+                "Пример",
+                chrono::Utc::now(),
+            ))
+            .unwrap();
+        let before = meeting.read_transcript().unwrap();
+        let first = meeting.load_transcript().unwrap().revision;
+        meeting
+            .update_transcript(|text| {
+                text.rename_speaker("s1", "Анна Петрова");
+            })
+            .unwrap();
+        let second = meeting.load_transcript().unwrap().revision;
+        let mut queue = VecDeque::new();
+        for after in [first, second] {
+            let mut message = toast(Instant::now(), ToastLevel::Success);
+            message.undo_ktalk = Some(crate::ktalk::Undo {
+                meeting: meeting.clone(),
+                before: before.clone(),
+                after,
+            });
+            push_toast(&mut queue, message);
+        }
+        assert_eq!(queue.len(), 2);
+        assert_eq!(
+            queue.back().unwrap().undo_ktalk.as_ref().unwrap().after,
+            second
+        );
     }
     #[test]
     fn warning_waits_for_six_seconds_of_focus_and_error_never_times_out() {

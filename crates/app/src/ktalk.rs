@@ -37,6 +37,13 @@ impl Control {
         *self.asr.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
     }
 }
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingEnrollment {
+    pub meeting: uuid::Uuid,
+    pub recording_id: String,
+    pub revision: Revision,
+    pub not_before: DateTime<Utc>,
+}
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Progress {
     #[serde(default)]
@@ -48,7 +55,7 @@ pub struct Progress {
     #[serde(default)]
     pub enrol_pending: bool,
     #[serde(default)]
-    pub enrollment: Option<notetaker_core::VoiceEnrollmentId>,
+    pub pending_enrollment: Option<PendingEnrollment>,
     #[serde(default)]
     pub recording_id: Option<String>,
     #[serde(default)]
@@ -112,7 +119,6 @@ pub struct Undo {
     pub meeting: Meeting,
     pub before: Transcript,
     pub after: Revision,
-    pub enrollment: Option<notetaker_core::VoiceEnrollmentId>,
 }
 pub struct Applied {
     pub document: Box<DocumentData>,
@@ -194,7 +200,6 @@ pub enum Message {
     },
     Undone {
         document: Box<DocumentData>,
-        review: Vec<String>,
         progress: Progress,
     },
     Enrolled {
@@ -227,6 +232,8 @@ pub struct State {
     pub enroll_pending: Option<Task>,
     pub voice_offer_seen: bool,
     pub undo_pending: Option<Undo>,
+    pub undo_visible: BTreeMap<PathBuf, Revision>,
+    undo_closed: BTreeMap<PathBuf, Revision>,
     pub load_root: Option<PathBuf>,
     pub address: String,
     key: String,
@@ -238,6 +245,22 @@ pub struct State {
 impl State {
     pub fn editing(&self, path: &Path) -> bool {
         self.busy_path.as_deref() == Some(path)
+    }
+    fn enrollment_ready(&self, task: &Task, now: DateTime<Utc>) -> bool {
+        task.progress.enrol_pending
+            && task
+                .progress
+                .pending_enrollment
+                .as_ref()
+                .is_some_and(|pending| {
+                    now >= pending.not_before
+                        && self.undo_visible.get(task.meeting.path()) != Some(&pending.revision)
+                        && !self.successes.iter().any(|(undo, _)| {
+                            undo.meeting.path() == task.meeting.path()
+                                && undo.after == pending.revision
+                        })
+                })
+            && task.progress.next.is_none_or(|next| next <= now)
     }
     pub fn next(&self, now: DateTime<Utc>, blocked: impl Fn(&Path) -> bool) -> Option<Task> {
         if self.busy || !self.saved || !self.settings.as_ref().is_some_and(Settings::auto_sync) {
@@ -300,11 +323,20 @@ pub(crate) fn recorded_here(meeting: &Meeting) -> Result<bool> {
 }
 pub fn pickup(root: &Path, now: DateTime<Utc>) -> Result<Vec<Task>> {
     let library = Library::open(root)?;
+    library.discard_voice_ledgers()?;
     let mut tasks = Vec::new();
     for meeting in library.list_meetings()? {
         let meta = meeting.read_meta()?;
         let Some(ended) = meta.ended_at else { continue };
         let mut progress = read_progress(&meeting)?;
+        if progress.enrol_pending && progress.pending_enrollment.is_none() {
+            progress.enrol_pending = false;
+            persist(&Task {
+                meeting: meeting.clone(),
+                ended,
+                progress: progress.clone(),
+            })?;
+        }
         if !progress.recorded_here && !progress.enrol_pending {
             continue;
         }
@@ -314,6 +346,7 @@ pub fn pickup(root: &Path, now: DateTime<Utc>) -> Result<Vec<Task>> {
         if ended < now - chrono::Duration::hours(24) {
             if progress.enrol_pending {
                 progress.enrol_pending = false;
+                progress.pending_enrollment = None;
                 persist(&Task {
                     meeting,
                     ended,
@@ -341,6 +374,7 @@ fn read_progress(meeting: &Meeting) -> Result<Progress> {
     })
 }
 fn load(root: &Path, store: &dyn CredentialStore) -> Result<Message> {
+    let tasks = pickup(root, Utc::now())?;
     let settings = Settings::from_path(&notetaker_llm::Config::path()?)?;
     let saved = settings.as_ref().is_some_and(|settings| {
         if let Some(env) = &settings.api_key_env {
@@ -354,7 +388,7 @@ fn load(root: &Path, store: &dyn CredentialStore) -> Result<Message> {
     Ok(Message::Loaded {
         settings,
         saved,
-        tasks: pickup(root, Utc::now())?,
+        tasks,
         people: Library::open(root)?.people(false, "", "")?,
         voice_offer_seen: offer_path(root)?.is_file(),
     })
@@ -399,27 +433,19 @@ fn plan_for_task(
 }
 fn pending_matches(task: &Task) -> Result<bool> {
     let fresh = read_progress(&task.meeting)?;
-    let Some(id) = task.progress.enrollment else {
+    let Some(pending) = &task.progress.pending_enrollment else {
         return Ok(false);
     };
     let loaded = task.meeting.load_transcript()?;
-    let library = Library::open(task.meeting.path().parent().context("Нет библиотеки")?)?;
-    Ok(library.tolk_enrollment_active(id)?
-        && fresh.enrol_pending
-        && fresh.enrollment == Some(id)
-        && id.meeting == task.meeting.read_meta()?.id
-        && loaded.revision == id.revision
-        && task
-            .progress
-            .recording_id
-            .as_ref()
-            .is_some_and(|recording| {
-                loaded
-                    .value
-                    .ktalk_sources
-                    .values()
-                    .any(|value| value == recording)
-            }))
+    Ok(fresh.enrol_pending
+        && fresh.pending_enrollment.as_ref() == Some(pending)
+        && pending.meeting == task.meeting.read_meta()?.id
+        && loaded.revision == pending.revision
+        && loaded
+            .value
+            .ktalk_sources
+            .values()
+            .any(|id| id == &pending.recording_id))
 }
 fn enroll_plan(task: &Task, plan: &Plan, control: &Control) -> Result<String> {
     control.check()?;
@@ -455,7 +481,11 @@ fn enroll_plan(task: &Task, plan: &Plan, control: &Control) -> Result<String> {
         &transcript,
         &plan.voices,
         recorded_here(&task.meeting)?,
-        task.progress.enrollment.context("Нет unit обучения")?,
+        task.progress
+            .pending_enrollment
+            .as_ref()
+            .context("Нет запроса обучения")?
+            .revision,
         |wav, ranges| {
             control.check()?;
             let result = client.embed(wav, ranges)?;
@@ -508,10 +538,13 @@ fn apply_names(
     task.progress.recording_id = Some(plan.recording.id.clone());
     task.progress.source_time = Some(plan.recording.created_date);
     task.progress.enrol_pending = voices;
-    task.progress.enrollment = Some(notetaker_core::VoiceEnrollmentId::new(
-        meeting.read_meta()?.id,
-        applied.after.revision,
-    ));
+    task.progress.pending_enrollment = Some(PendingEnrollment {
+        meeting: meeting.read_meta()?.id,
+        recording_id: plan.recording.id.clone(),
+        revision: applied.after.revision,
+        not_before: Utc::now() + chrono::Duration::minutes(2),
+    });
+    task.progress.next = None;
     task.progress.guest_ranges = plan
         .voices
         .iter()
@@ -526,27 +559,7 @@ fn apply(task: &mut Task, plan: &Plan, voices: bool, control: &Control) -> Resul
     let (applied, segments) = apply_names(task, plan, voices, control)?;
     let meeting = task.meeting.clone();
     let mut voice_status = if voices {
-        match enroll_plan(task, plan, control) {
-            Ok(status) => {
-                task.progress.enrol_pending = false;
-                status
-            }
-            Err(_error)
-                if !meeting.mic_audio_path().is_file()
-                    && !meeting.system_audio_path().is_file() =>
-            {
-                task.progress.enrol_pending = false;
-                "Аудио не хранится: голоса не запомнены".into()
-            }
-            Err(_) if control.token.is_cancelled() => {
-                task.progress.next = None;
-                "Обучение будет продолжено после запуска".into()
-            }
-            Err(error) => {
-                task.network_retry(Utc::now());
-                format!("Обучение ожидает повтора: {error:#}")
-            }
-        }
+        "Голоса будут сохранены после закрытия уведомления, не раньше чем через 2 минуты".into()
     } else {
         String::new()
     };
@@ -561,7 +574,6 @@ fn apply(task: &mut Task, plan: &Plan, voices: bool, control: &Control) -> Resul
             meeting: meeting.clone(),
             before: applied.before,
             after: applied.after.revision,
-            enrollment: task.progress.enrollment,
         },
         segments,
         recording: plan.recording.clone(),
@@ -755,32 +767,28 @@ pub fn run_control(job: Job, store: &dyn CredentialStore, control: &Control) -> 
             }
             Job::Undo(undo) => {
                 control.check()?;
+                let progress = read_progress(&undo.meeting)?;
+                anyhow::ensure!(
+                    progress
+                        .pending_enrollment
+                        .as_ref()
+                        .is_some_and(|pending| pending.revision == undo.after),
+                    "Транскрипт изменился после сверки, отмена недоступна"
+                );
                 undo.meeting.restore_transcript(&undo.before, undo.after)?;
                 let mut task = Task {
                     ended: undo.meeting.read_meta()?.ended_at.unwrap_or_else(Utc::now),
                     progress: read_progress(&undo.meeting)?,
                     meeting: undo.meeting.clone(),
                 };
-                if task.progress.enrollment == undo.enrollment {
-                    task.progress.enrol_pending = false;
-                    task.progress.enrol_status = "Сверка отменена".into();
-                    persist(&task)?;
-                }
-                let library =
-                    Library::open(undo.meeting.path().parent().context("Нет библиотеки")?)?;
-                let mut review = if let Some(id) = undo.enrollment {
-                    library
-                        .undo_tolk_voices(&undo.meeting, id)
-                        .unwrap_or_else(|error| vec![format!("Биометрия: {error}")])
-                } else {
-                    Vec::new()
-                };
-                if let Err(error) = library.reindex_incremental() {
-                    review.push(format!("Поиск: {error}"));
-                }
+                task.progress.enrol_pending = false;
+                task.progress.pending_enrollment = None;
+                task.progress.enrol_status = "Сверка отменена".into();
+                persist(&task)?;
+                Library::open(undo.meeting.path().parent().context("Нет библиотеки")?)?
+                    .reindex_incremental()?;
                 Message::Undone {
                     document: Box::new(DocumentData::read(undo.meeting)?),
-                    review,
                     progress: task.progress,
                 }
             }
@@ -800,32 +808,22 @@ pub fn run_control(job: Job, store: &dyn CredentialStore, control: &Control) -> 
                     );
                     task.progress.recording_id = ids.into_iter().next();
                 }
-                if task.progress.enrollment.is_none() {
-                    task.progress.enrollment = Some(notetaker_core::VoiceEnrollmentId::new(
-                        task.meeting.read_meta()?.id,
-                        task.meeting.load_transcript()?.revision,
-                    ));
-                }
+                anyhow::ensure!(
+                    task.progress.pending_enrollment.is_some(),
+                    "Повторите сверку Толка перед обучением"
+                );
+                task.progress.next = None;
                 persist(&task)?;
                 mark_offer_seen(&task)?;
-                if !task.meeting.mic_audio_path().is_file()
-                    && !task.meeting.system_audio_path().is_file()
-                {
-                    task.progress.enrol_pending = false;
-                    task.progress.enrol_status = "Аудио не хранится: голоса не запомнены".into();
-                    persist(&task)?;
-                    return Ok(Message::Enrolled {
-                        path: task.meeting.path().into(),
-                        status: task.progress.enrol_status.clone(),
-                        task,
-                    });
+                Message::Enrolled {
+                    path: task.meeting.path().into(),
+                    status: "Голоса будут сохранены после закрытия уведомления, не раньше чем через 2 минуты после сверки".into(),
+                    task,
                 }
-                let settings = Settings::from_path(&notetaker_llm::Config::path()?)?
-                    .context("Настройте Толк для обучения голосов")?;
-                return Ok(run_control(Job::Resume(task, settings), store, control));
             }
             Job::SkipEnrollment(mut task, status) => {
                 task.progress.enrol_pending = false;
+                task.progress.pending_enrollment = None;
                 task.progress.enrol_status = status.clone();
                 persist(&task)?;
                 Message::Enrolled {
@@ -837,9 +835,22 @@ pub fn run_control(job: Job, store: &dyn CredentialStore, control: &Control) -> 
             Job::Resume(mut task, settings) => {
                 if !pending_matches(&task)? {
                     task.progress.enrol_pending = false;
+                    task.progress.pending_enrollment = None;
                     task.progress.enrol_status =
                         "Транскрипт изменился после сверки; обучение пропущено".into();
                     persist(&task)?;
+                    return Ok(Message::Enrolled {
+                        path: task.meeting.path().into(),
+                        status: task.progress.enrol_status.clone(),
+                        task,
+                    });
+                }
+                if task
+                    .progress
+                    .pending_enrollment
+                    .as_ref()
+                    .is_some_and(|pending| Utc::now() < pending.not_before)
+                {
                     return Ok(Message::Enrolled {
                         path: task.meeting.path().into(),
                         status: task.progress.enrol_status.clone(),
@@ -864,6 +875,7 @@ pub fn run_control(job: Job, store: &dyn CredentialStore, control: &Control) -> 
                 let status = match result {
                     Ok(status) => {
                         task.progress.enrol_pending = false;
+                        task.progress.pending_enrollment = None;
                         status
                     }
                     Err(_) if control.token.is_cancelled() => {
@@ -1460,13 +1472,19 @@ pub fn transcript_ui(ui: &mut eframe::egui::Ui, state: &mut crate::state::AppSta
 
 impl crate::state::AppState {
     pub fn ktalk_can_undo(&self, undo: &Undo) -> bool {
-        self.documents
-            .get(undo.meeting.path())
-            .is_none_or(|document| {
-                !document.dirty.any()
-                    && !document.saving
-                    && document.data.revisions.transcript == undo.after
-            })
+        self.ktalk.undo_closed.get(undo.meeting.path()) != Some(&undo.after)
+            && (self.ktalk.undo_visible.get(undo.meeting.path()) == Some(&undo.after)
+                || self.ktalk.undo_pending.as_ref().is_some_and(|pending| {
+                    pending.meeting.path() == undo.meeting.path() && pending.after == undo.after
+                }))
+            && self
+                .documents
+                .get(undo.meeting.path())
+                .is_none_or(|document| {
+                    !document.dirty.any()
+                        && !document.saving
+                        && document.data.revisions.transcript == undo.after
+                })
     }
     pub fn ktalk_job(&mut self, job: Job) {
         if self.ktalk.busy || self.settings_pending {
@@ -1474,6 +1492,17 @@ impl crate::state::AppState {
         }
         if self.exit_requested {
             return;
+        }
+        if let Job::Resume(task, _) = &job
+            && let Some(pending) = &task.progress.pending_enrollment
+        {
+            if !self.ktalk.enrollment_ready(task, Utc::now()) {
+                return;
+            }
+            self.ktalk
+                .undo_closed
+                .insert(task.meeting.path().into(), pending.revision);
+            self.ktalk.undo_visible.remove(task.meeting.path());
         }
         self.ktalk.biometric = matches!(
             &job,
@@ -1563,9 +1592,11 @@ impl crate::state::AppState {
             return;
         }
         if !self.ktalk.busy
-            && let Some(undo) = self.ktalk.undo_pending.take()
+            && let Some(undo) = self.ktalk.undo_pending.clone()
         {
-            if !self.ktalk_can_undo(&undo) {
+            let allowed = self.ktalk_can_undo(&undo);
+            self.ktalk.undo_pending = None;
+            if !allowed {
                 self.error = Some("Транскрипт изменился после сверки, отмена недоступна".into());
             } else {
                 self.ktalk_job(Job::Undo(undo));
@@ -1579,8 +1610,15 @@ impl crate::state::AppState {
                 .tasks
                 .values()
                 .find(|task| {
-                    task.progress.enrol_pending
-                        && task.progress.next.is_none_or(|next| next <= Utc::now())
+                    self.ktalk.enrollment_ready(task, Utc::now())
+                        && self
+                            .documents
+                            .get(task.meeting.path())
+                            .is_none_or(|document| {
+                                !document.dirty.any()
+                                    && !document.saving
+                                    && !document.speaker_ui.busy
+                            })
                 })
                 .cloned()
             && let Some(settings) = self.ktalk.settings.clone()
@@ -1751,11 +1789,7 @@ impl crate::state::AppState {
                 }
                 self.ktalk.tasks.insert(path, task);
             }
-            Message::Undone {
-                document,
-                review,
-                progress,
-            } => {
+            Message::Undone { document, progress } => {
                 if self
                     .ktalk
                     .enroll_pending
@@ -1764,22 +1798,13 @@ impl crate::state::AppState {
                 {
                     self.ktalk.enroll_pending = None;
                 }
+                self.ktalk.voice_status.insert(
+                    document.meeting.path().into(),
+                    progress.enrol_status.clone(),
+                );
                 if let Some(task) = self.ktalk.tasks.get_mut(document.meeting.path()) {
                     task.progress = progress;
                 }
-                if !review.is_empty() {
-                    self.notices.push((
-                        crate::theme::ToastLevel::Warning,
-                        format!(
-                            "Транскрипт восстановлен. Проверьте голоса в настройках: {}",
-                            review.join(", ")
-                        ),
-                    ));
-                }
-                self.send(crate::worker::Command::Voices {
-                    root: self.settings.library.clone(),
-                    delete: None,
-                });
                 if let Some(doc) = self.documents.get_mut(document.meeting.path()) {
                     doc.data.transcript = document.transcript;
                     doc.data.revisions.transcript = document.revisions.transcript;
@@ -1816,106 +1841,147 @@ impl crate::state::AppState {
 mod tests {
     use super::*;
     #[test]
-    fn undo_clears_pending_and_prevents_resume_after_asr_failure() {
-        let (_root, mut task, plan) = fixture();
-        let (applied, _) = apply_names(&mut task, &plan, true, &Control::default()).unwrap();
-        let stale = task.clone();
-        assert!(pending_matches(&task).unwrap());
-        let undo = Undo {
-            meeting: task.meeting.clone(),
-            before: applied.before,
-            after: applied.after.revision,
-            enrollment: task.progress.enrollment,
-        };
-        let message = run(Job::Undo(undo), &Store::default());
-        assert!(matches!(message, Message::Undone { .. }));
-        assert!(!read_progress(&task.meeting).unwrap().enrol_pending);
-        assert!(!pending_matches(&stale).unwrap());
-        let reply = run(Job::Resume(stale, settings()), &Store::default());
-        assert!(matches!(reply, Message::Enrolled { .. }));
-        assert!(!read_progress(&task.meeting).unwrap().enrol_pending);
-        assert!(
-            Library::open(task.meeting.path().parent().unwrap())
-                .unwrap()
-                .read_voices()
-                .unwrap()
-                .voices
-                .is_empty()
-        );
-    }
-    #[test]
-    fn an_edit_after_apply_drops_pending_without_enrollment() {
-        let (_root, mut task, plan) = fixture();
-        apply_names(&mut task, &plan, true, &Control::default()).unwrap();
-        task.meeting
-            .update_transcript(|text| text.segments[0].text = "Поздняя правка".into())
-            .unwrap();
-        let before = std::fs::read(task.meeting.path().join("transcript.json")).unwrap();
-        let reply = run(Job::Resume(task.clone(), settings()), &Store::default());
-        assert!(matches!(reply, Message::Enrolled { .. }));
-        assert!(!read_progress(&task.meeting).unwrap().enrol_pending);
-        assert_eq!(
-            std::fs::read(task.meeting.path().join("transcript.json")).unwrap(),
-            before
-        );
-    }
-    #[test]
-    fn sync_undo_reverts_biometrics_and_keeps_later_meeting_samples() {
+    fn undo_window_writes_no_biometrics_and_restores_the_transcript() {
         let (root, mut task, plan) = fixture();
-        let (applied, _) = apply_names(&mut task, &plan, true, &Control::default()).unwrap();
         let library = Library::open(root.path()).unwrap();
-        let voice = &plan.voices.iter().find(|voice| voice.registered).unwrap();
-        let id = task.progress.enrollment.unwrap();
         library
-            .remember_tolk_voices(
+            .write_meeting_voices(
                 &task.meeting,
-                &applied.after.value,
-                vec![notetaker_core::VoiceSample {
-                    speaker: voice.speaker.clone(),
-                    name: voice.name.clone(),
-                    embedding: vec![1.0, 0.0],
-                    own: false,
-                }],
-                id,
-                || false,
+                BTreeMap::from([("me".into(), vec![1.0, 0.0])]),
             )
             .unwrap();
-        let mut other_meta = notetaker_core::MeetingMeta::new("Другая встреча", Utc::now());
-        other_meta.ended_at = Some(Utc::now());
-        let other = library.create_meeting(other_meta).unwrap();
-        let other_text = other.read_transcript().unwrap();
-        let other_id = notetaker_core::VoiceEnrollmentId::new(
-            other.read_meta().unwrap().id,
-            other.load_transcript().unwrap().revision,
+        let bank = library.private_state_dir().join("voices.json");
+        let cache = library.private_state_dir().join(format!(
+            "speaker-embeddings/{}.json",
+            task.meeting.read_meta().unwrap().id
+        ));
+        let before_bank = std::fs::read(&bank).ok();
+        let before_cache = std::fs::read(&cache).unwrap();
+        let original = task.meeting.read_transcript().unwrap();
+        let applied = apply(&mut task, &plan, true, &Control::default()).unwrap();
+        assert_eq!(std::fs::read(&bank).ok(), before_bank);
+        assert_eq!(std::fs::read(&cache).unwrap(), before_cache);
+        assert!(matches!(
+            run(Job::Undo(applied.undo), &Store::default()),
+            Message::Undone { .. }
+        ));
+        assert_eq!(task.meeting.read_transcript().unwrap(), original);
+        assert_eq!(std::fs::read(&bank).ok(), before_bank);
+        assert_eq!(std::fs::read(&cache).unwrap(), before_cache);
+        let progress = read_progress(&task.meeting).unwrap();
+        assert!(!progress.enrol_pending && progress.pending_enrollment.is_none());
+        assert!(!pending_matches(&task).unwrap());
+        assert!(
+            !library
+                .private_state_dir()
+                .join("voice-enrollments")
+                .exists()
         );
-        library
-            .remember_tolk_voices(
-                &other,
-                &other_text,
-                vec![notetaker_core::VoiceSample {
-                    speaker: voice.speaker.clone(),
-                    name: voice.name.clone(),
-                    embedding: vec![0.0, 1.0],
-                    own: false,
-                }],
-                other_id,
-                || false,
-            )
-            .unwrap();
-        let reply = run(
-            Job::Undo(Undo {
-                meeting: task.meeting.clone(),
-                before: applied.before.clone(),
-                after: applied.after.revision,
-                enrollment: Some(id),
-            }),
-            &Store::default(),
+    }
+    #[test]
+    fn enrollment_waits_for_both_timer_and_toast_then_closes_undo() {
+        let (_root, mut task, plan) = fixture();
+        let applied = apply(&mut task, &plan, true, &Control::default()).unwrap();
+        let pending = task.progress.pending_enrollment.as_ref().unwrap();
+        let (mut state, _commands, _events) = crate::test_ui::state();
+        state
+            .ktalk
+            .undo_visible
+            .insert(task.meeting.path().into(), pending.revision);
+        assert!(state.ktalk_can_undo(&applied.undo));
+        assert!(
+            !state
+                .ktalk
+                .enrollment_ready(&task, pending.not_before - chrono::Duration::seconds(1))
         );
-        assert!(matches!(reply, Message::Undone { .. }));
-        assert_eq!(task.meeting.read_transcript().unwrap(), applied.before);
-        let bank = library.read_voices().unwrap();
-        assert_eq!(bank.voices.len(), 1);
-        assert_eq!(bank.voices[0].embeddings, vec![vec![0.0, 1.0]]);
+        assert!(
+            !state
+                .ktalk
+                .enrollment_ready(&task, pending.not_before + chrono::Duration::minutes(1))
+        );
+        state.ktalk.undo_visible.clear();
+        assert!(
+            !state
+                .ktalk
+                .enrollment_ready(&task, pending.not_before - chrono::Duration::seconds(1))
+        );
+        assert!(state.ktalk.enrollment_ready(&task, pending.not_before));
+        let mut ready = task.clone();
+        ready
+            .progress
+            .pending_enrollment
+            .as_mut()
+            .unwrap()
+            .not_before = Utc::now() - chrono::Duration::seconds(1);
+        state.ktalk_job(Job::Resume(ready, settings()));
+        state
+            .ktalk
+            .undo_visible
+            .insert(task.meeting.path().into(), pending.revision);
+        assert!(!state.ktalk_can_undo(&applied.undo));
+    }
+    #[test]
+    fn restart_preserves_only_the_timer_and_never_offers_undo() {
+        let (root, mut task, plan) = fixture();
+        let applied = apply(&mut task, &plan, true, &Control::default()).unwrap();
+        let pending = task.progress.pending_enrollment.as_ref().unwrap().clone();
+        let picked = pickup(root.path(), Utc::now()).unwrap();
+        let restored = &picked[0];
+        assert_eq!(
+            restored.progress.pending_enrollment.as_ref(),
+            Some(&pending)
+        );
+        let (state, _commands, _events) = crate::test_ui::state();
+        assert!(!state.ktalk_can_undo(&applied.undo));
+        assert!(
+            !state
+                .ktalk
+                .enrollment_ready(restored, pending.not_before - chrono::Duration::seconds(1))
+        );
+        assert!(state.ktalk.enrollment_ready(restored, pending.not_before));
+        let reply = run(Job::Resume(restored.clone(), settings()), &Store::default());
+        assert!(matches!(reply, Message::Enrolled { .. }));
+        assert!(read_progress(&task.meeting).unwrap().enrol_pending);
+        let json = serde_json::to_value(&pending).unwrap();
+        assert_eq!(json.as_object().unwrap().len(), 4);
+    }
+    #[test]
+    fn edits_or_undo_drop_pending_before_any_network_or_embedding() {
+        for undo in [false, true] {
+            let (_root, mut task, plan) = fixture();
+            let applied = apply(&mut task, &plan, true, &Control::default()).unwrap();
+            if undo {
+                assert!(matches!(
+                    run(Job::Undo(applied.undo), &Store::default()),
+                    Message::Undone { .. }
+                ));
+            } else {
+                task.meeting
+                    .update_transcript(|text| text.segments[0].text = "Поздняя правка".into())
+                    .unwrap();
+            }
+            let reply = run(Job::Resume(task.clone(), settings()), &Store::default());
+            assert!(matches!(reply, Message::Enrolled { .. }));
+            let progress = read_progress(&task.meeting).unwrap();
+            assert!(!progress.enrol_pending && progress.pending_enrollment.is_none());
+        }
+    }
+    #[test]
+    fn startup_removes_unreleased_biometric_snapshots() {
+        let (root, task, _plan) = fixture();
+        let library = Library::open(root.path()).unwrap();
+        // Publish the obsolete directory atomically: other startup tests may clean it too.
+        let staged = tempfile::tempdir_in(library.private_state_dir()).unwrap();
+        std::fs::write(
+            staged.path().join("old.json"),
+            b"{\"before\":{\"embeddings\":[[1,0]]}}",
+        )
+        .unwrap();
+        let obsolete = library.private_state_dir().join("voice-enrollments");
+        std::fs::rename(staged.path(), &obsolete).unwrap();
+        pickup(root.path(), Utc::now()).unwrap();
+        assert!(!obsolete.exists());
+        assert!(recorded_here(&task.meeting).unwrap());
     }
     #[test]
     fn shared_meetings_and_imports_never_gain_local_provenance() {
@@ -2043,9 +2109,14 @@ mod tests {
     }
     #[test]
     fn manual_pending_enrollment_resumes_even_with_auto_names_disabled() {
-        let (_root, mut task, _) = fixture();
-        task.progress.done = true;
-        task.progress.enrol_pending = true;
+        let (_root, mut task, plan) = fixture();
+        apply_names(&mut task, &plan, true, &Control::default()).unwrap();
+        task.progress
+            .pending_enrollment
+            .as_mut()
+            .unwrap()
+            .not_before = Utc::now() - chrono::Duration::seconds(1);
+        persist(&task).unwrap();
         let (mut state, commands, _events) = crate::test_ui::state();
         state.ready = true;
         state.settings.voice_library = true;
@@ -2055,7 +2126,7 @@ mod tests {
         state.ktalk.saved = true;
         state.ktalk.tasks.insert(task.meeting.path().into(), task);
         state.poll_ktalk();
-        assert!(commands.try_iter().any(|command|matches!(command,crate::worker::Command::Ktalk(job,_) if matches!(*job,Job::Resume(..)))));
+        assert!(commands.try_iter().any(|command| matches!(command, crate::worker::Command::Ktalk(job, _) if matches!(*job, Job::Resume(..)))));
     }
     #[test]
     fn ai_save_from_default_after_invalid_ai_keeps_the_valid_tolk_section() {
@@ -2289,27 +2360,27 @@ mod tests {
         assert!(commands.try_iter().any(|command|matches!(command,crate::worker::Command::Ktalk(job,_) if matches!(*job,Job::Enroll(_)))));
     }
     #[test]
-    fn applying_names_and_undo_restore_the_exact_transcript_and_deleted_audio_is_skipped() {
+    fn deleted_audio_is_skipped_only_after_the_undo_window() {
         let (_root, mut task, plan) = fixture();
-        let original = task.meeting.read_transcript().unwrap();
         let applied = apply(&mut task, &plan, true, &Control::default()).unwrap();
         assert!(applied.segments >= 7);
-        assert!(applied.voice_status.contains("Аудио не хранится"));
+        assert!(applied.voice_status.contains("2 минуты"));
         assert!(!applied.document.transcript.ktalk_sources.is_empty());
-        task.after(&Outcome::Applied(Box::new(applied)), Utc::now());
-        assert!(task.progress.done);
-        let loaded = task.meeting.load_transcript().unwrap();
-        let undo = Undo {
-            meeting: task.meeting.clone(),
-            before: original.clone(),
-            after: loaded.revision,
-            enrollment: None,
-        };
+        task.progress
+            .pending_enrollment
+            .as_mut()
+            .unwrap()
+            .not_before = Utc::now() - chrono::Duration::seconds(1);
+        persist(&task).unwrap();
+        let reply = run(Job::Resume(task.clone(), settings()), &Store::default());
+        assert!(
+            matches!(reply, Message::Enrolled { status, .. } if status.contains("Аудио не хранится"))
+        );
+        assert!(!read_progress(&task.meeting).unwrap().enrol_pending);
         assert!(matches!(
-            run(Job::Undo(undo), &Store::default()),
-            Message::Undone { .. }
+            run(Job::Undo(applied.undo), &Store::default()),
+            Message::Error(_)
         ));
-        assert_eq!(task.meeting.read_transcript().unwrap(), original);
     }
     #[derive(Default)]
     struct Store(std::sync::Mutex<BTreeMap<String, String>>);

@@ -17,6 +17,7 @@ pub struct SpeakerUi {
     pub scroll_to: Option<Uuid>,
     pub undo: Option<SpeakerUndo>,
     pub busy: bool,
+    pub voice_status: String,
     pub recalculating: bool,
     pub pending_count: Option<Option<u32>>,
 }
@@ -211,6 +212,15 @@ pub fn rename_menu(
                 if focus {
                     field.request_focus();
                 }
+                if voices.is_some_and(|voices| {
+                    !voices.name_available(
+                        &name,
+                        transcript.speaker_voice_ids.get(id).map(String::as_str),
+                        id == "me" || transcript.self_speaker.as_deref() == Some(id),
+                    )
+                }) {
+                    ui.weak(notetaker_core::VOICE_NAME_TAKEN);
+                }
                 let mut apply = false;
                 let mut cancel = escape;
                 crate::theme::footer(ui, |ui| {
@@ -312,6 +322,9 @@ pub fn count_control(
     let mut edit = None;
     let cached = timeline(document);
     let timeline = &cached.timeline;
+    if !document.speaker_ui.voice_status.is_empty() {
+        ui.weak(&document.speaker_ui.voice_status);
+    }
     ui.horizontal_wrapped(|ui| {
         let response = if unavailable.is_some() {
             ui.label(
