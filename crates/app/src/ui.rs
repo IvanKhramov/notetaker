@@ -569,31 +569,35 @@ impl NotetakerApp {
     fn bottom_bar(&mut self, ui: &mut egui::Ui) {
         let p = Palette::of(ui);
         let note = !self.home && !self.chat_page && !self.people.active() && !self.state.tasks_open;
-        if !self.chat_page {
-            let scope = if note {
-                self.state
-                    .selected
-                    .as_ref()
-                    .and_then(|p| self.state.documents.get(p))
-            } else {
-                None
-            };
-            if self.state.chat.folder != self.state.folder_filter {
-                self.state.chat.messages.clear();
-                self.state.chat.folder = self.state.folder_filter.clone();
-            }
-            self.state.chat.open(
-                scope.map(|d| d.data.meeting.clone()),
-                scope.map(|d| d.data.meta.title.clone()).unwrap_or_default(),
-            );
-        }
-        let live = self.state.recording.phase == Phase::Recording
-            && self
-                .state
+        // The place decides what the next question is about. The dialog itself
+        // changes only when a question is sent, so a look at a cited meeting
+        // keeps the answer on the chat page.
+        let target = if self.chat_page {
+            None
+        } else if note {
+            self.state
+                .selected
+                .as_ref()
+                .and_then(|p| self.state.documents.get(p))
+                .map(|d| (d.data.meeting.clone(), d.data.meta.title.clone()))
+        } else {
+            None
+        };
+        let scope_path = if self.chat_page {
+            self.state
                 .chat
                 .scope
                 .as_ref()
-                .is_some_and(|m| Some(m.path()) == self.state.recording.path.as_deref());
+                .map(|m| m.path().to_path_buf())
+        } else {
+            target.as_ref().map(|(m, _)| m.path().to_path_buf())
+        };
+        let fresh = !self.chat_page
+            && (self.state.chat.scope.as_ref().map(|m| m.path()) != scope_path.as_deref()
+                || self.state.chat.folder != self.state.folder_filter);
+        let live = self.state.recording.phase == Phase::Recording
+            && scope_path.is_some()
+            && scope_path.as_deref() == self.state.recording.path.as_deref();
         let available = !self.state.recording.busy() || live;
         if !available {
             self.focus_chat = false;
@@ -609,11 +613,11 @@ impl NotetakerApp {
                 ask |= self
                     .recipes
                     .show(ui, &mut self.ask_text, &self.state.settings.library);
-                if self.state.chat.messages.is_empty()
+                if (fresh || self.state.chat.messages.is_empty())
                     && !self.state.chat.busy
                     && let Some(prompt) = theme::prompt_chips(
                         ui,
-                        crate::chat::suggestions(self.state.chat.scope.is_some(), live),
+                        crate::chat::suggestions(scope_path.is_some(), live),
                     )
                 {
                     self.ask_text = prompt;
@@ -737,6 +741,14 @@ impl NotetakerApp {
             self.state.toggle_recording();
         }
         if ask && !self.ask_text.trim().is_empty() && can_ask {
+            if !self.chat_page {
+                if self.state.chat.folder != self.state.folder_filter {
+                    self.state.chat.messages.clear();
+                    self.state.chat.folder = self.state.folder_filter.clone();
+                }
+                let (scope, title) = target.unzip();
+                self.state.chat.open(scope, title.unwrap_or_default());
+            }
             self.state.chat.question = std::mem::take(&mut self.ask_text);
             self.state.ask();
             self.chat_page = true;

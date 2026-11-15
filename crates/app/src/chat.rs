@@ -219,6 +219,14 @@ impl Recipes {
         if self.dismissed.as_deref() == Some(input.as_str()) {
             return false;
         }
+        // Keys belong to the list only while no other widget has the keyboard,
+        // otherwise Enter in the search field would send a recipe.
+        let anchor_id = egui::Id::unique("chat-input");
+        let elsewhere = ui.memory(|m| m.focused().is_some_and(|id| id != anchor_id));
+        if elsewhere && !ui.input(|i| i.pointer.any_down() || i.pointer.any_released()) {
+            self.dismissed = Some(input.clone());
+            return false;
+        }
         if self.query.is_none() {
             self.entries = recipes(root);
         }
@@ -229,11 +237,11 @@ impl Recipes {
         self.query = Some(query.into());
         let matches = filtered(&self.entries, query);
         let mut choose = None;
-        if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        if !elsewhere && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
             self.dismissed = Some(input.clone());
             return false;
         }
-        if !matches.is_empty() {
+        if !elsewhere && !matches.is_empty() {
             if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)) {
                 self.selected = (self.selected + 1) % matches.len();
                 scroll = true;
@@ -246,7 +254,7 @@ impl Recipes {
                 choose = Some(matches[self.selected]);
             }
         }
-        if let Some(anchor) = ui.ctx().read_response(egui::Id::unique("chat-input")) {
+        if let Some(anchor) = ui.ctx().read_response(anchor_id) {
             let mut open = true;
             crate::theme::recipe_popup(ui, &anchor, &mut open, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
@@ -375,5 +383,30 @@ mod recipe_ui_tests {
         .drop_without_applying_deltas();
         assert_eq!(input, "/РИСКИ");
         assert_eq!(menu.dismissed.as_deref(), Some("/РИСКИ"));
+    }
+    #[test]
+    fn enter_in_another_field_does_not_send_a_recipe() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let root = tempfile::tempdir().unwrap();
+        let mut menu = Recipes::default();
+        let mut input = "/".to_owned();
+        let mut search = String::new();
+        let enter = egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        for events in [vec![], vec![enter]] {
+            crate::test_ui::frame(&ctx, events, &mut |ui| {
+                ui.text_edit_singleline(&mut search).request_focus();
+                assert!(!menu.show(ui, &mut input, root.path()));
+            })
+            .drop_without_applying_deltas();
+        }
+        assert_eq!(input, "/");
+        assert_eq!(menu.dismissed.as_deref(), Some("/"));
     }
 }
