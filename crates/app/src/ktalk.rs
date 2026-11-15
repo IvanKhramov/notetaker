@@ -335,6 +335,32 @@ fn journal(meeting: &Meeting) -> Result<PathBuf> {
         .private_state_dir()
         .join(format!("ktalk/{}.json", meeting.read_meta()?.id)))
 }
+/// A meeting deleted or moved after its sync leaves a mark that can never
+/// match again. Without this the task would fail on every attempt and hold
+/// the queue.
+fn forget_missing(mut task: Task) -> Result<Message> {
+    if let Some(pending) = &task.progress.pending_enrollment
+        && let Some(root) = task.meeting.path().parent()
+    {
+        let file = Library::open(root)?
+            .private_state_dir()
+            .join(format!("ktalk/{}.json", pending.meeting));
+        match std::fs::remove_file(file) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    task.progress.enrol_pending = false;
+    task.progress.pending_enrollment = None;
+    task.progress.done = true;
+    task.progress.enrol_status = "Встреча удалена или перемещена; голоса не запомнены".into();
+    Ok(Message::Enrolled {
+        path: task.meeting.path().into(),
+        status: task.progress.enrol_status.clone(),
+        task,
+    })
+}
 fn persist(task: &Task) -> Result<()> {
     let mut progress = task.progress.clone();
     // Only register_recording may mint provenance; stale manual tasks cannot erase it.
@@ -376,8 +402,10 @@ pub fn pickup(root: &Path, now: DateTime<Utc>) -> Result<Vec<Task>> {
     let library = Library::open(root)?;
     library.discard_voice_ledgers()?;
     let mut tasks = Vec::new();
+    let mut present = std::collections::HashSet::new();
     for meeting in library.list_meetings()? {
         let meta = meeting.read_meta()?;
+        present.insert(meta.id);
         let mut progress = read_progress(&meeting)?;
         let ended = meta.ended_at.unwrap_or(meta.started_at);
         if progress.enrol_pending && progress.pending_enrollment.is_none() {
@@ -408,7 +436,38 @@ pub fn pickup(root: &Path, now: DateTime<Utc>) -> Result<Vec<Task>> {
             progress,
         });
     }
+    clear_orphan_marks(&library.private_state_dir().join("ktalk"), &present)?;
     Ok(tasks)
+}
+/// Pending marks of meetings that are no longer in the library. Only the
+/// pending part is cleared: the record that a meeting was made here stays,
+/// in case the library was only briefly incomplete.
+fn clear_orphan_marks(dir: &Path, present: &std::collections::HashSet<uuid::Uuid>) -> Result<()> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let path = entry?.path();
+        let id = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .and_then(|stem| stem.parse::<uuid::Uuid>().ok());
+        let Some(id) = id else { continue };
+        if present.contains(&id) || path.extension().is_none_or(|ext| ext != "json") {
+            continue;
+        }
+        let Ok(mut progress) = serde_json::from_slice::<Progress>(&std::fs::read(&path)?) else {
+            continue;
+        };
+        if progress.enrol_pending || progress.pending_enrollment.is_some() {
+            progress.enrol_pending = false;
+            progress.pending_enrollment = None;
+            crate::config::atomic_write(&path, &serde_json::to_string(&progress)?)?;
+        }
+    }
+    Ok(())
 }
 fn read_progress(meeting: &Meeting) -> Result<Progress> {
     Ok(match std::fs::read(journal(meeting)?) {
@@ -898,6 +957,9 @@ pub fn run_control(job: Job, store: &dyn CredentialStore, control: &Control) -> 
                 }
             }
             Job::Resume(mut task, settings) => {
+                if !task.meeting.path().join("meta.yaml").is_file() {
+                    return forget_missing(task);
+                }
                 if !pending_matches(&task)? {
                     task.progress.enrol_pending = false;
                     task.progress.pending_enrollment = None;
@@ -2325,6 +2387,39 @@ mod tests {
             task.after(&Outcome::Waiting, now + chrono::Duration::minutes(minute));
         }
         assert!(task.progress.done);
+    }
+    #[test]
+    fn deleted_meeting_drops_its_pending_enrollment_instead_of_failing_forever() {
+        let (root, mut task, plan) = fixture();
+        apply_names(&mut task, &plan, true, &Control::default()).unwrap();
+        let mark = journal(&task.meeting).unwrap();
+        assert!(read_progress(&task.meeting).unwrap().enrol_pending);
+        task.progress = read_progress(&task.meeting).unwrap();
+        std::fs::remove_dir_all(task.meeting.path()).unwrap();
+        // The in-memory task resolves at once, without an error that would be retried.
+        match run(Job::Resume(task.clone(), settings()), &Store::default()) {
+            Message::Enrolled { task, status, .. } => {
+                assert!(!task.progress.enrol_pending && task.progress.done);
+                assert!(status.contains("удалена"));
+            }
+            _ => panic!("a missing meeting must end its enrollment"),
+        }
+        assert!(!mark.exists());
+        // A mark left on disk by an earlier session is cleared at start.
+        std::fs::write(
+            &mark,
+            serde_json::to_string(&Progress {
+                recorded_here: true,
+                enrol_pending: true,
+                pending_enrollment: task.progress.pending_enrollment.clone(),
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(pickup(root.path(), Utc::now()).unwrap().is_empty());
+        let left: Progress = serde_json::from_slice(&std::fs::read(&mark).unwrap()).unwrap();
+        assert!(left.recorded_here && !left.enrol_pending && left.pending_enrollment.is_none());
     }
     #[test]
     fn apply_persists_enrollment_before_cancellation_and_startup_resumes_it() {
