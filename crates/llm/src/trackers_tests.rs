@@ -8,6 +8,7 @@ use std::{
 struct Mock {
     base: String,
     handle: JoinHandle<(String, Value)>,
+    bytes: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
 }
 
 impl Mock {
@@ -19,6 +20,8 @@ impl Mock {
             "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n{extra_headers}\r\n{body}",
             body.len()
         );
+        let bytes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let received = bytes.clone();
         let handle = thread::spawn(move || {
             let until = Instant::now() + Duration::from_secs(10);
             let mut stream = loop {
@@ -54,6 +57,7 @@ impl Mock {
             }
             let mut body = vec![0; size];
             reader.read_exact(&mut body).unwrap();
+            *received.lock().unwrap() = body.clone();
             stream.write_all(response.as_bytes()).unwrap();
             (
                 headers,
@@ -64,7 +68,11 @@ impl Mock {
                 },
             )
         });
-        Self { base, handle }
+        Self {
+            base,
+            handle,
+            bytes,
+        }
     }
 }
 
@@ -91,6 +99,48 @@ fn fixture() -> (tempfile::TempDir, Library, Task) {
     let task = l.list_tasks(None, None, false).unwrap().remove(0);
     (dir, l, task)
 }
+#[test]
+fn preview_excerpt_and_json_match_the_sent_payload_byte_for_byte() {
+    let (_root, library, task) = fixture();
+    let meeting = task.meeting(&library).unwrap();
+    let document = "## Итоги\n- Договорились\n\nПлан\n2026. год запуска\n\n1. 2026. год запуска\n\n- [ ] Deploy - ivan@example.org - tomorrow\n";
+    meeting.write_enhanced(document).unwrap();
+    library.reindex_incremental().unwrap();
+    let task = library.list_tasks(None, None, false).unwrap().remove(0);
+    let mock = Mock::start(
+        "201 Created",
+        "application/json",
+        r#"{"url":"https://issues.test/1"}"#,
+        "",
+    );
+    let preview = preview(
+        &library,
+        task,
+        TrackerConfig {
+            kind: TrackerKind::Webhook,
+            base_url: mock.base.clone(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let shown = preview.context.summary_excerpt.clone();
+    assert!(!shown.contains("##"));
+    assert!(shown.contains("План\n2026. год запуска"));
+    assert!(shown.contains("\n2026. год запуска\n"));
+    let shown_json = serde_json::to_string(&preview.body).unwrap();
+    send(&library, &preview, false, &Store).unwrap();
+    let (_, sent) = mock.handle.join().unwrap();
+    assert_eq!(
+        shown.as_bytes(),
+        sent["meeting"]["summary_excerpt"]
+            .as_str()
+            .unwrap()
+            .as_bytes()
+    );
+    assert_eq!(shown_json.as_bytes(), *mock.bytes.lock().unwrap());
+    assert_eq!(preview.body, sent);
+}
+
 #[test]
 fn providers_send_expected_requests_and_record_receipts() {
     for kind in [

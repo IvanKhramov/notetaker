@@ -707,6 +707,35 @@ impl Panel {
                             .saturating_duration_since(std::time::Instant::now()),
                     );
                 }
+                theme::settings_group(ui, "Аудио", |ui| {
+                    let settings = &mut state.settings_draft;
+                    let mut forever = settings.retention_days.is_none();
+                    if toggle(ui, &mut forever, "Хранить аудио всегда").changed()
+                    {
+                        settings.retention_days = if forever { None } else { Some(7) };
+                    }
+                    if let Some(days) = &mut settings.retention_days {
+                        setting(ui, "Хранить аудио", |ui| {
+                            let suffix = format!(
+                                " {}",
+                                crate::wording::plural(u64::from(*days), crate::wording::DAYS)
+                            );
+                            edits.number(
+                                ui.add(egui::DragValue::new(days).range(0..=36_500).suffix(suffix)),
+                            );
+                        });
+                    }
+                    ui.add_space(8.0);
+                    hint(
+                        ui,
+                        "0 дней: удалить после чистового прохода. Применяется к новым записям.",
+                    );
+                    hint(
+                        ui,
+                        "Без аудио недоступны повторное распознавание и пересчёт спикеров.",
+                    );
+                    ui.add_space(12.0);
+                });
                 theme::settings_group(ui, "Папки", |ui| {
                     for (models, title, path) in [
                         (
@@ -770,24 +799,6 @@ impl Panel {
                 ui.add_space(12.0);
                 let settings = &mut state.settings_draft;
                 theme::settings_disclosure(ui, "Для опытных", |ui| {
-                    let mut forever = settings.retention_days.is_none();
-                    if toggle(ui, &mut forever, "Хранить аудио всегда").changed()
-                    {
-                        settings.retention_days = if forever { None } else { Some(7) };
-                    }
-                    if let Some(days) = &mut settings.retention_days {
-                        setting(ui, "Хранить аудио", |ui| {
-                            edits.number(
-                                ui.add(
-                                    egui::DragValue::new(days).range(0..=36_500).suffix(" дней"),
-                                ),
-                            );
-                        });
-                    }
-                    hint(
-                        ui,
-                        "0 дней: удалить после чистового прохода. Применяется к новым записям.",
-                    );
                     maintenance.settings(ui, settings);
                 });
             }

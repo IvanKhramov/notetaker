@@ -51,8 +51,11 @@ pub fn reminder(ui: &mut egui::Ui, event: &CalendarEvent, enabled: bool) -> Acti
         };
         ui.label(
             egui::RichText::new(format!(
-                "{time} · Участников: {}",
-                event.link.attendees.len()
+                "{time} · {}",
+                crate::wording::count(
+                    event.link.attendees.len() as u64,
+                    crate::wording::PARTICIPANTS
+                )
             ))
             .font(theme::medium(theme::BUTTON))
             .color(p.muted),

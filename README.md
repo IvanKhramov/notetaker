@@ -225,8 +225,10 @@ Start a recording, choose a title, GigaAM v3 / Parakeet v3, Local / Hybrid,
 and an audio session or all system audio. Write Markdown notes during the call;
 notes save automatically. The transcript fills in live, then the final pass
 runs after Stop. Segment edits are available after the final pass and are saved
-atomically with `edited=true`. Use the note’s «Ещё» menu to select a built-in or
-`<library>/.templates/*.md` template and stream enhanced notes. Failed generation
+atomically with `edited=true`. Use the summary header to select a built-in or
+`<library>/.templates/*.md` template. In a short content area, metadata moves to
+the title tooltip and the picker moves to «Ещё». The menu also shows audio
+availability. Failed generation
 preserves the previous summary. Notes and summaries have edit/Markdown preview
 modes. Search uses the core FTS index, refreshed at startup, on Refresh/search,
 and after recording or enhancement.
@@ -243,6 +245,8 @@ variable name can be used instead. Local meetings permit only
 loopback LLM providers; Hybrid allows remote providers. Model downloads are an
 explicit network operation in either mode. Audio retention applies to new
 recordings; expired audio is swept at startup and after a recording finishes.
+Retention is in the main Storage settings. Without saved audio, re-recognition
+and speaker recalculation are unavailable; the meeting menu shows its expiry or removal.
 
 Windows has a tray menu, configurable global start/stop shortcut (Ctrl+Alt+R),
 and a small always-on-top recording window with timer and Stop. The shortcut

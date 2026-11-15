@@ -80,7 +80,10 @@ impl Panel {
                 Ok(Response::Preview(p)) => self.previews = p,
                 Ok(Response::Sent(sent)) => {
                     self.previews.clear();
-                    self.message = format!("Отправлено: {}", sent.len());
+                    self.message = format!(
+                        "Отправлено: {}",
+                        crate::wording::count(sent.len() as u64, crate::wording::TASKS)
+                    );
                     for (path, _) in sent {
                         if let Some(doc) = state.documents.get(&path)
                             && !doc.dirty.any()
@@ -113,9 +116,10 @@ impl Panel {
                         crate::theme::card(crate::theme::Palette::of(ui), false).show(ui, |ui| {
                             ui.strong(&p.task.text);
                             ui.label(&p.endpoint);
+                            ui.small(&p.context.summary_excerpt);
                             crate::theme::disclosure("Данные для отправки").show(ui, |ui| {
                                 ui.monospace(
-                                    serde_json::to_string_pretty(&p.body).unwrap_or_default(),
+                                    serde_json::to_string(&p.body).unwrap_or_default(),
                                 );
                             });
                         });
@@ -126,11 +130,11 @@ impl Panel {
                 if local {
                     ui.colored_label(
                         ui.visuals().warn_fg_color,
-                        "Это Локально-встреча. Задача и фрагмент конспекта покинут компьютер.",
+                        "Это данные локальной встречи. Задача и фрагмент конспекта покинут компьютер.",
                     );
                     ui.add(crate::theme::Checkbox::new(
                         &mut self.local_consent,
-                        "Подтверждаю отправку Локально-данных в трекер",
+                        "Подтверждаю отправку данных локальной встречи в трекер",
                     ));
                 }
                 crate::theme::footer(ui, |ui| {

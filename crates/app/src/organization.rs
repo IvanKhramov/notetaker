@@ -274,7 +274,7 @@ impl Panel {
         if !self.selected.is_empty() {
             ui.small(format!(
                 "Выбрано: {}. Меню папки - переместить",
-                self.selected.len()
+                crate::wording::count(self.selected.len() as u64, crate::wording::MEETINGS)
             ));
             if crate::theme::button(ui, "Снять выбор", crate::theme::ButtonStyle::Ghost).clicked()
             {
@@ -388,26 +388,30 @@ impl Panel {
     pub fn revision(&self) -> u64 {
         self.revision
     }
-    pub fn meeting(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
-        let Some(path) = state.selected.clone() else {
-            return;
-        };
-        let Some(doc) = state.documents.get(&path) else {
-            return;
-        };
-        let m = doc.data.meeting.clone();
-        let meta = &doc.data.meta;
-        let enabled = !state.unsaved()
+    pub fn meeting_editable(&self, state: &AppState) -> bool {
+        !state.unsaved()
             && !state.recording.busy()
             && state.enhancing.is_none()
-            && self.receiver.is_none();
-        if self.snapshot.as_ref().is_some_and(|s| s.shared) && meta.mode == Mode::Local {
-            ui.colored_label(
-                ui.visuals().warn_fg_color,
-                "Локально: файлы этой встречи синхронизируются дисковым сервисом.",
-            );
-        }
+            && self.receiver.is_none()
+    }
+    pub fn meeting(
+        &mut self,
+        ui: &mut egui::Ui,
+        meeting: &Meeting,
+        meta: &notetaker_core::MeetingMeta,
+        enabled: bool,
+        menu: bool,
+    ) {
         ui.add_enabled_ui(enabled, |ui| {
+            if menu {
+                theme::submenu(
+                    ui,
+                    theme::icons::FOLDER_OPEN,
+                    meta.folder.as_deref().unwrap_or("Без папки"),
+                    |ui| self.folder_choices(ui, meeting.path(), meta),
+                );
+                return;
+            }
             ui.scope(|ui| {
                 ui.spacing_mut().interact_size.y = 26.0;
                 ui.spacing_mut().button_padding = egui::vec2(9.0, 4.0);
@@ -433,53 +437,73 @@ impl Panel {
                             egui::Stroke::new(1.0, crate::theme::Palette::of(ui).muted),
                         );
                     })
-                    .show_ui(ui, |ui| {
-                        let names = std::iter::once(String::new())
-                            .chain(
-                                self.snapshot
-                                    .as_ref()
-                                    .into_iter()
-                                    .flat_map(|s| s.folders.value.keys().cloned()),
-                            )
-                            .collect::<Vec<_>>();
-                        for name in names {
-                            if ui
-                                .selectable_label(
-                                    meta.folder.as_deref() == Some(&name),
-                                    if name.is_empty() {
-                                        "Без папки"
-                                    } else {
-                                        &name
-                                    },
-                                )
-                                .clicked()
-                            {
-                                self.move_paths(ui.ctx(), vec![path.clone()], name);
-                            }
-                        }
-                    });
+                    .show_ui(ui, |ui| self.folder_choices(ui, meeting.path(), meta));
             });
-            if let Some(copies) = self.snapshot.as_ref().and_then(|s| s.conflicts.get(&path)) {
-                for copy in copies {
-                    ui.horizontal(|ui| {
-                        ui.colored_label(
-                            ui.visuals().warn_fg_color,
-                            "Найдена копия от синхронизации",
-                        );
-                        if crate::theme::button(
-                            ui,
-                            &format!("Сравнить: {}", copy.copy),
-                            crate::theme::ButtonStyle::Ghost,
-                        )
-                        .clicked()
+        });
+    }
+    fn folder_choices(&mut self, ui: &mut egui::Ui, path: &std::path::Path, meta: &MeetingMeta) {
+        let names = std::iter::once(String::new())
+            .chain(
+                self.snapshot
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|s| s.folders.value.keys().cloned()),
+            )
+            .collect::<Vec<_>>();
+        for name in names {
+            if ui
+                .selectable_label(
+                    meta.folder.as_deref() == Some(&name),
+                    if name.is_empty() {
+                        "Без папки"
+                    } else {
+                        &name
+                    },
+                )
+                .clicked()
+            {
+                self.move_paths(ui.ctx(), vec![path.to_owned()], name);
+            }
+        }
+    }
+    pub fn meeting_notices(&mut self, ui: &mut egui::Ui, state: &AppState) {
+        let Some(path) = state.selected.as_ref() else {
+            return;
+        };
+        let Some(doc) = state.documents.get(path) else {
+            return;
+        };
+        let enabled = self.meeting_editable(state);
+        let m = &doc.data.meeting;
+        if self.snapshot.as_ref().is_some_and(|s| s.shared) && doc.data.meta.mode == Mode::Local {
+            theme::callout(ui, theme::icons::TRIANGLE_ALERT, |ui| {
+                ui.weak("Локально: файлы этой встречи синхронизируются дисковым сервисом.");
+            });
+        }
+        if let Some(copies) = self.snapshot.as_ref().and_then(|s| s.conflicts.get(path)) {
+            for copy in copies {
+                theme::callout(ui, theme::icons::FILES, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.weak("Найдена копия от синхронизации");
+                        if ui
+                            .add_enabled(
+                                enabled,
+                                theme::styled_button(
+                                    theme::Palette::of(ui),
+                                    &format!("Сравнить: {}", copy.copy),
+                                    theme::ButtonStyle::Ghost,
+                                ),
+                            )
+                            .clicked()
                         {
                             self.compare = Some((m.clone(), copy.clone()));
                         }
                     });
-                }
+                });
             }
-        });
+        }
     }
+
     fn load_destinations(&mut self, ctx: &egui::Context) {
         let Some(config) = self.edit.tracker.clone() else {
             return;
@@ -1160,6 +1184,91 @@ fn choose(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn meeting_notices_and_folder_picker_keep_the_existing_actions() {
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open(root.path()).unwrap();
+        let meeting = library
+            .create_meeting(MeetingMeta::new("Встреча", chrono::Utc::now()))
+            .unwrap();
+        std::fs::write(meeting.path().join("notes-conflict.md"), "Чужая правка").unwrap();
+        let mut folders = library.load_folders().unwrap();
+        folders.value.insert("Проект".into(), Default::default());
+        library
+            .save_folders(&folders.value, folders.revision)
+            .unwrap();
+        let (mut state, _commands, _events) = crate::test_ui::state();
+        state.settings.library = root.path().into();
+        state.selected = Some(meeting.path().into());
+        state.documents.insert(
+            meeting.path().into(),
+            crate::state::Document::new(
+                crate::worker::DocumentData::read(meeting.clone()).unwrap(),
+            ),
+        );
+        let mut loaded = Snapshot::read(&library).unwrap();
+        loaded.shared = true;
+        let mut panel = Panel {
+            root: root.path().into(),
+            snapshot: Some(loaded),
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut draw = |ui: &mut egui::Ui| {
+            panel.meeting_notices(ui, &state);
+            let doc = &state.documents[meeting.path()];
+            panel.meeting(
+                ui,
+                &meeting,
+                &doc.data.meta,
+                panel.meeting_editable(&state),
+                false,
+            );
+        };
+        let output = crate::test_ui::frame(&ctx, vec![], &mut draw);
+        crate::test_ui::text_rect(
+            &output.shapes,
+            "Локально: файлы этой встречи синхронизируются дисковым сервисом.",
+        );
+        output.drop_without_applying_deltas();
+        crate::test_ui::click(&ctx, &mut draw, "Сравнить: notes-conflict.md");
+        assert!(panel.compare.is_some());
+        panel.compare = None;
+        crate::test_ui::click(
+            &ctx,
+            &mut |ui| {
+                let doc = &state.documents[meeting.path()];
+                panel.meeting(
+                    ui,
+                    &meeting,
+                    &doc.data.meta,
+                    panel.meeting_editable(&state),
+                    false,
+                );
+            },
+            "Без папки",
+        );
+        crate::test_ui::click(
+            &ctx,
+            &mut |ui| {
+                let doc = &state.documents[meeting.path()];
+                panel.meeting(
+                    ui,
+                    &meeting,
+                    &doc.data.meta,
+                    panel.meeting_editable(&state),
+                    false,
+                );
+            },
+            "Проект",
+        );
+        wait(&mut panel, &ctx, &mut state);
+        assert_eq!(
+            meeting.read_meta().unwrap().folder.as_deref(),
+            Some("Проект")
+        );
+    }
     #[test]
     fn folder_dialog_creates_renames_and_confirms_deletion() {
         let dir = tempfile::tempdir().unwrap();

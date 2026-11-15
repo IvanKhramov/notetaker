@@ -263,7 +263,10 @@ pub fn preview(library: &Library, task: Task, config: TrackerConfig) -> Result<P
         meeting_title: meta.title,
         meeting_date: meta.started_at.to_rfc3339(),
         meeting_link: format!("notetaker://meeting/{}", meta.id),
-        summary_excerpt: enhanced.value.chars().take(2000).collect(),
+        summary_excerpt: notetaker_core::plain_excerpt(&enhanced.value)
+            .chars()
+            .take(2000)
+            .collect(),
         owner_email,
     };
     let (endpoint, body) = provider(config.kind).request(&config, &task, &context)?;

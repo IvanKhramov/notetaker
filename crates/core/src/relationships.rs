@@ -20,7 +20,7 @@ pub struct MeetingSummary {
 }
 impl MeetingSummary {
     pub fn excerpt(&self) -> String {
-        self.summary
+        crate::plain_excerpt(&self.summary)
             .lines()
             .filter(|s| !s.trim().is_empty())
             .take(3)

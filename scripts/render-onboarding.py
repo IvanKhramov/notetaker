@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--screens", nargs="+", help="Render only the named screens")
+parser.add_argument("--source-ref", help="Read app sources from a Git revision for before/after comparisons")
 args = parser.parse_args()
 root = Path(__file__).resolve().parent.parent
 harness = root / "target/preview-harness"
@@ -27,10 +28,18 @@ manifest = re.sub(r'path = "\.\./([^"]+)"', lambda m: f'path = "{root / "crates"
 (harness / "Cargo.toml").write_text(manifest)
 (harness / "Cargo.lock").write_text((root / "Cargo.lock").read_text().replace('name = "notetaker-app"', 'name = "onboarding-preview"'))
 modules = []
-for path in sorted((root / "crates/app/src").glob("*.rs")):
+sources = sorted((root / "crates/app/src").glob("*.rs"))
+if args.source_ref:
+    sources = [root / name for name in subprocess.check_output(
+        ["git", "ls-tree", "-r", "--name-only", args.source_ref, "crates/app/src"], cwd=root, text=True
+    ).splitlines() if name.endswith(".rs")]
+for path in sources:
     if path.stem in {"main", "desktop", "macos", "updates", "updates_macos", "icons", "test_ui"}:
         continue
-    text = path.read_text()
+    text = (subprocess.check_output(["git", "show", f"{args.source_ref}:{path.relative_to(root)}"], cwd=root, text=True)
+            if args.source_ref else path.read_text())
+    if path.stem == "icon":
+        text = text.replace('"../assets/', f'"{root / "crates/app/assets"}/')
     if path.stem == "state":
         text = text.replace("    fn with_channels(", "    pub(crate) fn with_channels(")
         text = text.replace("    fn new(data: DocumentData)", "    pub(crate) fn new(data: DocumentData)")
@@ -40,6 +49,7 @@ for path in sorted((root / "crates/app/src").glob("*.rs")):
         text = text.replace('crate::theme::disclosure("Календарь")', 'crate::theme::disclosure("Календарь").default_open(self.expanded)')
         text = text.replace('crate::theme::disclosure("AI для конспектов")', 'crate::theme::disclosure("AI для конспектов").default_open(self.expanded)')
     if path.stem == "people":
+        text = text.replace('.id_salt("people-screen")', '.id_salt("people-screen").vertical_scroll_offset(ui.ctx().data(|data| data.get_temp::<f32>(egui::Id::unique("fixture-person-offset")).unwrap_or(0.0)))')
         text += """
 impl Panel {
     pub fn fixture_merge(&mut self) {let people=&self.snapshot.as_ref().unwrap().people;assert!(people.len()>=2);self.pending_merge=Some((people[0].clone(),people[1].clone()));}
@@ -95,6 +105,7 @@ impl Panel { pub fn fixture(&mut self,state:&AppState) {
         text += '''
 impl NotetakerApp {
     pub fn fixture(state: AppState, screen: usize) -> Self {
+        let screen = match screen {59=>5,60=>4,61=>11,62=>23,63=>24,_=>screen};
         let mut app = Self::with_state(state);
         app.home = ![4,5,12,14,15].contains(&screen);
         if screen < 3 { app.quickstart.open = true; app.quickstart.step = screen; }
@@ -212,7 +223,7 @@ impl NotetakerApp {
     pub fn pill(ui: &mut egui::Ui) { recording_pill(ui, Duration::from_secs(123), 0.3); }
 }
 '''
-    if path.stem in {"ui", "state", "quickstart", "people", "organization", "maintenance", "trackers", "theme", "calendar_ui", "speakers"}:
+    if args.source_ref or path.stem in {"ui", "state", "quickstart", "people", "organization", "maintenance", "trackers", "theme", "calendar_ui", "speakers"}:
         path = harness / "src" / path.name
         path.write_text(text)
     modules.append(f'#[path = "{path}"] mod {path.stem};')
@@ -255,6 +266,9 @@ impl eframe::App for Preview {
                 .show(ui.ctx(), ui::NotetakerApp::pill);
         }
         self.frames += 1;
+        if self.screen == 62 && ui.ctx().content_rect().height() < 600.0 {
+            ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("fixture-person-offset"), 96.0_f32));
+        }
         let now=ui.input(|input|input.time);
         let started=*self.started.get_or_insert(now);
         let settled = self.screen != 39 || self.app.fixture_jump_settled();
@@ -346,7 +360,7 @@ if shutil.disk_usage(root).free < 2 * 1024**3:
 # Resolve the derived harness root against the copied workspace lock before its locked build.
 subprocess.run(["cargo", "metadata", "--offline", "--format-version", "1", "--manifest-path", str(harness / "Cargo.toml")], cwd=root, env=env, check=True, stdout=subprocess.DEVNULL)
 subprocess.run(["cargo", "build", "--locked", "--manifest-path", str(harness / "Cargo.toml")], cwd=root, env=env, check=True)
-names = ["welcome", "name", "connections", "home", "note", "transcript", "general", "recording", "calendars", "ai", "search", "storage", "recording-pill", "connections-expanded", "delete-confirm", "meeting-menu", "toast", "empty-library", "narrow-settings", "recording-bar", "chat", "tasks", "people", "person", "series", "digest", "folders", "diagnostics", "tracker-preview", "new-recording", "rename", "regenerate", "capture-warning", "widgets", "update-card", "folder-delete", "merge-people", "folders-advanced", "ai-expanded", "performance-transcript", "performance-meetings", "performance-live", "chat-meeting-empty", "chat-library-empty", "chat-recipes", "chat-recording", "recording-silence", "recording-final-pass", "recording-ready", "recording-not-ready", "summary-skipped", "calendar-reminder-link", "calendar-reminder-no-link", "calendar-upcoming", "calendar-help", "direct-task-checkboxes", "direct-template-bar", "direct-template-picker", "direct-speaker-menu"]
+names = ["welcome", "name", "connections", "home", "note", "transcript", "general", "recording", "calendars", "ai", "search", "storage", "recording-pill", "connections-expanded", "delete-confirm", "meeting-menu", "toast", "empty-library", "narrow-settings", "recording-bar", "chat", "tasks", "people", "person", "series", "digest", "folders", "diagnostics", "tracker-preview", "new-recording", "rename", "regenerate", "capture-warning", "widgets", "update-card", "folder-delete", "merge-people", "folders-advanced", "ai-expanded", "performance-transcript", "performance-meetings", "performance-live", "chat-meeting-empty", "chat-library-empty", "chat-recipes", "chat-recording", "recording-silence", "recording-final-pass", "recording-ready", "recording-not-ready", "summary-skipped", "calendar-reminder-link", "calendar-reminder-no-link", "calendar-upcoming", "calendar-help", "direct-task-checkboxes", "direct-template-bar", "direct-template-picker", "direct-speaker-menu", "compact-transcript", "compact-summary", "compact-storage", "compact-person", "compact-series"]
 def render(spec):
     index, name, theme, width, height, zoom = spec
     actual_width = 760 if name == "narrow-settings" and zoom == 1.0 else width
