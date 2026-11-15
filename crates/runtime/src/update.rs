@@ -23,8 +23,46 @@ pub struct Release {
     pub assets: Vec<Asset>,
     pub draft: bool,
     pub prerelease: bool,
+    /// Release notes as published on GitHub: the CHANGELOG section of the version.
+    #[serde(default)]
+    pub body: Option<String>,
 }
 impl Release {
+    /// The first changes of the release notes, short enough for a tooltip.
+    /// The last entry says how many more there are.
+    pub fn highlights(&self) -> Vec<String> {
+        const SHOWN: usize = 6;
+        const LENGTH: usize = 150;
+        let items: Vec<&str> = self
+            .body
+            .as_deref()
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                line.strip_prefix("- ").or_else(|| line.strip_prefix("* "))
+            })
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .collect();
+        let mut lines: Vec<String> = items
+            .iter()
+            .take(SHOWN)
+            .map(|item| {
+                let item = item.replace(['`', '*'], "");
+                if item.chars().count() > LENGTH {
+                    let cut: String = item.chars().take(LENGTH).collect();
+                    format!("{}…", cut.trim_end())
+                } else {
+                    item
+                }
+            })
+            .collect();
+        if items.len() > SHOWN {
+            lines.push(format!("и ещё {}", items.len() - SHOWN));
+        }
+        lines
+    }
     pub fn newer_than(&self, current: &str) -> Result<bool> {
         let version = semver::Version::parse(self.tag_name.trim_start_matches('v'))?;
         Ok(!self.draft
@@ -159,7 +197,23 @@ mod tests {
             assets: Vec::new(),
             draft: false,
             prerelease: false,
+            body: None,
         }
+    }
+    #[test]
+    fn highlights_take_the_first_changes_and_count_the_rest() {
+        let mut release = release("v1.2.3");
+        assert!(release.highlights().is_empty());
+        let long = "я".repeat(200);
+        release.body = Some(format!(
+            "### Добавлено\n- Кнопка `Установить`\n\n### Исправлено\n- {long}\n- 3\n- 4\n- 5\n- 6\n- 7\n- 8\n"
+        ));
+        let lines = release.highlights();
+        assert_eq!(lines.len(), 7);
+        assert_eq!(lines[0], "Кнопка Установить");
+        assert_eq!(lines[1].chars().count(), 151);
+        assert!(lines[1].ends_with('…'));
+        assert_eq!(lines[6], "и ещё 2");
     }
     #[test]
     fn semver_order_is_numeric_and_excludes_prereleases() {

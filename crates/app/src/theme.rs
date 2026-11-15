@@ -514,7 +514,8 @@ pub fn update_prompt(
     install_label: &str,
     can_install: bool,
     can_dismiss: bool,
-    show_notes: bool,
+    // `Some` shows the "Что нового" button; its items go to the tooltip.
+    notes: Option<&[String]>,
 ) -> UpdateAction {
     let mut action = UpdateAction::None;
     let close = modal(ctx, title)
@@ -536,8 +537,22 @@ pub fn update_prompt(
                 {
                     action = UpdateAction::Install;
                 }
-                if show_notes && button(ui, "Что нового", ButtonStyle::Ghost).clicked() {
-                    action = UpdateAction::Notes;
+                if let Some(highlights) = notes {
+                    let mut notes = button(ui, "Что нового", ButtonStyle::Ghost);
+                    if !highlights.is_empty() {
+                        notes = notes.on_hover_ui(|ui| {
+                            ui.set_max_width(360.0);
+                            for line in highlights {
+                                ui.horizontal_top(|ui| {
+                                    ui.label("•");
+                                    ui.add(egui::Label::new(line).wrap());
+                                });
+                            }
+                        });
+                    }
+                    if notes.clicked() {
+                        action = UpdateAction::Notes;
+                    }
                 }
                 if ui
                     .add_enabled(
