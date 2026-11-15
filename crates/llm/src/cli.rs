@@ -220,7 +220,7 @@ fn run(
         // CLI reports in JSON, so look there when stderr is empty.
         let said = [&error_path, &output_path]
             .into_iter()
-            .map(|path| failure_tail(&fs::read_to_string(path).unwrap_or_default()))
+            .map(|path| failure_tail(&file_tail(path)))
             .find(|text| !text.is_empty())
             .unwrap_or_default();
         anyhow::bail!(
@@ -237,6 +237,18 @@ fn run(
         "Слишком большой ответ CLI"
     );
     fs::read_to_string(output_path).context("Некорректный вывод CLI")
+}
+
+/// The end of a CLI log, read without loading a large file.
+fn file_tail(path: &Path) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut bytes = Vec::new();
+    if let Ok(mut file) = File::open(path) {
+        let length = file.metadata().map(|meta| meta.len()).unwrap_or(0);
+        let _ = file.seek(SeekFrom::Start(length.saturating_sub(8 * 1024)));
+        let _ = file.take(8 * 1024).read_to_end(&mut bytes);
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 /// The last lines of what a failed CLI printed, short enough for a settings card.
@@ -544,7 +556,7 @@ fn wait_login(mut command: Command, timeout: Duration, cancel: &Cancellation) ->
         thread::sleep(Duration::from_millis(100));
     };
     if !status.success() {
-        let said = failure_tail(&fs::read_to_string(&output_path).unwrap_or_default());
+        let said = failure_tail(&file_tail(&output_path));
         anyhow::bail!(
             "Вход не выполнен.{}",
             if said.is_empty() {

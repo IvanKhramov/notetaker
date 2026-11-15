@@ -187,11 +187,24 @@ impl Connections {
                 continue;
             }
             if let Some(provider) = settings.providers.iter().find(|p| p.id == card.provider.id) {
+                // A check proves only the configuration it ran with.
+                if format!("{provider:?}") != format!("{:?}", card.provider) {
+                    card.verified = false;
+                }
                 card.provider = provider.clone();
                 if card.status == "Не подключено" {
                     card.status = "Настроено · нажмите Проверить".into();
                 }
             }
+        }
+    }
+    pub fn busy(&self) -> bool {
+        self.cards.iter().any(|card| card.busy)
+    }
+    /// Stops every running operation: a hidden sign-in must not outlive the app.
+    pub fn cancel_all(&self) {
+        for card in self.cards.iter().filter(|card| card.busy) {
+            card.cancel.cancel();
         }
     }
     pub fn apply(&mut self, response: &Response) {
@@ -452,7 +465,7 @@ fn busy_row(ui: &mut egui::Ui, card: &Card) {
     ui.horizontal_wrapped(|ui| {
         ui.spinner();
         if card.signing_in {
-            ui.label("Жду вход в браузере…");
+            ui.label("Жду вход в браузере, затем проверю подключение…");
             if crate::theme::button(ui, "Отмена", crate::theme::ButtonStyle::Ghost).clicked()
             {
                 card.cancel.cancel();
@@ -593,7 +606,8 @@ pub fn execute(mut action: Action) -> Response {
             if action.operation == Operation::Default && action.verified {
                 return Ok(Vec::new());
             }
-            let provider = CliProvider::new(config, Mode::Hybrid, Cancellation::default())?;
+            // The same token as the sign-in: Cancel works during the check too.
+            let provider = CliProvider::new(config, Mode::Hybrid, action.cancel.clone())?;
             provider.check_login()?;
             // Codex login status is local, so also verify model access with a tiny request.
             if matches!(
@@ -644,7 +658,13 @@ pub fn execute(mut action: Action) -> Response {
         }
         Ok(models)
     })()
-    .map_err(|error| format!("{error:#}"));
+    .map_err(|error| {
+        if action.cancel.is_cancelled() {
+            "Отменено".into()
+        } else {
+            format!("{error:#}")
+        }
+    });
     Response {
         index: action.index,
         operation: action.operation,

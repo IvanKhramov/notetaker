@@ -1443,6 +1443,7 @@ impl AppState {
         self.exit_requested = true;
         self.chat.cancel.cancel();
         self.draft_cancel.cancel();
+        self.connections.cancel_all();
         self.recording.request_stop();
         self.flush();
         for action in self.connections.autosaves() {
@@ -1452,6 +1453,8 @@ impl AppState {
     }
     pub fn can_exit(&self) -> bool {
         self.pending_ai.is_empty()
+            // A cancelled sign-in reports back once its process is gone.
+            && !self.connections.busy()
             && (!self.settings_autosave.pending || self.settings_autosave.error.is_some())
             && self.exit_requested
             && !self.recording.busy()
