@@ -2484,7 +2484,7 @@ impl NotetakerApp {
         }
         let event = self.state.calendar_reminder().cloned();
         let ending = match self.state.call_prompt {
-            Some(CallPrompt::Stop { until, .. }) => Some(until),
+            Some(CallPrompt::Stop { countdown, .. }) => Some(countdown.remaining),
             _ => None,
         };
         if event.is_none() && ending.is_none() {
@@ -2500,8 +2500,8 @@ impl NotetakerApp {
             .constrain_to(bounds)
             .show(ctx, |ui| {
                 ui.set_width(width);
-                if let Some(until) = ending {
-                    ending_action = crate::detection::stop_card(ui, until, Instant::now());
+                if let Some(remaining) = ending {
+                    ending_action = crate::detection::stop_card(ui, remaining);
                 } else if let Some(event) = &event {
                     action = crate::calendar_ui::reminder(
                         ui,
@@ -2580,8 +2580,8 @@ impl NotetakerApp {
                 .with_window_level(egui::WindowLevel::AlwaysOnTop)
                 .with_active(false),
             |ui, _| {
-                if let Some(CallPrompt::Stop { until, .. }) = &prompt {
-                    ending_action = crate::detection::stop_card(ui, *until, Instant::now());
+                if let Some(CallPrompt::Stop { countdown, .. }) = &prompt {
+                    ending_action = crate::detection::stop_card(ui, countdown.remaining);
                 } else if let Some(event) = &calendar {
                     match crate::calendar_ui::reminder(
                         ui,
@@ -5933,7 +5933,7 @@ mod direct_action_tests {
         app.state.call_prompt = Some(CallPrompt::Stop {
             pid: 42,
             started_at: 100,
-            until: Instant::now() + Duration::from_secs(30),
+            countdown: crate::detection::Countdown::new(Instant::now()),
         });
         let size = egui::vec2(640.0, 427.0);
         for _ in 0..3 {
@@ -5949,7 +5949,7 @@ mod direct_action_tests {
         app.state.call_prompt = Some(CallPrompt::Stop {
             pid: 42,
             started_at: 100,
-            until: Instant::now() + Duration::from_secs(30),
+            countdown: crate::detection::Countdown::new(Instant::now()),
         });
         let output = compact_frame(&ctx, &mut app, size);
         let button = crate::test_ui::text_rect(&output.shapes, "Остановить сейчас");

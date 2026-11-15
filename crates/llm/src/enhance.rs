@@ -382,29 +382,12 @@ fn complete_final(
     title_requested: bool,
 ) -> Result<GeneratedNotes> {
     let raw = complete_with_warnings(provider, request, &mut |_| {}, warnings)?;
-    let generated = if title_requested {
-        let (line, body) = raw
-            .split_once('\n')
-            .context("Модель не вернула название и конспект")?;
-        let title = line
-            .strip_prefix(TITLE_PREFIX)
-            .context("Модель не вернула строку названия")?
-            .trim();
-        ensure!(
-            !title.is_empty()
-                && title.chars().count() <= 60
-                && !title.contains(['\"', '«', '»', '“', '”', '\u{2014}'])
-                && !title.starts_with(['\'', '‘', '’'])
-                && !title.ends_with(['\'', '‘', '’'])
-                && !title.ends_with('.')
-                && !title.starts_with('#')
-                && !title.chars().any(char::is_control),
-            "Модель вернула некорректное название: нужно до 60 символов без кавычек и точки в конце"
-        );
-        ensure!(!body.trim().is_empty(), "Модель вернула пустой конспект");
+    let (line, body) = raw.split_once('\n').unwrap_or((&raw, ""));
+    let generated = if let Some(title) = line.trim_start().strip_prefix(TITLE_PREFIX.trim_end()) {
+        let title = title.trim();
         GeneratedNotes {
             text: body.into(),
-            title: Some(title.into()),
+            title: (title_requested && valid_title(title)).then(|| title.into()),
         }
     } else {
         GeneratedNotes {
@@ -412,8 +395,29 @@ fn complete_final(
             title: None,
         }
     };
+    ensure!(
+        !generated.text.trim().is_empty(),
+        "Модель вернула пустой конспект"
+    );
     on_text(&generated.text);
     Ok(generated)
+}
+
+fn valid_title(title: &str) -> bool {
+    use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+    !title.is_empty()
+        && title.chars().count() <= 60
+        && !title.contains(['\"', '«', '»', '“', '”', '\u{2014}'])
+        && !title.starts_with(['\'', '‘', '’'])
+        && !title.ends_with(['\'', '‘', '’'])
+        && !title.ends_with('.')
+        && !title.chars().any(char::is_control)
+        && Parser::new_ext(title, Options::ENABLE_STRIKETHROUGH).all(|event| {
+            matches!(
+                event,
+                Event::Start(Tag::Paragraph) | Event::End(TagEnd::Paragraph) | Event::Text(_)
+            )
+        })
 }
 
 pub(crate) fn input_tokens(request: &CompletionRequest) -> usize {
@@ -669,6 +673,7 @@ mod auto_title_tests {
         config: crate::ProviderConfig,
         title: String,
         body: String,
+        raw_response: Option<String>,
         systems: Mutex<Vec<String>>,
         rename: Option<Meeting>,
         fail: bool,
@@ -680,6 +685,7 @@ mod auto_title_tests {
                 config,
                 title: title.into(),
                 body: "## Итоги\nРешено выпустить обновление.".into(),
+                raw_response: None,
                 systems: Mutex::new(Vec::new()),
                 rename: None,
                 fail: false,
@@ -702,7 +708,9 @@ mod auto_title_tests {
             if let Some(meeting) = &self.rename {
                 meeting.update_meta(|meta| meta.title = "Ручное название".into())?;
             }
-            let result = if request.system.contains(TITLE_CONTRACT) {
+            let result = if let Some(raw) = &self.raw_response {
+                raw.clone()
+            } else if request.system.contains(TITLE_CONTRACT) {
                 format!("{TITLE_PREFIX}{}\n{}", self.title, self.body)
             } else {
                 self.body.clone()
@@ -819,7 +827,7 @@ mod auto_title_tests {
         assert!(meeting.read_meta().unwrap().needs_auto_title());
     }
     #[test]
-    fn title_validation_and_failed_summary_do_not_change_existing_documents() {
+    fn invalid_title_is_optional_and_failed_summary_does_not_change_existing_documents() {
         let (_root, valid) = fixture_meeting();
         let model = Model::new(&"а".repeat(60));
         enhance_meeting(
@@ -838,24 +846,30 @@ mod auto_title_tests {
             "«Название»".into(),
             "'Название'".into(),
             "‘Название’".into(),
+            "## Название".into(),
+            "**Название**".into(),
+            "~~Название~~".into(),
+            "[Название](https://example.com)".into(),
+            "`Название`".into(),
         ] {
             let (_root, meeting) = fixture_meeting();
             meeting.write_enhanced("Старый конспект").unwrap();
             let model = Model::new(&title);
-            assert!(
-                enhance_meeting(
-                    &meeting,
-                    "general",
-                    &Template::builtin("general").unwrap(),
-                    &model,
-                    &mut |_| {}
-                )
-                .is_err()
-            );
-            assert_eq!(meeting.read_enhanced().unwrap(), "Старый конспект");
+            let result = enhance_meeting(
+                &meeting,
+                "general",
+                &Template::builtin("general").unwrap(),
+                &model,
+                &mut |_| {},
+            )
+            .unwrap();
+            assert_eq!(meeting.read_enhanced().unwrap(), model.body);
+            assert!(result.title_change.is_none());
             assert!(meeting.read_meta().unwrap().needs_auto_title());
         }
+        assert!(!valid_title("Первая строка\nВторая строка"));
         let (_root, meeting) = fixture_meeting();
+        meeting.write_enhanced("Старый конспект").unwrap();
         let mut model = Model::new("Название");
         model.fail = true;
         assert!(
@@ -869,6 +883,41 @@ mod auto_title_tests {
             .is_err()
         );
         assert!(meeting.read_meta().unwrap().needs_auto_title());
+        assert_eq!(meeting.read_enhanced().unwrap(), "Старый конспект");
+    }
+    #[test]
+    fn missing_title_preserves_the_entire_summary_and_malformed_metadata_never_leaks() {
+        for raw in [
+            "## Итоги\nРешено выпустить обновление.",
+            "Обсудили релиз\n\n## Решения\n- Выпустить обновление",
+            "Обычный текст конспекта без перевода строки",
+            "NOTETAKER_TITLE:\n## Итоги\nРешено выпустить обновление.",
+            "NOTETAKER_TITLE: **Название**\n## Итоги\nРешено выпустить обновление.",
+        ] {
+            let (_root, meeting) = fixture_meeting();
+            let mut model = Model::new("Название");
+            model.raw_response = Some(raw.into());
+            let mut shown = String::new();
+            let result = enhance_meeting(
+                &meeting,
+                "general",
+                &Template::builtin("general").unwrap(),
+                &model,
+                &mut |delta| shown.push_str(delta),
+            )
+            .unwrap();
+            let expected = if raw.starts_with("NOTETAKER_TITLE:") {
+                raw.split_once('\n').unwrap().1
+            } else {
+                raw
+            };
+            assert_eq!(meeting.read_enhanced().unwrap(), expected);
+            assert_eq!(shown, expected);
+            assert_eq!(result.text, expected);
+            assert!(result.title_change.is_none());
+            assert!(meeting.read_meta().unwrap().needs_auto_title());
+            assert_eq!(model.systems.lock().unwrap().len(), 1);
+        }
     }
     #[test]
     fn title_keeps_meeting_language_and_cannot_overwrite_an_inflight_user_rename() {

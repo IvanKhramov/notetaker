@@ -258,6 +258,10 @@ and speaker recalculation are unavailable; the meeting menu shows its expiry or 
 Auto-stop after call end is enabled by default. On Windows and macOS it uses
 only the confirmed disappearance of the attached process (PID plus start time),
 with the detector's 20-second debounce, then shows a non-modal 30-second countdown.
+Auto-stop requires a detected call at start: an accepted hint, calendar entry,
+or matching per-application source. A system recording never adopts a later call;
+using a detected name for its title alone does not enable auto-stop. Ticks consume
+at most one second; a gap over three seconds restarts the full countdown.
 Releasing the microphone, a calendar end time, sleep and failed polls do not
 start the countdown. A hang-up inside an application that remains running has
 no reliable signal today. «Продолжить запись» suppresses this countdown until a

@@ -927,14 +927,16 @@ impl AppState {
             && !self.recording.importing
     }
     pub fn tick_call_end(&mut self, now: Instant) {
-        if let Some(CallPrompt::Stop { until, .. }) = self.call_prompt {
+        if matches!(self.call_prompt, Some(CallPrompt::Stop { .. })) {
             if !self.call_end_enabled()
                 || self.exit_requested
                 || !matches!(self.recording.phase, Phase::Starting | Phase::Recording)
                 || self.recording.stop_requested
             {
                 self.call_prompt = None;
-            } else if now >= until {
+            } else if let Some(CallPrompt::Stop { countdown, .. }) = &mut self.call_prompt
+                && countdown.tick(now)
+            {
                 self.accept_call();
             }
         }
@@ -945,8 +947,9 @@ impl AppState {
         } = event
             && matches!(self.recording.phase, Phase::Starting | Phase::Recording)
             && !self.recording.importing
-            && (self.recording.call_id.is_none()
-                || self.recording.call_ended
+            // Only a call attached at recording start can enable auto-stop.
+            && self.recording.call_id.is_some()
+            && (self.recording.call_ended
                 || self.recording.call_id == Some((*pid, *started_at)))
             && ((self.recording.process_id == Some(*pid)
                 && self.recording.process_birth == Some(*started_at))
@@ -990,6 +993,8 @@ impl AppState {
             return;
         }
         self.record_options_pending = None;
+        let attach_call_at_start =
+            call_override.is_some() || self.process_id.is_some() || self.selected_event.is_some();
         let call = call_override.or_else(|| self.detector.current_call(self.process_id).cloned());
         let app = call.as_ref().map(|call| call.app.clone()).or_else(|| {
             self.inventory
@@ -1051,7 +1056,10 @@ impl AppState {
             phase: Phase::Starting,
             process_id: self.process_id,
             process_birth,
-            call_id: call.as_ref().map(|call| (call.pid, call.started_at)),
+            call_id: call
+                .as_ref()
+                .filter(|_| attach_call_at_start)
+                .map(|call| (call.pid, call.started_at)),
             ..Recording::default()
         };
         let source_guard = self.record_source_guard.take();
@@ -2844,6 +2852,68 @@ mod tests {
         state.recording.path = state.selected.clone();
     }
     #[test]
+    fn recording_without_an_initial_call_never_adopts_a_later_microphone_user() {
+        for source in ["unattached", "metadata_only", "process", "hint"] {
+            let attached = matches!(source, "process" | "hint");
+            let (mut state, commands, _root, _path) = fixture();
+            state.ready = true;
+            state.title.clear();
+            let calls = vec![notetaker_detect::DetectedCall {
+                pid: 42,
+                started_at: 100,
+                app: "Zoom".into(),
+                meeting_title: Some("Проверка звука".into()),
+            }];
+            if source != "unattached" {
+                state.detector = Monitor::with_calls(calls.clone());
+            }
+            if source == "process" {
+                state.process_id = Some(42);
+            }
+            if source == "hint" {
+                state.call_prompt = Some(CallPrompt::Start {
+                    pid: 42,
+                    started_at: 100,
+                    app: "Zoom".into(),
+                    meeting_title: Some("Проверка звука".into()),
+                });
+                state.accept_call();
+            } else {
+                state.start_recording();
+            }
+            let Command::Record(request) = commands.try_recv().unwrap() else {
+                panic!("expected recording");
+            };
+            assert_eq!(request.process_id, attached.then_some(42));
+            if source == "metadata_only" {
+                assert_eq!(request.title, "Проверка звука");
+            }
+            assert_eq!(state.recording.call_id, attached.then_some((42, 100)));
+            let now = Instant::now();
+            state.detector = Monitor::with_calls(calls);
+            state.detected(
+                &notetaker_detect::DetectEvent::CallStarted {
+                    pid: 42,
+                    started_at: 100,
+                    app: "Zoom".into(),
+                    meeting_title: Some("Проверка звука".into()),
+                    source: notetaker_detect::DetectSource::Microphone,
+                },
+                now,
+            );
+            assert_eq!(state.recording.call_id, attached.then_some((42, 100)));
+            state.detected(
+                &call_end(42, 100, notetaker_detect::CallEndReason::ProcessExited),
+                now,
+            );
+            assert_eq!(state.call_prompt.is_some(), attached);
+            for second in 1..=30 {
+                state.tick_call_end(now + Duration::from_secs(second));
+            }
+            assert_eq!(state.recording.stop_requested, attached);
+        }
+    }
+    #[test]
     fn file_processing_never_attaches_to_a_live_call_or_starts_a_countdown() {
         let (mut state, _commands, _root, _path) = fixture();
         state.recording.phase = Phase::Starting;
@@ -2892,13 +2962,42 @@ mod tests {
             now,
         );
         assert!(
-            matches!(state.call_prompt,Some(CallPrompt::Stop {until,..}) if until==now+Duration::from_secs(30))
+            matches!(state.call_prompt,Some(CallPrompt::Stop {countdown,..}) if countdown.remaining==Duration::from_secs(30))
         );
-        state.tick_call_end(now + Duration::from_secs(29));
+        for second in 1..30 {
+            state.tick_call_end(now + Duration::from_secs(second));
+        }
         assert!(!state.recording.stop_requested);
         state.tick_call_end(now + Duration::from_secs(30));
         assert!(state.recording.stop_requested);
         assert!(state.call_prompt.is_none());
+    }
+    #[test]
+    fn call_end_countdown_caps_ticks_and_restarts_after_a_suspend_gap() {
+        let (mut state, _commands, _root, _path) = fixture();
+        attached_recording(&mut state);
+        let now = Instant::now();
+        state.detected(
+            &call_end(42, 100, notetaker_detect::CallEndReason::ProcessExited),
+            now,
+        );
+        state.tick_call_end(now + Duration::from_secs(2));
+        assert!(
+            matches!(state.call_prompt, Some(CallPrompt::Stop { countdown, .. })
+            if countdown.remaining == Duration::from_secs(29))
+        );
+        state.tick_call_end(now + Duration::from_secs(42));
+        assert!(!state.recording.stop_requested);
+        assert!(
+            matches!(state.call_prompt, Some(CallPrompt::Stop { countdown, .. })
+            if countdown.remaining == Duration::from_secs(30))
+        );
+        for second in 1..30 {
+            state.tick_call_end(now + Duration::from_secs(42 + second));
+        }
+        assert!(!state.recording.stop_requested);
+        state.tick_call_end(now + Duration::from_secs(72));
+        assert!(state.recording.stop_requested && state.call_prompt.is_none());
     }
     #[test]
     fn call_end_continue_suppresses_until_a_new_attached_call() {
@@ -3797,7 +3896,7 @@ mod tests {
         state.call_prompt = Some(CallPrompt::Stop {
             pid: 42,
             started_at: 100,
-            until: Instant::now() + Duration::from_secs(30),
+            countdown: crate::detection::Countdown::new(Instant::now()),
         });
         state.dismiss_call();
         assert!(!state.recording.stop_requested);
@@ -4660,6 +4759,35 @@ mod calendar_tests {
             organizer: None,
         });
         (state, commands)
+    }
+    #[test]
+    fn calendar_start_attaches_an_already_detected_call_for_auto_stop() {
+        let (mut state, commands) = fixture();
+        state.detector = Monitor::with_calls(vec![notetaker_detect::DetectedCall {
+            pid: 42,
+            started_at: 100,
+            app: "Zoom".into(),
+            meeting_title: Some("Имя звонка".into()),
+        }]);
+        let event = state.calendar_events[0].clone();
+        state.start_event(event.clone());
+        let Command::Record(request) = commands.try_recv().unwrap() else {
+            panic!("expected recording");
+        };
+        assert_eq!(request.event.unwrap().link.uid, event.link.uid);
+        assert_eq!(request.title, event.link.title);
+        assert_eq!(state.recording.call_id, Some((42, 100)));
+        let now = Instant::now();
+        state.detected(
+            &notetaker_detect::DetectEvent::CallEnded {
+                pid: 42,
+                started_at: 100,
+                app: "Zoom".into(),
+                reason: notetaker_detect::CallEndReason::ProcessExited,
+            },
+            now,
+        );
+        assert!(matches!(state.call_prompt, Some(CallPrompt::Stop { .. })));
     }
     #[test]
     fn brief_save_requires_opt_in_and_matching_occurrence() {

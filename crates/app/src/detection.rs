@@ -4,6 +4,32 @@ use notetaker_detect::{DetectEvent, DetectedCall};
 use crate::state::Phase;
 use std::time::{Duration, Instant};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Countdown {
+    pub remaining: Duration,
+    last_tick: Instant,
+}
+impl Countdown {
+    pub fn new(now: Instant) -> Self {
+        Self {
+            remaining: Duration::from_secs(30),
+            last_tick: now,
+        }
+    }
+    pub fn tick(&mut self, now: Instant) -> bool {
+        let elapsed = now.saturating_duration_since(self.last_tick);
+        self.last_tick = now;
+        if elapsed > Duration::from_secs(3) {
+            self.remaining = Duration::from_secs(30);
+        } else {
+            self.remaining = self
+                .remaining
+                .saturating_sub(elapsed.min(Duration::from_secs(1)));
+        }
+        self.remaining.is_zero()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CallPrompt {
     Start {
@@ -15,7 +41,7 @@ pub enum CallPrompt {
     Stop {
         pid: u32,
         started_at: u64,
-        until: Instant,
+        countdown: Countdown,
     },
 }
 
@@ -55,7 +81,7 @@ pub fn proposal(
             Some(CallPrompt::Stop {
                 pid: *pid,
                 started_at: *started_at,
-                until: now + Duration::from_secs(30),
+                countdown: Countdown::new(now),
             })
         }
         _ => None,
@@ -67,7 +93,7 @@ pub enum StopAction {
     Stop,
     Continue,
 }
-pub fn stop_card(ui: &mut eframe::egui::Ui, until: Instant, now: Instant) -> StopAction {
+pub fn stop_card(ui: &mut eframe::egui::Ui, remaining: Duration) -> StopAction {
     use crate::theme::{self, ButtonStyle};
     let mut action = StopAction::None;
     let frame = eframe::egui::Frame::popup(ui.style());
@@ -76,10 +102,7 @@ pub fn stop_card(ui: &mut eframe::egui::Ui, until: Instant, now: Instant) -> Sto
             ui.available_width()
                 .min(340.0 - frame.total_margin().sum().x),
         );
-        let seconds = until
-            .saturating_duration_since(now)
-            .as_millis()
-            .div_ceil(1000);
+        let seconds = remaining.as_millis().div_ceil(1000);
         ui.label(
             eframe::egui::RichText::new(format!(
                 "Звонок завершён. Запись остановится через {seconds} с"
@@ -358,7 +381,7 @@ mod tests {
                 Some(CallPrompt::Stop {
                     pid: 42,
                     started_at: 100,
-                    until: now + Duration::from_secs(30)
+                    countdown: Countdown::new(now)
                 })
             );
             for pid in [None, Some((7, 100)), Some((42, 200))] {

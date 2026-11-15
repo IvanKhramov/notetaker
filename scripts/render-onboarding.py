@@ -223,7 +223,7 @@ impl NotetakerApp {
         if scene==65 {
             app.state.recording.phase=Phase::Recording;app.state.recording.path=app.state.selected.clone();
             app.state.recording.started=Some(Instant::now()-Duration::from_secs(123));app.state.recording.levels=[0.15,0.0];
-            app.state.call_prompt=Some(CallPrompt::Stop {pid:42,started_at:100,until:Instant::now()+Duration::from_secs(30)});
+            app.state.call_prompt=Some(CallPrompt::Stop {pid:42,started_at:100,countdown:crate::detection::Countdown::new(Instant::now())});
         }
         if scene==67 {
             let row=app.state.rows.last_mut().unwrap();row.meta.title="План релиза мобильного приложения".into();row.meta.title_source=Some(notetaker_core::TitleSource::Generated);
