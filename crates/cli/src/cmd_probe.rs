@@ -372,6 +372,7 @@ mod tests {
         for (pid, parent_pid) in [(10, None), (11, Some(10))] {
             inventory.processes.push(ProcessInfo {
                 pid,
+                started_at: 0,
                 parent_pid,
                 exe: "ms-teams.exe".into(),
             });
@@ -380,6 +381,7 @@ mod tests {
         assert!(select_app(&inventory, "zoom.exe").is_err());
         inventory.processes.push(ProcessInfo {
             pid: 20,
+            started_at: 0,
             parent_pid: None,
             exe: "ms-teams.exe".into(),
         });

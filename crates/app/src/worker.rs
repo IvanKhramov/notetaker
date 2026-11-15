@@ -160,6 +160,10 @@ impl Save {
 }
 #[derive(Clone)]
 pub struct RecordRequest {
+    pub microphone_id: Option<String>,
+    pub source_guard: Option<notetaker_core::app_config::RecordingOptions>,
+    pub process_birth: Option<u64>,
+    pub title_source: Option<notetaker_core::TitleSource>,
     pub settings: Settings,
     pub title: String,
     pub brief: Option<Box<notetaker_llm::Brief>>,
@@ -169,6 +173,7 @@ pub struct RecordRequest {
 }
 
 pub enum Command {
+    RememberRecording(notetaker_core::app_config::RecordingOptions),
     SemanticIndex {
         root: PathBuf,
     },
@@ -264,6 +269,7 @@ pub enum Command {
     Rename {
         meeting: Meeting,
         title: String,
+        expected: Option<String>,
     },
     /// Move a meeting into the library's `.trash` folder.
     Trash {
@@ -298,6 +304,7 @@ pub enum Command {
 // Rare worker-to-UI messages; boxing variants buys nothing measurable.
 #[allow(clippy::large_enum_variant)]
 pub enum Event {
+    RecordingRemembered(Result<(), String>),
     SemanticProgress {
         root: PathBuf,
         progress: notetaker_core::SemanticProgress,
@@ -386,12 +393,14 @@ pub enum Event {
     },
     Inventory(Result<Inventory, String>),
     Started {
+        options: Option<notetaker_core::app_config::RecordingOptions>,
         importing: bool,
         document: Box<DocumentData>,
         stop: StopHandle,
     },
     Pipeline(PipelineEvent),
     RecordDone {
+        source_issue: Option<String>,
         path: Option<PathBuf>,
         document: Option<Box<DocumentData>>,
         error: Option<String>,
@@ -695,6 +704,15 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                         let _ = events.send(Event::CallOpened(ok));
                     });
                 }
+                Command::RememberRecording(options) => {
+                    let result = (|| -> Result<()> {
+                        let mut settings = Settings::load()?;
+                        settings.last_recording = Some(options);
+                        atomic_write(&Settings::path()?, &toml::to_string_pretty(&settings)?)
+                    })()
+                    .map_err(error_text);
+                    let _ = events.send(Event::RecordingRemembered(result));
+                }
                 Command::Reveal(path) => {
                     let events = events.clone();
                     thread::spawn(move || {
@@ -702,9 +720,13 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                             events.send(Event::Revealed(reveal_file(&path).map_err(error_text)));
                     });
                 }
-                Command::Rename { meeting, title } => {
+                Command::Rename {
+                    meeting,
+                    title,
+                    expected,
+                } => {
                     let result = meeting
-                        .update_meta(|meta| meta.title = title.clone())
+                        .rename_title(&title, expected.as_deref())
                         .map(|()| title)
                         .map_err(|error| error_text(error.into()));
                     let _ = events.send(Event::Renamed {
@@ -870,6 +892,10 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                     thread::spawn(move || {
                         record(
                             RecordRequest {
+                                microphone_id: None,
+                                source_guard: None,
+                                process_birth: None,
+                                title_source: None,
                                 settings,
                                 title: String::new(),
                                 brief: None,
@@ -888,6 +914,10 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                     thread::spawn(move || {
                         record(
                             RecordRequest {
+                                microphone_id: None,
+                                source_guard: None,
+                                process_birth: None,
+                                title_source: None,
                                 settings,
                                 title: String::new(),
                                 brief: None,
@@ -966,7 +996,7 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                     });
                 }
                 Command::Settings {
-                    settings,
+                    mut settings,
                     llm,
                     calendar_secrets,
                     persist_llm,
@@ -975,6 +1005,7 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                         settings.validate()?;
                         let llm_text = llm.validate()?;
                         let previous = Settings::load().unwrap_or_default();
+                        crate::recording_options::apply_default_changes(&previous, &mut settings);
                         for (id, url) in &calendar_secrets {
                             let subscription = settings
                                 .calendars
@@ -1276,6 +1307,7 @@ fn record(
 ) {
     let mut path = None;
     let mut meeting_for_reload = None;
+    let mut remembered_options = None;
     let result: Result<()> = (|| {
         let library = Library::open(&request.settings.library)?;
         let (initial_meta, folder_defaults) = recording_metadata(
@@ -1349,7 +1381,28 @@ fn record(
                 config,
             )?
         } else {
+            let devices = inventory()?;
+            if let Some(guard) = &request.source_guard {
+                crate::recording_options::resolve(guard, &devices)?;
+            }
+            let options = crate::recording_options::remember(
+                &devices,
+                &request.settings,
+                request.process_id,
+                request.microphone_id.as_deref(),
+            )?;
+            if let Some(birth) = request.process_birth
+                && !matches!(&options.source,notetaker_core::app_config::RecordingSource::Process {started_at,..} if *started_at==birth)
+            {
+                return Err(crate::recording_options::SourceUnavailable(
+                    "Прежнее приложение завершилось. Выберите источник записи.".into(),
+                )
+                .into());
+            }
+            let microphone_id = Some(options.microphone_id.clone());
+            remembered_options = Some(options);
             let [mic, system] = live_sources(LiveOptions {
+                microphone_id,
                 process_id: request.process_id,
                 ..LiveOptions::default()
             })?;
@@ -1357,6 +1410,7 @@ fn record(
             let mut meta = initial_meta;
             meta.started_at = Utc::now();
             meta.app = request.app;
+            meta.title_source = request.title_source;
             if let Some(event) = &request.event {
                 notetaker_core::calendar::link_meeting(&mut meta, event, true);
             }
@@ -1375,8 +1429,12 @@ fn record(
         path = Some(meeting.path().to_owned());
         meeting_for_reload = Some(meeting.clone());
         let document = DocumentData::read(meeting)?;
+        if let Some(options) = &mut remembered_options {
+            options.mode = document.meta.mode;
+        }
         if events
             .send(Event::Started {
+                options: remembered_options,
                 importing: import_file.is_some() || existing.is_some(),
                 document: Box::new(document),
                 stop: session.stop_handle(),
@@ -1403,10 +1461,20 @@ fn record(
     let document = meeting_for_reload
         .and_then(|meeting| DocumentData::read(meeting).ok())
         .map(Box::new);
+    let source_issue = result
+        .as_ref()
+        .err()
+        .and_then(|error| error.downcast_ref::<crate::recording_options::SourceUnavailable>())
+        .map(ToString::to_string);
+    let error = result
+        .err()
+        .filter(|_| source_issue.is_none())
+        .map(error_text);
     let _ = events.send(Event::RecordDone {
+        source_issue,
         path,
         document,
-        error: result.err().map(error_text),
+        error,
     });
 }
 

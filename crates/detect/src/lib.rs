@@ -115,15 +115,24 @@ pub enum DetectSource {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DetectEvent {
     CallStarted {
+        started_at: u64,
         app: String,
         pid: u32,
         source: DetectSource,
         meeting_title: Option<String>,
     },
     CallEnded {
+        started_at: u64,
+        reason: CallEndReason,
         app: String,
         pid: u32,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallEndReason {
+    MicrophoneReleased,
+    ProcessExited,
 }
 
 #[derive(Clone, Debug)]
@@ -152,6 +161,7 @@ pub trait SnapshotProvider {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DetectedCall {
+    pub started_at: u64,
     pub app: String,
     pub pid: u32,
     pub meeting_title: Option<String>,
@@ -206,6 +216,8 @@ struct State {
     can_offer: bool,
     since: Duration,
     missing_since: Option<Duration>,
+    process_missing_since: Option<Duration>,
+    has_called: bool,
     active: bool,
     dismissed: Option<Duration>,
     repeat: bool,
@@ -244,6 +256,7 @@ impl<P: SnapshotProvider> CallDetector<P> {
                 self.warnings = vec![format!("snapshot: {error:#}")];
                 for state in self.states.values_mut() {
                     state.since = now;
+                    state.process_missing_since = None;
                     state.missing_since = (!state.active).then_some(now);
                 }
                 return vec![];
@@ -289,6 +302,8 @@ impl<P: SnapshotProvider> CallDetector<P> {
                     can_offer: allowed,
                     since: now,
                     missing_since: None,
+                    process_missing_since: None,
+                    has_called: false,
                     active: false,
                     dismissed: None,
                     repeat: false,
@@ -305,6 +320,11 @@ impl<P: SnapshotProvider> CallDetector<P> {
         let mut events = vec![];
         self.states.retain(|&(pid, started_at), state| {
             let key = (pid, started_at);
+            if live.contains_key(&key) {
+                state.process_missing_since = None;
+            } else {
+                state.process_missing_since.get_or_insert(now);
+            }
             if let Some(&(output, can_offer)) = present.get(&key) {
                 let ready = now.saturating_sub(state.since) >= self.config.start_delay;
                 let cooldown = state
@@ -312,8 +332,10 @@ impl<P: SnapshotProvider> CallDetector<P> {
                     .is_none_or(|at| now.saturating_sub(at) >= self.config.dismiss_cooldown);
                 if can_offer && ready && cooldown && (!state.active || state.repeat) {
                     state.active = true;
+                    state.has_called = true;
                     state.repeat = false;
                     events.push(DetectEvent::CallStarted {
+                        started_at,
                         app: state.app.clone(),
                         pid,
                         meeting_title: state.meeting_title.clone(),
@@ -327,10 +349,24 @@ impl<P: SnapshotProvider> CallDetector<P> {
             } else {
                 state.since = now;
                 let missing = *state.missing_since.get_or_insert(now);
-                if state.active && now.saturating_sub(missing) >= self.config.end_delay {
+                let exited = state.has_called
+                    && state
+                        .process_missing_since
+                        .is_some_and(|since| now.saturating_sub(since) >= self.config.end_delay);
+                if exited || (state.active && now.saturating_sub(missing) >= self.config.end_delay)
+                {
                     state.active = false;
                     state.repeat = false;
+                    if exited {
+                        state.has_called = false;
+                    }
                     events.push(DetectEvent::CallEnded {
+                        started_at,
+                        reason: if exited {
+                            CallEndReason::ProcessExited
+                        } else {
+                            CallEndReason::MicrophoneReleased
+                        },
                         app: state.app.clone(),
                         pid,
                     });
@@ -338,6 +374,7 @@ impl<P: SnapshotProvider> CallDetector<P> {
             }
             // Keep a dismissal across separate calls in the same process.
             state.active
+                || state.has_called
                 || present.contains_key(&key)
                 || (live.contains_key(&key)
                     && state
@@ -397,7 +434,8 @@ impl<P: SnapshotProvider> CallDetector<P> {
         self.states
             .iter()
             .filter(|(_, state)| state.active && state.can_offer && state.missing_since.is_none())
-            .map(|(&(pid, _), state)| DetectedCall {
+            .map(|(&(pid, started_at), state)| DetectedCall {
+                started_at,
                 app: state.app.clone(),
                 pid,
                 meeting_title: state.meeting_title.clone(),

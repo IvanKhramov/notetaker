@@ -89,3 +89,30 @@ pub fn replace_text(ctx: &Context, draw: &mut impl FnMut(&mut Ui), old: &str, te
     )
     .drop_without_applying_deltas();
 }
+
+pub fn recording_inventory() -> notetaker_capture::Inventory {
+    use notetaker_capture::{Channel, DeviceInfo, Inventory, ProcessInfo};
+    Inventory {
+        devices: vec![
+            DeviceInfo {
+                id: "mic".into(),
+                name: "Микрофон".into(),
+                channel: Channel::Mic,
+                is_default: true,
+            },
+            DeviceInfo {
+                id: "out".into(),
+                name: "Звук".into(),
+                channel: Channel::System,
+                is_default: true,
+            },
+        ],
+        processes: vec![ProcessInfo {
+            pid: 42,
+            started_at: 100,
+            parent_pid: None,
+            exe: "Zoom.exe".into(),
+        }],
+        ..Default::default()
+    }
+}

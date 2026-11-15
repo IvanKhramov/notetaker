@@ -312,6 +312,24 @@ impl Meeting {
         timeout: std::time::Duration,
         update: impl FnOnce(&mut MeetingMeta),
     ) -> Result<()> {
+        self.update_meta_checked_with_timeout(timeout, |meta| {
+            update(meta);
+            Ok(())
+        })
+    }
+
+    pub fn update_meta_checked(
+        &self,
+        update: impl FnOnce(&mut MeetingMeta) -> Result<()>,
+    ) -> Result<()> {
+        self.update_meta_checked_with_timeout(std::time::Duration::from_secs(5), update)
+    }
+
+    fn update_meta_checked_with_timeout(
+        &self,
+        timeout: std::time::Duration,
+        update: impl FnOnce(&mut MeetingMeta) -> Result<()>,
+    ) -> Result<()> {
         let started = std::time::Instant::now();
         // Threads of this process hold the mutex only for a short metadata write, so
         // waiting for it is safe. Polling it with a timeout starves under contention:
@@ -323,13 +341,24 @@ impl Meeting {
             lock_meeting_files_for(&self.path, timeout.saturating_sub(started.elapsed()))?;
         let loaded = load_text(&self.source_path("meta.yaml")?)?;
         let mut meta: MeetingMeta = serde_yaml::from_str(&loaded.value)?;
-        update(&mut meta);
+        update(&mut meta)?;
         checked_write(
             &self.path.join("meta.yaml"),
             serde_yaml::to_string(&meta)?.as_bytes(),
             loaded.revision,
         )?;
         Ok(())
+    }
+
+    pub fn rename_title(&self, title: &str, expected: Option<&str>) -> Result<()> {
+        self.update_meta_checked(|meta| {
+            if expected.is_some_and(|expected| meta.title != expected) {
+                return Err(crate::Error::TitleEdit("Название уже изменилось".into()));
+            }
+            meta.title = title.into();
+            meta.title_source = Some(crate::TitleSource::User);
+            Ok(())
+        })
     }
 
     pub fn write_meta(&self, meta: &MeetingMeta) -> Result<()> {

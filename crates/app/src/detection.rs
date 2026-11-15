@@ -2,46 +2,102 @@
 use notetaker_detect::{DetectEvent, DetectedCall};
 
 use crate::state::Phase;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CallPrompt {
     Start {
+        started_at: u64,
         app: String,
         pid: u32,
         meeting_title: Option<String>,
     },
     Stop {
         pid: u32,
+        started_at: u64,
+        until: Instant,
     },
 }
 
-/// A call ending is only a hint, never an instruction to stop the pipeline.
+/// Microphone release alone cannot distinguish a hang-up from mute.
 pub fn proposal(
     event: &DetectEvent,
     phase: Phase,
-    recorded_pid: Option<u32>,
+    recorded_call: Option<(u32, u64)>,
     stop_requested: bool,
+    auto_stop: bool,
+    now: Instant,
 ) -> Option<CallPrompt> {
     match event {
         DetectEvent::CallStarted {
             app,
             pid,
+            started_at,
             meeting_title,
             ..
         } if phase == Phase::Idle => Some(CallPrompt::Start {
             app: app.clone(),
             pid: *pid,
+            started_at: *started_at,
             meeting_title: meeting_title.clone(),
         }),
-        DetectEvent::CallEnded { pid, .. }
-            if matches!(phase, Phase::Starting | Phase::Recording)
-                && recorded_pid == Some(*pid)
-                && !stop_requested =>
+        DetectEvent::CallEnded {
+            pid,
+            started_at,
+            reason: notetaker_detect::CallEndReason::ProcessExited,
+            ..
+        } if auto_stop
+            && *started_at > 0
+            && matches!(phase, Phase::Starting | Phase::Recording)
+            && recorded_call == Some((*pid, *started_at))
+            && !stop_requested =>
         {
-            Some(CallPrompt::Stop { pid: *pid })
+            Some(CallPrompt::Stop {
+                pid: *pid,
+                started_at: *started_at,
+                until: now + Duration::from_secs(30),
+            })
         }
         _ => None,
     }
+}
+
+pub enum StopAction {
+    None,
+    Stop,
+    Continue,
+}
+pub fn stop_card(ui: &mut eframe::egui::Ui, until: Instant, now: Instant) -> StopAction {
+    use crate::theme::{self, ButtonStyle};
+    let mut action = StopAction::None;
+    let frame = eframe::egui::Frame::popup(ui.style());
+    frame.show(ui, |ui| {
+        ui.set_width(
+            ui.available_width()
+                .min(340.0 - frame.total_margin().sum().x),
+        );
+        let seconds = until
+            .saturating_duration_since(now)
+            .as_millis()
+            .div_ceil(1000);
+        ui.label(
+            eframe::egui::RichText::new(format!(
+                "Звонок завершён. Запись остановится через {seconds} с"
+            ))
+            .font(theme::medium(theme::BODY)),
+        );
+        theme::footer(ui, |ui| {
+            if theme::button(ui, "Продолжить запись", ButtonStyle::Ghost).clicked()
+            {
+                action = StopAction::Continue;
+            }
+            if theme::button(ui, "Остановить сейчас", ButtonStyle::Primary).clicked()
+            {
+                action = StopAction::Stop;
+            }
+        });
+    });
+    action
 }
 
 #[derive(Default)]
@@ -236,32 +292,40 @@ mod tests {
     #[test]
     fn offers_start_only_while_idle() {
         let event = DetectEvent::CallStarted {
+            started_at: 100,
             app: "Zoom".into(),
             pid: 42,
             source: DetectSource::Microphone,
             meeting_title: Some("Planning".into()),
         };
         assert_eq!(
-            proposal(&event, Phase::Idle, None, false),
+            proposal(&event, Phase::Idle, None, false, true, Instant::now()),
             Some(CallPrompt::Start {
+                started_at: 100,
                 app: "Zoom".into(),
                 pid: 42,
                 meeting_title: Some("Planning".into()),
             })
         );
+        let now = Instant::now();
         for phase in [Phase::Starting, Phase::Recording, Phase::Finalizing] {
-            assert_eq!(proposal(&event, phase, Some(42), false), None);
+            assert_eq!(
+                proposal(&event, phase, Some((42, 100)), false, true, now),
+                None
+            );
         }
     }
     #[test]
     fn multiple_detected_calls_require_an_explicit_pid() {
         let monitor = Monitor::with_calls(vec![
             DetectedCall {
+                started_at: 100,
                 app: "Zoom".into(),
                 pid: 1,
                 meeting_title: Some("A".into()),
             },
             DetectedCall {
+                started_at: 100,
                 app: "Телемост".into(),
                 pid: 2,
                 meeting_title: Some("B".into()),
@@ -281,22 +345,35 @@ mod tests {
 
     #[test]
     fn offers_stop_only_for_current_process_before_stopping() {
+        let now = Instant::now();
         let event = DetectEvent::CallEnded {
+            started_at: 100,
+            reason: notetaker_detect::CallEndReason::ProcessExited,
             app: "Zoom".into(),
             pid: 42,
         };
         for phase in [Phase::Starting, Phase::Recording] {
             assert_eq!(
-                proposal(&event, phase, Some(42), false),
-                Some(CallPrompt::Stop { pid: 42 })
+                proposal(&event, phase, Some((42, 100)), false, true, now),
+                Some(CallPrompt::Stop {
+                    pid: 42,
+                    started_at: 100,
+                    until: now + Duration::from_secs(30)
+                })
             );
-            for pid in [None, Some(7)] {
-                assert_eq!(proposal(&event, phase, pid, false), None);
+            for pid in [None, Some((7, 100)), Some((42, 200))] {
+                assert_eq!(proposal(&event, phase, pid, false, true, now), None);
             }
-            assert_eq!(proposal(&event, phase, Some(42), true), None);
+            assert_eq!(
+                proposal(&event, phase, Some((42, 100)), true, true, now),
+                None
+            );
         }
         for phase in [Phase::Idle, Phase::Finalizing] {
-            assert_eq!(proposal(&event, phase, Some(42), false), None);
+            assert_eq!(
+                proposal(&event, phase, Some((42, 100)), false, true, now),
+                None
+            );
         }
     }
 }

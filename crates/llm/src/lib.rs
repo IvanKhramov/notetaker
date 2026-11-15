@@ -24,7 +24,8 @@ pub use config::{
     Config, Defaults, KeySource, ModelChoice, ProviderConfig, ProviderKind, Scenario, Scenarios,
 };
 pub use enhance::{
-    EnhanceResult, enhance, enhance_meeting, enhance_meeting_if_unedited, estimate_tokens,
+    EnhanceResult, TitleChange, enhance, enhance_meeting, enhance_meeting_if_unedited,
+    estimate_tokens,
 };
 pub use provider::{CompletionRequest, HttpProvider, OutputLimit, Provider};
 pub use template::Template;

@@ -17,6 +17,7 @@ mod maintenance;
 mod organization;
 mod people;
 mod quickstart;
+mod recording_options;
 mod settings;
 mod speakers;
 mod state;

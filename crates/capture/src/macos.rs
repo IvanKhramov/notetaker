@@ -192,6 +192,7 @@ pub fn inventory() -> Result<Inventory> {
             .values()
             .map(|p| crate::ProcessInfo {
                 pid: p.pid().as_u32(),
+                started_at: p.start_time(),
                 parent_pid: p.parent().map(|id| id.as_u32()),
                 exe: p.name().to_string_lossy().into_owned(),
             })

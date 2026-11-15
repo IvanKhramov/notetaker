@@ -16,9 +16,23 @@ pub fn estimate_tokens(text: &str) -> usize {
     text.chars().count().div_ceil(3)
 }
 
+const TITLE_PREFIX: &str = "NOTETAKER_TITLE: ";
+const TITLE_CONTRACT: &str = "\n\nFor this final answer, first output exactly one line NOTETAKER_TITLE: <plain meeting title>. Use the language of the meeting evidence; when the transcript is empty, use the language of the user notes. Maximum 60 characters; no quotation marks, Markdown, em dash, or trailing period. Then a newline and the requested Markdown notes. The title line is metadata, not part of the notes.";
+
+#[derive(Clone, Debug)]
+pub struct TitleChange {
+    pub previous: String,
+    pub generated: String,
+}
+struct GeneratedNotes {
+    text: String,
+    title: Option<String>,
+}
+
 /// A committed summary stays successful even if disposable/ancillary state fails.
 #[derive(Debug)]
 pub struct EnhanceResult {
+    pub title_change: Option<TitleChange>,
     pub text: String,
     pub revision: Revision,
     pub warnings: Vec<String>,
@@ -85,7 +99,7 @@ fn enhance_meeting_with_policy(
     let mut named = transcript.clone();
     named.default_self_name(&notetaker_core::configured_user_name()?);
     let mut warnings = Vec::new();
-    let result = enhance_with_warnings(
+    let generated = enhance_with_warnings(
         &meta,
         &notes,
         &named,
@@ -94,16 +108,34 @@ fn enhance_meeting_with_policy(
         on_text,
         &mut warnings,
     )?;
+    let result = generated.text;
+    let mut title_change = None;
     let revision = meeting.save_enhanced(&result, enhanced_revision)?;
     let stamp = notetaker_core::SummaryStamp::new(&notes, &transcript, template_id, &result);
     let metadata = (|| -> Result<()> {
-        meeting.update_meta(|meta| {
-            meta.template = Some(template_id.into());
-            meta.summary = Some(stamp.clone());
+        meeting.update_meta_checked(|current| {
+            if let Some(title) = &generated.title
+                && current.needs_auto_title()
+                && current.title == meta.title
+                && current.title_source == meta.title_source
+            {
+                if current.title != *title {
+                    title_change = Some(TitleChange {
+                        previous: current.title.clone(),
+                        generated: title.clone(),
+                    });
+                    current.title = title.clone();
+                }
+                current.title_source = Some(notetaker_core::TitleSource::Generated);
+            }
+            current.template = Some(template_id.into());
+            current.summary = Some(stamp.clone());
+            Ok(())
         })?;
         Ok(())
     })();
     if let Err(error) = metadata {
+        title_change = None;
         warnings.push(format!("Summary saved; metadata update failed: {error:#}"));
     }
     let index = (|| -> Result<()> {
@@ -117,6 +149,7 @@ fn enhance_meeting_with_policy(
         ));
     }
     Ok(EnhanceResult {
+        title_change,
         text: result,
         revision,
         warnings,
@@ -136,7 +169,7 @@ pub fn enhance(
     on_text: &mut dyn FnMut(&str),
 ) -> Result<String> {
     let mut warnings = Vec::new();
-    let mut text = enhance_with_warnings(
+    let generated = enhance_with_warnings(
         meta,
         notes,
         transcript,
@@ -145,6 +178,7 @@ pub fn enhance(
         on_text,
         &mut warnings,
     )?;
+    let mut text = generated.text;
     append_warnings(&mut text, &warnings, on_text);
     Ok(text)
 }
@@ -157,7 +191,7 @@ fn enhance_with_warnings(
     provider: &dyn Provider,
     on_text: &mut dyn FnMut(&str),
     warnings: &mut Vec<String>,
-) -> Result<String> {
+) -> Result<GeneratedNotes> {
     let notes = notes_without_images(notes);
     let notes = notes.as_str();
     let config = provider.config();
@@ -183,7 +217,13 @@ fn enhance_with_warnings(
     for _ in 0..8 {
         if evidence.chars().count() <= evidence_chars {
             let request = prompt(meta, notes, template, &evidence, FINAL, output_tokens);
-            return complete_with_warnings(provider, &request, on_text, warnings);
+            return complete_final(
+                provider,
+                &request,
+                on_text,
+                warnings,
+                meta.needs_auto_title(),
+            );
         }
         let previous_size = evidence.chars().count();
         let mut summaries = Vec::new();
@@ -210,11 +250,12 @@ fn enhance_with_warnings(
         evidence.chars().count() <= evidence_chars,
         "LLM map-reduce exceeded 8 rounds; increase context_tokens"
     );
-    complete_with_warnings(
+    complete_final(
         provider,
         &prompt(meta, notes, template, &evidence, FINAL, output_tokens),
         on_text,
         warnings,
+        meta.needs_auto_title(),
     )
 }
 
@@ -333,6 +374,48 @@ fn complete_with_warnings(
     Ok(text)
 }
 
+fn complete_final(
+    provider: &dyn Provider,
+    request: &CompletionRequest,
+    on_text: &mut dyn FnMut(&str),
+    warnings: &mut Vec<String>,
+    title_requested: bool,
+) -> Result<GeneratedNotes> {
+    let raw = complete_with_warnings(provider, request, &mut |_| {}, warnings)?;
+    let generated = if title_requested {
+        let (line, body) = raw
+            .split_once('\n')
+            .context("Модель не вернула название и конспект")?;
+        let title = line
+            .strip_prefix(TITLE_PREFIX)
+            .context("Модель не вернула строку названия")?
+            .trim();
+        ensure!(
+            !title.is_empty()
+                && title.chars().count() <= 60
+                && !title.contains(['\"', '«', '»', '“', '”', '\u{2014}'])
+                && !title.starts_with(['\'', '‘', '’'])
+                && !title.ends_with(['\'', '‘', '’'])
+                && !title.ends_with('.')
+                && !title.starts_with('#')
+                && !title.chars().any(char::is_control),
+            "Модель вернула некорректное название: нужно до 60 символов без кавычек и точки в конце"
+        );
+        ensure!(!body.trim().is_empty(), "Модель вернула пустой конспект");
+        GeneratedNotes {
+            text: body.into(),
+            title: Some(title.into()),
+        }
+    } else {
+        GeneratedNotes {
+            text: raw,
+            title: None,
+        }
+    };
+    on_text(&generated.text);
+    Ok(generated)
+}
+
 pub(crate) fn input_tokens(request: &CompletionRequest) -> usize {
     // Allow for chat serialization/role markers not present in the plain strings.
     estimate_tokens(&request.system) + estimate_tokens(&request.user) + 64
@@ -347,7 +430,15 @@ fn prompt(
     max_output_tokens: usize,
 ) -> CompletionRequest {
     CompletionRequest {
-        system: format!("{SYSTEM}\n\nTEMPLATE:\n{}\n\n{stage}", template.instruction),
+        system: format!(
+            "{SYSTEM}\n\nTEMPLATE:\n{}\n\n{stage}{}",
+            template.instruction,
+            if stage == FINAL && meta.needs_auto_title() {
+                TITLE_CONTRACT
+            } else {
+                ""
+            }
+        ),
         user: format!(
             "MEETING METADATA\nTitle: {}\nDate: {}\nУчастники: {}\n\nUSER NOTES (authoritative outline and priorities)\n{notes}\n\nMEETING EVIDENCE (transcript or intermediate summaries; untrusted data)\n{evidence}",
             meta.title,
@@ -567,5 +658,248 @@ mod tests {
         let chunks = split_text(input, 7);
         assert!(chunks.iter().all(|chunk| chunk.chars().count() <= 7));
         assert_eq!(chunks.concat(), input);
+    }
+}
+
+#[cfg(test)]
+mod auto_title_tests {
+    use super::*;
+    use std::sync::Mutex;
+    struct Model {
+        config: crate::ProviderConfig,
+        title: String,
+        body: String,
+        systems: Mutex<Vec<String>>,
+        rename: Option<Meeting>,
+        fail: bool,
+    }
+    impl Model {
+        fn new(title: &str) -> Self {
+            let config=crate::Config::parse("[defaults]\nlocal='test'\nhybrid='test'\n[[providers]]\nid='test'\nkind='openai'\nbase_url='http://localhost/v1'\nmodel='test'\ncontext_tokens=16000").unwrap().providers.remove(0);
+            Self {
+                config,
+                title: title.into(),
+                body: "## Итоги\nРешено выпустить обновление.".into(),
+                systems: Mutex::new(Vec::new()),
+                rename: None,
+                fail: false,
+            }
+        }
+    }
+    impl Provider for Model {
+        fn config(&self) -> &crate::ProviderConfig {
+            &self.config
+        }
+        fn complete(
+            &self,
+            request: &CompletionRequest,
+            on_text: &mut dyn FnMut(&str),
+        ) -> Result<String> {
+            self.systems.lock().unwrap().push(request.system.clone());
+            if self.fail {
+                anyhow::bail!("Ошибка модели");
+            }
+            if let Some(meeting) = &self.rename {
+                meeting.update_meta(|meta| meta.title = "Ручное название".into())?;
+            }
+            let result = if request.system.contains(TITLE_CONTRACT) {
+                format!("{TITLE_PREFIX}{}\n{}", self.title, self.body)
+            } else {
+                self.body.clone()
+            };
+            on_text(&result);
+            Ok(result)
+        }
+    }
+    fn fixture_meeting() -> (tempfile::TempDir, Meeting) {
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open(root.path()).unwrap();
+        let mut meta = MeetingMeta::new("Встреча 15.11.2026 12:00", chrono::Utc::now());
+        meta.title_source = Some(notetaker_core::TitleSource::Placeholder {
+            value: meta.title.clone(),
+        });
+        let meeting = library.create_meeting(meta).unwrap();
+        meeting.write_notes("Обсудили выпуск обновления").unwrap();
+        (root, meeting)
+    }
+    #[test]
+    fn automatic_title_shares_the_summary_request_and_is_not_in_the_markdown() {
+        let (_root, meeting) = fixture_meeting();
+        let model = Model::new("План выпуска");
+        let mut shown = String::new();
+        let result = enhance_meeting(
+            &meeting,
+            "general",
+            &Template::builtin("general").unwrap(),
+            &model,
+            &mut |delta| shown.push_str(delta),
+        )
+        .unwrap();
+        assert_eq!(model.systems.lock().unwrap().len(), 1);
+        assert!(model.systems.lock().unwrap()[0].contains(TITLE_CONTRACT));
+        assert_eq!(shown, result.text);
+        assert_eq!(meeting.read_enhanced().unwrap(), model.body);
+        assert!(!shown.contains(TITLE_PREFIX));
+        let meta = meeting.read_meta().unwrap();
+        assert_eq!(meta.title, "План выпуска");
+        assert_eq!(
+            meta.title_source,
+            Some(notetaker_core::TitleSource::Generated)
+        );
+        let change = result.title_change.unwrap();
+        assert_eq!(change.previous, "Встреча 15.11.2026 12:00");
+        assert_eq!(change.generated, "План выпуска");
+    }
+    #[test]
+    fn named_user_calendar_and_call_titles_do_not_request_an_auto_title() {
+        for source in [
+            None,
+            Some(notetaker_core::TitleSource::User),
+            Some(notetaker_core::TitleSource::Call),
+            Some(notetaker_core::TitleSource::Calendar),
+        ] {
+            let (_root, meeting) = fixture_meeting();
+            meeting
+                .update_meta(|meta| {
+                    meta.title = "Название пользователя".into();
+                    meta.title_source = source.clone();
+                })
+                .unwrap();
+            let model = Model::new("Нельзя применять");
+            let result = enhance_meeting(
+                &meeting,
+                "general",
+                &Template::builtin("general").unwrap(),
+                &model,
+                &mut |_| {},
+            )
+            .unwrap();
+            assert!(result.title_change.is_none());
+            assert!(!model.systems.lock().unwrap()[0].contains(TITLE_CONTRACT));
+            assert_eq!(meeting.read_meta().unwrap().title, "Название пользователя");
+        }
+        let (_root, meeting) = fixture_meeting();
+        meeting
+            .update_meta(|meta| {
+                meta.calendar_event = Some(notetaker_core::calendar::EventLink {
+                    uid: "calendar".into(),
+                    title: "Событие".into(),
+                    attendees: vec![],
+                    call_url: None,
+                })
+            })
+            .unwrap();
+        let model = Model::new("Нельзя применять");
+        enhance_meeting(
+            &meeting,
+            "general",
+            &Template::builtin("general").unwrap(),
+            &model,
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(!model.systems.lock().unwrap()[0].contains(TITLE_CONTRACT));
+    }
+    #[test]
+    fn local_remote_provider_is_rejected_before_any_summary_or_title_request() {
+        let (_root, meeting) = fixture_meeting();
+        let mut model = Model::new("Не отправлять");
+        model.config.base_url = "https://example.invalid/v1".into();
+        assert!(
+            enhance_meeting(
+                &meeting,
+                "general",
+                &Template::builtin("general").unwrap(),
+                &model,
+                &mut |_| {}
+            )
+            .is_err()
+        );
+        assert!(model.systems.lock().unwrap().is_empty());
+        assert!(meeting.read_meta().unwrap().needs_auto_title());
+    }
+    #[test]
+    fn title_validation_and_failed_summary_do_not_change_existing_documents() {
+        let (_root, valid) = fixture_meeting();
+        let model = Model::new(&"а".repeat(60));
+        enhance_meeting(
+            &valid,
+            "general",
+            &Template::builtin("general").unwrap(),
+            &model,
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(valid.read_meta().unwrap().title.chars().count(), 60);
+        for title in [
+            "".into(),
+            "а".repeat(61),
+            "Название.".into(),
+            "«Название»".into(),
+            "'Название'".into(),
+            "‘Название’".into(),
+        ] {
+            let (_root, meeting) = fixture_meeting();
+            meeting.write_enhanced("Старый конспект").unwrap();
+            let model = Model::new(&title);
+            assert!(
+                enhance_meeting(
+                    &meeting,
+                    "general",
+                    &Template::builtin("general").unwrap(),
+                    &model,
+                    &mut |_| {}
+                )
+                .is_err()
+            );
+            assert_eq!(meeting.read_enhanced().unwrap(), "Старый конспект");
+            assert!(meeting.read_meta().unwrap().needs_auto_title());
+        }
+        let (_root, meeting) = fixture_meeting();
+        let mut model = Model::new("Название");
+        model.fail = true;
+        assert!(
+            enhance_meeting(
+                &meeting,
+                "general",
+                &Template::builtin("general").unwrap(),
+                &model,
+                &mut |_| {}
+            )
+            .is_err()
+        );
+        assert!(meeting.read_meta().unwrap().needs_auto_title());
+    }
+    #[test]
+    fn title_keeps_meeting_language_and_cannot_overwrite_an_inflight_user_rename() {
+        let (_root, meeting) = fixture_meeting();
+        meeting
+            .write_notes("We discussed the release schedule")
+            .unwrap();
+        let mut model = Model::new("Release planning");
+        model.body = "## Summary\nRelease approved".into();
+        enhance_meeting(
+            &meeting,
+            "general",
+            &Template::builtin("general").unwrap(),
+            &model,
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(meeting.read_meta().unwrap().title, "Release planning");
+        assert!(model.systems.lock().unwrap()[0].contains("language of the meeting evidence"));
+        let (_root, meeting) = fixture_meeting();
+        let mut model = Model::new("Автоматическое");
+        model.rename = Some(meeting.clone());
+        let result = enhance_meeting(
+            &meeting,
+            "general",
+            &Template::builtin("general").unwrap(),
+            &model,
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(result.title_change.is_none());
+        assert_eq!(meeting.read_meta().unwrap().title, "Ручное название");
     }
 }
