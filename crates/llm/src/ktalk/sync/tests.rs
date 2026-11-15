@@ -61,7 +61,16 @@ fn fixture(offset: i64) -> (Local, Transcript) {
     .into_iter()
     .enumerate()
     {
-        let text = format!("Обсуждаем вопрос номер {i} сегодня вместе");
+        let text = [
+            "Проектирование очереди сообщений требует проверки порядка",
+            "Кэширование ответов сервера сокращает задержку обработки",
+            "Планируем обновление схемы хранения журнала событий",
+            "Измеряем пропускную способность сетевого подключения клиента",
+            "Регулярное резервирование защищает данные рабочих проектов",
+            "Разделение нагрузки позволяет ускорить расчёт результатов",
+            "Документируем ограничения протокола передачи файлов приложения",
+        ][i]
+            .to_owned();
         local.segments.push(Segment {
             id: Uuid::now_v7(),
             speaker: SpeakerId("s1".into()),
@@ -243,12 +252,191 @@ fn old_file_read_no_rewrite_idempotent_revision_stale_summary_and_search() {
 fn text_threshold_accepts_half_tokens_and_normalizes_case_punctuation() {
     let (mut local, remote) = fixture(37_000);
     for segment in &mut local.segments {
-        segment.text = "ОБСУЖДАЕМ, вопрос! номер. другой чужой пример".into();
+        let first = segment
+            .text
+            .split_whitespace()
+            .take(3)
+            .collect::<Vec<_>>()
+            .join(" ");
+        segment.text = format!("{}! чужой иной пример", first.to_uppercase());
     }
     let p = plan(&local, start(), recording("a", 0, 400), &remote, &owner()).unwrap();
     assert!((p.validation_score - 0.5).abs() < 0.001);
     for segment in &mut local.segments {
-        segment.text = "Обсуждаем вопрос чужой иной новый пример".into();
+        segment.text = "Другой посторонний текст совершенно чужой теме".into();
     }
     assert!(plan(&local, start(), recording("a", 0, 400), &remote, &owner()).is_err());
+}
+
+#[test]
+fn fillers_repeated_words_and_shared_greeting_are_not_evidence() {
+    for text in ["да", "да ну вот okay the thanks", "Проектирование"] {
+        let (mut local, mut remote) = fixture(0);
+        for segment in &mut local.segments {
+            segment.text = text.into();
+        }
+        for word in remote
+            .tracks
+            .iter_mut()
+            .flat_map(|t| &mut t.chunks)
+            .flat_map(|c| &mut c.words)
+        {
+            word.text = text.into();
+        }
+        assert!(plan(&local, start(), recording("a", 0, 400), &remote, &owner()).is_err());
+    }
+    let (mut local, mut remote) = fixture(0);
+    // Eighteen distinct opening words match perfectly. Later fillers also match,
+    // but cannot extend content evidence to the rest of a different meeting.
+    for segment in &mut local.segments[3..] {
+        segment.text = "да".into();
+    }
+    for word in remote
+        .tracks
+        .iter_mut()
+        .flat_map(|t| &mut t.chunks)
+        .flat_map(|c| &mut c.words)
+    {
+        if word.start_time_offset_in_millis >= 156_100 {
+            word.text = "да".into();
+        }
+    }
+    assert!(plan(&local, start(), recording("a", 0, 400), &remote, &owner()).is_err());
+}
+
+#[test]
+fn partial_middle_recording_ignores_segments_before_and_after() {
+    let (mut local, mut remote) = fixture(0);
+    // Spread the matched speech over the middle twenty minutes of an hour.
+    for (i, s) in local.segments.iter_mut().enumerate() {
+        let time = 1_200_000 + i as u64 * 190_000;
+        s.start_ms = time;
+        s.end_ms = time + 3000;
+    }
+    for t in &mut remote.tracks {
+        for c in &mut t.chunks {
+            c.words.clear();
+        }
+    }
+    for (i, s) in local.segments.iter().enumerate() {
+        for (j, text) in s.text.split_whitespace().enumerate() {
+            remote.tracks[i % 2].chunks[0].words.push(Word {
+                text: text.into(),
+                start_time_offset_in_millis: s.start_ms as i64 - 1_200_000 + j as i64 * 500 + 15,
+                end_time_offset_in_millis: s.start_ms as i64 - 1_200_000 + (j + 1) as i64 * 500
+                    - 15,
+            });
+        }
+    }
+    let originals = local.segments.clone();
+    for i in 0..14 {
+        let mut s = originals[i % 7].clone();
+        s.id = Uuid::now_v7();
+        s.start_ms = (if i < 7 {
+            i * 150_000
+        } else {
+            2_500_000 + (i - 7) * 150_000
+        }) as u64;
+        s.end_ms = s.start_ms + 3000;
+        s.text = "Посторонняя часть локального разговора".into();
+        local.segments.push(s);
+    }
+    local.segments.sort_by_key(|s| s.start_ms);
+    let p = plan(
+        &local,
+        start(),
+        recording("middle", 1200, 1200),
+        &remote,
+        &owner(),
+    )
+    .unwrap();
+    assert_eq!(p.offset_ms, -1_200_000);
+    assert!(p.validation_score > 0.95);
+    for (a, b) in local.segments.iter().zip(&p.after.segments) {
+        if a.start_ms < 1_200_000 || a.end_ms > 2_400_000 {
+            assert_eq!(a, b);
+        } else {
+            assert!(b.speaker.0.starts_with("ktalk-"));
+        }
+    }
+}
+
+#[test]
+fn voice_links_and_removed_speakers_do_not_leak_into_people_or_series() {
+    let dir = tempfile::tempdir().unwrap();
+    let lib = Library::open(dir.path()).unwrap();
+    let meeting = lib
+        .create_meeting(MeetingMeta::new("Тест", start()))
+        .unwrap();
+    let (mut local, remote) = fixture(0);
+    local.segments[0].speaker.0 = "me".into();
+    local
+        .speaker_suggestions
+        .insert("me".into(), "Борис".into());
+    local
+        .speaker_voice_ids
+        .insert("me".into(), "boris-voice".into());
+    local
+        .speaker_suggestions
+        .insert("s1".into(), "Старый участник".into());
+    local
+        .speaker_voice_ids
+        .insert("s1".into(), "old-voice".into());
+    // Orphan metadata can also come from older edits.
+    local
+        .speaker_names
+        .insert("orphan".into(), "Старое имя".into());
+    let p = plan(&local, start(), recording("a", 0, 400), &remote, &owner()).unwrap();
+    assert_eq!(p.after.speaker_name("me"), "Oleg Sidorov");
+    assert!(p.after.speaker_voice_ids.is_empty());
+    assert!(!p.after.speaker_suggestions.contains_key("s1"));
+    assert!(!p.after.speaker_names.contains_key("orphan"));
+    meeting.write_transcript(&local).unwrap();
+    apply(&lib, &meeting, &p).unwrap();
+    let people = lib.people(false, "", "").unwrap();
+    assert!(!people.iter().any(|p| p.voice_ids.contains("old-voice")
+        || p.voice_ids.contains("boris-voice")
+        || p.matches("Старое имя")));
+    let summaries = lib.meeting_summaries(false).unwrap();
+    let old = notetaker_core::Person {
+        name: "Старое имя".into(),
+        voice_ids: ["old-voice".into()].into(),
+        ..Default::default()
+    };
+    assert!(!summaries[0].has_person(&old));
+    for series in lib.series(false).unwrap() {
+        for summary in series.meetings {
+            assert!(!summary.has_person(&old));
+            assert!(!summary.participants.contains("старое имя"));
+        }
+    }
+    // Confirmed names and their enrolled voices remain untouched.
+    local.speaker_names.insert("me".into(), "Моё имя".into());
+    let p = plan(&local, start(), recording("a", 0, 400), &remote, &owner()).unwrap();
+    assert_eq!(p.after.speaker_voice_ids.get("me").unwrap(), "boris-voice");
+    assert_eq!(p.after.speaker_name("me"), "Моё имя");
+}
+
+#[test]
+fn three_hour_offset_search_has_fixed_cost() {
+    let mut intervals = Vec::new();
+    let mut time = 0;
+    // Around 50k fine word intervals, with non-periodic pauses.
+    while time < 10_800_000 {
+        intervals.push((time, time + 120));
+        time += 170 + (time % 137);
+    }
+    let activity = union(intervals.clone());
+    let speech = union(
+        intervals
+            .into_iter()
+            .map(|(a, b)| (a + 37_000, b + 37_000))
+            .collect(),
+    );
+    let started = std::time::Instant::now();
+    assert_eq!(estimate_offset(&activity, &speech, 0).unwrap(), 37_000);
+    let elapsed = started.elapsed();
+    eprintln!("three-hour search: {elapsed:?}, {} intervals", speech.len());
+    assert!(elapsed < std::time::Duration::from_secs(3));
+    assert!(estimate_offset(&[(0, MAX_BINS as i64 * GRID_MS)], &[(0, 100)], 0).is_err());
 }

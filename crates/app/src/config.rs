@@ -208,6 +208,8 @@ impl Settings {
 // concerns to that crate. Config::parse is the authority for validation/privacy.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LlmSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ktalk: Option<notetaker_llm::ktalk::Settings>,
     pub defaults: LlmDefaults,
     pub providers: Vec<ProviderSettings>,
     #[serde(default)]
@@ -248,6 +250,7 @@ fn env_key_source() -> String {
 impl ProviderSettings {
     pub fn config(&self) -> Result<notetaker_llm::ProviderConfig> {
         let settings = LlmSettings {
+            ktalk: None,
             defaults: LlmDefaults {
                 local: self.id.clone(),
                 hybrid: self.id.clone(),
@@ -279,6 +282,7 @@ impl Default for ProviderSettings {
 impl Default for LlmSettings {
     fn default() -> Self {
         Self {
+            ktalk: None,
             defaults: LlmDefaults {
                 local: "ollama".into(),
                 hybrid: "ollama".into(),
@@ -296,6 +300,10 @@ impl LlmSettings {
         if !path.exists() {
             return Ok(Self::default());
         }
+        Self::from_path(&path)
+    }
+
+    fn from_path(path: &Path) -> Result<Self> {
         // Never echo config excerpts, including accidental secrets.
         let text = fs::read_to_string(path)?;
         notetaker_llm::Config::parse(&text)?;
@@ -521,6 +529,26 @@ mod tests {
         for key in ["Ctrl+Alt+R", "Super+Shift+F12", "Alt+0"] {
             assert!(validate_hotkey(key).is_ok(), "{key}");
         }
+    }
+    #[test]
+    fn ktalk_round_trips_through_app_config_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let text = LlmSettings::default().validate().unwrap()
+            + "\n[ktalk]\nbase_url = 'https://neutral.ktalk.ru'\ncredential_id = 'work'\napi_key_env = 'NOTETAKER_KTALK_KEY'\n";
+        fs::write(&path, &text).unwrap();
+        let mut settings = LlmSettings::from_path(&path).unwrap();
+        settings.providers[0].model = "changed-model".into();
+        atomic_write(&path, &settings.validate().unwrap()).unwrap();
+        let before: toml::Value = toml::from_str(&text).unwrap();
+        let after: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(before.get("ktalk"), after.get("ktalk"));
+        assert!(
+            notetaker_llm::Config::from_path(&path)
+                .unwrap()
+                .ktalk
+                .is_some()
+        );
     }
     #[test]
     fn validates_llm_without_storing_keys() {

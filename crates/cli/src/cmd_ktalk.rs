@@ -107,13 +107,21 @@ mod tests {
         let meeting = library
             .create_meeting(notetaker_core::MeetingMeta::new("Тест", start))
             .unwrap();
-        let local: notetaker_core::Transcript = serde_json::from_value(serde_json::json!({
-            "version":1,"segments":[{"id":"00000000-0000-0000-0000-000000000001","speaker":"s1","channel":"system","start_ms":1000,"end_ms":4000,"text":"Проверяем нашу новую запись","source":"final","edited":false}]
-        })).unwrap();
+        let texts = [
+            "Проверяем хранение резервных копий",
+            "Обновляем очередь обработки сообщений",
+            "Измеряем задержку сетевого подключения",
+        ];
+        let segments: Vec<_> = texts.iter().enumerate().map(|(i,text)| serde_json::json!({
+            "id":format!("00000000-0000-0000-0000-{:012}",i+1),"speaker":"s1","channel":"system","start_ms":1000+i*3000,"end_ms":4000+i*3000,"text":text,"source":"final","edited":false
+        })).collect();
+        let local: notetaker_core::Transcript =
+            serde_json::from_value(serde_json::json!({"version":1,"segments":segments})).unwrap();
         meeting.write_transcript(&local).unwrap();
         let before = std::fs::read(meeting.path().join("transcript.json")).unwrap();
         let revision = meeting.load_transcript().unwrap().revision;
-        let remote = serde_json::from_value(serde_json::json!({"status":"complete","tracks":[{"speaker":{"isAnonymous":true,"anonymousId":"guest","anonymousName":"Анна Петрова"},"chunks":[{"words":[{"text":"Проверяем нашу новую запись","startTimeOffsetInMillis":1000,"endTimeOffsetInMillis":4000}]}]}]})).unwrap();
+        let words: Vec<_> = texts.iter().enumerate().map(|(i,text)| serde_json::json!({"text":text,"startTimeOffsetInMillis":1000+i*3000,"endTimeOffsetInMillis":4000+i*3000})).collect();
+        let remote = serde_json::from_value(serde_json::json!({"status":"complete","tracks":[{"speaker":{"isAnonymous":true,"anonymousId":"guest","anonymousName":"Анна Петрова"},"chunks":[{"words":words}]}]})).unwrap();
         let owner = ktalk::User {
             key: "owner".into(),
             firstname: "Oleg".into(),
@@ -131,7 +139,7 @@ mod tests {
         sync(&library, &meeting, &plan, true, &mut output).unwrap();
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("Спикер notetaker -> Участник | Реплики | Секунды"));
-        assert!(output.contains("s1 -> Анна Петрова | 1 | 3.0"));
+        assert!(output.contains("s1 -> Анна Петрова | 3 | 9.0"));
         assert!(output.contains("Проверка текста: 1.000"));
         assert_eq!(
             std::fs::read(meeting.path().join("transcript.json")).unwrap(),

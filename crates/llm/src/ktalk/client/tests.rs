@@ -94,3 +94,58 @@ fn transcript_requires_word_shape_but_tolerates_optional_fields() {
     assert!(client.transcript("id").is_err());
     task.join().unwrap();
 }
+
+#[test]
+fn paging_deduplicates_equal_timestamps_and_stops_without_new_ids() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let recording = |id: &str, status: &str| serde_json::json!({"id":id,"title":"Нейтральная встреча","createdDate":"2026-01-01T12:00:00Z","duration":100,"status":status});
+    let mut first: Vec<_> = (0..99)
+        .map(|n| recording(&format!("processing-{n}"), "processing"))
+        .collect();
+    first.push(recording("A", "complete"));
+    let second = vec![recording("A", "complete"), recording("extra", "processing")];
+    let pages = [first, second.clone(), second];
+    let task = thread::spawn(move || {
+        for (page, skip) in pages.into_iter().zip([0, 100, 102]) {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(
+                request.contains(&format!("skip={skip}&top=100")),
+                "{request}"
+            );
+            let body = serde_json::to_vec(&serde_json::json!({"recordings":page})).unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(&body).unwrap();
+        }
+    });
+    let client = Client::build(
+        reqwest::Url::parse(&format!("http://{address}")).unwrap(),
+        "test-secret",
+    )
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let library = notetaker_core::Library::open(dir.path()).unwrap();
+    let start = "2026-01-01T12:00:00Z".parse().unwrap();
+    let mut meta = notetaker_core::MeetingMeta::new("Тест", start);
+    meta.ended_at = Some(start + chrono::Duration::seconds(100));
+    let meeting = library.create_meeting(meta).unwrap();
+    assert_eq!(
+        crate::ktalk::select_recording(&client, &meeting, None)
+            .unwrap()
+            .id,
+        "A"
+    );
+    task.join().unwrap();
+}

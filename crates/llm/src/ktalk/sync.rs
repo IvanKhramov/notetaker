@@ -33,10 +33,139 @@ fn overlap(a: &[Interval], b: &[Interval], offset: i64) -> i64 {
     }
     total
 }
+// Deliberately small, language-independent evidence still needs diversity and coverage.
+const STOP_WORDS: &[&str] = &[
+    "ага",
+    "угу",
+    "да",
+    "нет",
+    "ну",
+    "вот",
+    "это",
+    "эта",
+    "этот",
+    "эти",
+    "там",
+    "тут",
+    "так",
+    "как",
+    "что",
+    "чтобы",
+    "когда",
+    "если",
+    "или",
+    "для",
+    "при",
+    "про",
+    "без",
+    "уже",
+    "ещё",
+    "еще",
+    "тоже",
+    "также",
+    "просто",
+    "значит",
+    "короче",
+    "ладно",
+    "хорошо",
+    "привет",
+    "здравствуйте",
+    "спасибо",
+    "пожалуйста",
+    "сегодня",
+    "вместе",
+    "номер",
+    "the",
+    "and",
+    "but",
+    "for",
+    "with",
+    "from",
+    "this",
+    "that",
+    "these",
+    "those",
+    "you",
+    "your",
+    "our",
+    "they",
+    "their",
+    "are",
+    "was",
+    "were",
+    "have",
+    "has",
+    "had",
+    "not",
+    "yes",
+    "yeah",
+    "okay",
+    "well",
+    "just",
+    "like",
+    "hello",
+    "thanks",
+    "please",
+];
+const GRID_MS: i64 = 100;
+const MAX_BINS: usize = 131_072;
+
+// The search performs at most 3601 * 2048 word shifts/popcounts. Rasterization
+// follows interval union and costs O(intervals + bins) per timeline.
+fn estimate_offset(activity: &[Interval], speech: &[Interval], implied: i64) -> Result<i64> {
+    let normalized: Vec<_> = speech
+        .iter()
+        .map(|(a, b)| (a - implied, b - implied))
+        .collect();
+    let bounds = activity.iter().chain(&normalized);
+    let origin = bounds.clone().map(|(a, _)| *a).min().unwrap_or(0) - 180_000;
+    let end = bounds.map(|(_, b)| *b).max().unwrap_or(0) + 180_000;
+    let bins = ((end - origin + GRID_MS - 1) / GRID_MS) as usize;
+    ensure!(
+        bins <= MAX_BINS,
+        "Слишком длинный интервал для поиска смещения Толка (лимит 131072 отсчёта по 100 мс)"
+    );
+    let raster = |intervals: &[Interval]| {
+        let mut bits = vec![0u64; bins.div_ceil(64)];
+        for &(a, b) in intervals {
+            for i in
+                ((a - origin) / GRID_MS) as usize..((b - origin + GRID_MS - 1) / GRID_MS) as usize
+            {
+                bits[i / 64] |= 1 << (i % 64);
+            }
+        }
+        bits
+    };
+    let a = raster(activity);
+    let b = raster(&normalized);
+    let score = |shift: i64| {
+        let q = shift.div_euclid(64);
+        let r = shift.rem_euclid(64) as u32;
+        a.iter()
+            .enumerate()
+            .map(|(i, bits)| {
+                let j = i as i64 + q;
+                let low = b.get(j as usize).copied().unwrap_or(0);
+                let high = b.get((j + 1) as usize).copied().unwrap_or(0);
+                ((bits << r) & low).count_ones()
+                    + if r == 0 {
+                        0
+                    } else {
+                        ((bits >> (64 - r)) & high).count_ones()
+                    }
+            })
+            .sum::<u32>()
+    };
+    let step = (-1800i64..=1800)
+        .max_by_key(|step| (score(*step), -step.abs()))
+        .unwrap();
+    Ok(implied + step * GRID_MS)
+}
 fn tokens(text: &str) -> BTreeSet<String> {
     text.split(|c: char| !c.is_alphanumeric())
-        .filter(|s| !s.is_empty())
+        .filter(|s| s.chars().count() >= 3 && s.chars().all(char::is_alphabetic))
         .map(str::to_lowercase)
+        .filter(|s| !STOP_WORDS.contains(&s.as_str()))
         .collect()
 }
 fn duration(meeting: &Meeting, local: &Local) -> Result<i64> {
@@ -62,7 +191,11 @@ pub fn match_recording(
     duration_ms: i64,
 ) -> Result<Recording> {
     let mut candidates = Vec::new();
+    let mut seen = BTreeSet::new();
     for r in recordings {
+        if !seen.insert(&r.id) {
+            continue;
+        }
         let delta = (r.created_date - start).num_milliseconds();
         let length = i64::from(r.duration) * 1000;
         let amount = (duration_ms.min(delta + length) - 0.max(delta)).max(0);
@@ -103,25 +236,17 @@ pub fn select_recording(
     let cutoff = meta.started_at - chrono::Duration::days(1);
     let mut recordings = Vec::new();
     let mut skip = 0;
-    let mut previous = None;
+    let mut seen = BTreeSet::new();
     loop {
         let page = client.recordings("", skip, 100)?;
         if page.is_empty() {
             break;
         }
-        // The API has no explicit ordering parameter. Refuse unexpected ordering
-        // rather than silently missing a recording at the paging cutoff.
-        for r in &page {
-            ensure!(
-                previous.is_none_or(|date| r.created_date <= date),
-                "Толк вернул записи не по убыванию времени"
-            );
-            previous = Some(r.created_date);
-        }
         skip += page.len();
         let done = page.last().is_some_and(|r| r.created_date < cutoff);
-        recordings.extend(page);
-        if done {
+        let before = recordings.len();
+        recordings.extend(page.into_iter().filter(|r| seen.insert(r.id.clone())));
+        if done || recordings.len() == before {
             break;
         }
     }
@@ -181,22 +306,26 @@ pub fn plan(
             .collect(),
     );
     let implied = (started_at - recording.created_date).num_milliseconds();
-    let offset = (-1800..=1800)
-        .map(|step| implied + step * 100)
-        .max_by_key(|offset| {
-            (
-                overlap(&activity, &speech, *offset),
-                -(*offset - implied).abs(),
-            )
-        })
-        .unwrap();
+    let offset = estimate_offset(&activity, &speech, implied)?;
+    let recording_end = i64::from(recording.duration) * 1000;
+    let interval = (
+        activity.first().map_or(0, |i| i.0).max(-offset),
+        activity
+            .last()
+            .map_or(0, |i| i.1)
+            .min(recording_end - offset),
+    );
+    let eligible = |s: &&notetaker_core::Segment| {
+        s.start_ms as i64 >= interval.0 && s.end_ms as i64 <= interval.1
+    };
+    let segments: Vec<_> = local.segments.iter().filter(eligible).collect();
     let mut score = 0.0;
     let mut count = 0;
-    let mut matched = 0;
-    // At most 64 evenly distributed segments; symmetric token Dice tolerates ASR
-    // punctuation and small lexical differences without rewarding unrelated text.
-    let stride = local.segments.len().div_ceil(64).max(1);
-    for segment in local.segments.iter().step_by(stride) {
+    let mut matched = BTreeSet::new();
+    let mut evidence = Vec::new();
+    let samples = segments.len().min(64);
+    for i in 0..samples {
+        let segment = segments[i * (segments.len() - 1) / (samples - 1).max(1)];
         let a = tokens(&segment.text);
         if a.is_empty() {
             continue;
@@ -211,14 +340,25 @@ pub fn plan(
             .collect::<Vec<_>>()
             .join(" ");
         let b = tokens(&text);
-        let common = a.intersection(&b).count();
-        matched += common;
-        score += 2.0 * common as f64 / (a.len() + b.len()) as f64;
+        let common: BTreeSet<_> = a.intersection(&b).cloned().collect();
+        let dice = 2.0 * common.len() as f64 / (a.len() + b.len()) as f64;
+        if dice >= 0.5 && common.len() >= 2 {
+            evidence.push((segment.start_ms as i64, segment.end_ms as i64));
+            matched.extend(common);
+        }
+        score += dice;
         count += 1;
     }
     let score = score / count.max(1) as f64;
+    let span = evidence.iter().map(|i| i.1).max().unwrap_or(0)
+        - evidence.iter().map(|i| i.0).min().unwrap_or(0);
+    let required_span = if interval.1 - interval.0 < 180_000 {
+        interval.1 - interval.0
+    } else {
+        (interval.1 - interval.0) / 3
+    };
     ensure!(
-        score >= 0.5 && matched >= 3,
+        score >= 0.5 && matched.len() >= 12 && evidence.len() >= 3 && span + 200 >= required_span,
         "не удалось надёжно сопоставить время"
     );
     let mut after = local.clone();
@@ -246,7 +386,11 @@ pub fn plan(
     }
     for segment in &mut after.segments {
         let original = &segment.speaker.0;
-        if segment.edited || local.speaker_names.contains_key(original) {
+        if (segment.start_ms as i64) < interval.0
+            || segment.end_ms as i64 > interval.1
+            || segment.edited
+            || local.speaker_names.contains_key(original)
+        {
             continue;
         }
         if original == "me" {
@@ -254,6 +398,9 @@ pub fn plan(
                 !owner.key.is_empty() && !owner.name().is_empty(),
                 "Некорректный профиль Толка"
             );
+            if local.speaker_suggestions.get("me") != Some(&owner.name()) {
+                after.speaker_voice_ids.remove("me");
+            }
             after.speaker_names.insert("me".into(), owner.name());
             after.speaker_suggestions.remove("me");
             after
@@ -270,7 +417,11 @@ pub fn plan(
         let interval = [(segment.start_ms as i64, segment.end_ms as i64)];
         let shares: Vec<_> = tracks
             .iter()
-            .map(|(id, (name, times))| (overlap(&interval, times, offset), id, name))
+            .map(|(id, (name, times))| {
+                let first = times.partition_point(|(_, end)| *end <= interval[0].0 + offset);
+                let end = times.partition_point(|(start, _)| *start < interval[0].1 + offset);
+                (overlap(&interval, &times[first..end], offset), id, name)
+            })
             .collect();
         let total: i64 = shares.iter().map(|(n, _, _)| n).sum();
         if let Some((amount, id, name)) = shares.iter().max_by_key(|(n, _, _)| n)
@@ -287,11 +438,21 @@ pub fn plan(
                 .entry((*id).clone())
                 .or_insert_with(|| (*name).clone());
             after.speaker_suggestions.remove(*id);
+            if !local.speaker_names.contains_key(*id) {
+                after.speaker_voice_ids.remove(*id);
+            }
             after
                 .ktalk_sources
                 .insert((*id).clone(), recording.id.clone());
         }
     }
+    let active = after.speaker_ids();
+    after.speaker_names.retain(|id, _| active.contains(id));
+    after
+        .speaker_suggestions
+        .retain(|id, _| active.contains(id));
+    after.speaker_voice_ids.retain(|id, _| active.contains(id));
+    after.ktalk_sources.retain(|id, _| active.contains(id));
     Ok(Plan {
         recording,
         offset_ms: offset,
