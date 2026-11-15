@@ -246,41 +246,43 @@ impl Recipes {
                 choose = Some(matches[self.selected]);
             }
         }
-        egui::ScrollArea::vertical()
-            .id_salt("recipes")
-            .auto_shrink([false, true])
-            .max_height(160.0)
-            .show(ui, |ui| {
-                if matches.is_empty() {
-                    ui.weak("Рецепты не найдены");
-                }
-                for (row, index) in matches.iter().copied().enumerate() {
-                    let recipe = &self.entries[index];
-                    let response = ui.add_enabled(
-                        recipe.prompt.is_ok(),
-                        crate::theme::styled_button(
-                            crate::theme::Palette::of(ui),
-                            &recipe.name,
-                            if row == self.selected {
-                                crate::theme::ButtonStyle::Secondary
-                            } else {
-                                crate::theme::ButtonStyle::Ghost
-                            },
-                        )
-                        .wrap(),
-                    );
-                    if scroll && row == self.selected {
-                        response.scroll_to_me(Some(egui::Align::Center));
-                    }
-                    if response.clicked() {
-                        choose = Some(index);
-                    }
-                    if let Err(reason) = &recipe.prompt {
-                        response.on_disabled_hover_text(reason);
-                        ui.weak(reason);
-                    }
-                }
+        if let Some(anchor) = ui.ctx().read_response(egui::Id::unique("chat-input")) {
+            let mut open = true;
+            crate::theme::recipe_popup(ui, &anchor, &mut open, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                egui::ScrollArea::vertical()
+                    .id_salt("recipes")
+                    .auto_shrink([false, true])
+                    .max_height(192.0)
+                    .show(ui, |ui| {
+                        if matches.is_empty() {
+                            ui.weak("Рецепты не найдены");
+                        }
+                        for (row, index) in matches.iter().copied().enumerate() {
+                            let recipe = &self.entries[index];
+                            let response = ui
+                                .add_enabled_ui(recipe.prompt.is_ok(), |ui| {
+                                    crate::theme::recipe_row(
+                                        ui,
+                                        &recipe.name,
+                                        recipe.prompt.as_ref().err().map(String::as_str),
+                                        row == self.selected,
+                                    )
+                                })
+                                .inner;
+                            if scroll && row == self.selected {
+                                response.scroll_to_me(Some(egui::Align::Center));
+                            }
+                            if response.clicked() {
+                                choose = Some(index);
+                            }
+                        }
+                    });
             });
+            if !open {
+                self.dismissed = Some(input.clone());
+            }
+        }
         if let Some(index) = choose
             && let Ok(prompt) = &self.entries[index].prompt
         {

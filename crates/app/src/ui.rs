@@ -611,21 +611,13 @@ impl NotetakerApp {
                     .show(ui, &mut self.ask_text, &self.state.settings.library);
                 if self.state.chat.messages.is_empty()
                     && !self.state.chat.busy
-                    && !self.ask_text.starts_with('/')
+                    && let Some(prompt) = theme::prompt_chips(
+                        ui,
+                        crate::chat::suggestions(self.state.chat.scope.is_some(), live),
+                    )
                 {
-                    ui.horizontal_wrapped(|ui| {
-                        for prompt in
-                            crate::chat::suggestions(self.state.chat.scope.is_some(), live)
-                        {
-                            if ui
-                                .add(theme::styled_button(p, prompt, ButtonStyle::Ghost).wrap())
-                                .clicked()
-                            {
-                                self.ask_text = (*prompt).into();
-                                ask = true;
-                            }
-                        }
-                    });
+                    self.ask_text = prompt;
+                    ask = true;
                 }
             });
         }
@@ -2456,14 +2448,7 @@ impl NotetakerApp {
                 ui.horizontal(|ui| {
                     ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
                     ui.allocate_ui_with_layout(
-                        egui::vec2(
-                            width,
-                            if self.ask_text.starts_with('/') {
-                                220.0
-                            } else {
-                                48.0
-                            },
-                        ),
+                        egui::vec2(width, 48.0),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| self.bottom_bar(ui),
                     );
