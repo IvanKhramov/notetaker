@@ -180,6 +180,11 @@ impl Panel {
     }
     pub fn blur(&mut self, state: &mut AppState) {
         state.connections.blur();
+        if !state.settings_pending
+            && let Some(job) = crate::ktalk::settings_blur(&mut state.ktalk)
+        {
+            state.ktalk_job(job);
+        }
         for (id, input) in &mut self.calendar_inputs {
             if input.trim().is_empty() {
                 continue;

@@ -279,9 +279,6 @@ impl eframe::App for Preview {
         ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("fixture-meeting-menu"), self.screen == 15));
         ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("preview-expand-settings"),self.screen==37 || self.screen==38));
         ui.ctx().data_mut(|data| {data.insert_temp(egui::Id::unique("fixture-speaker-menu"),self.screen==58);data.insert_temp(egui::Id::unique("fixture-rename-form"),self.screen==58);});
-        if (self.screen==68 || self.screen==69) && ui.ctx().content_rect().height()<600.0 {
-            ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("fixture-recording-settings-offset"),70.0_f32));
-        }
         if self.screen==66 && ui.ctx().content_rect().height()<600.0 {
             ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("fixture-recording-settings-offset"),240.0_f32));
         }

@@ -165,6 +165,7 @@ pub struct State {
     key: String,
     replacing: bool,
     automatic_draft: Option<bool>,
+    settings_edited: bool,
     busy_path: Option<PathBuf>,
 }
 impl State {
@@ -521,137 +522,287 @@ pub fn dispatch(job: Job) -> Message {
     run(job, &OsCredentialStore)
 }
 
+fn settings_draft(state: &State) -> Settings {
+    let mut settings = state.settings.clone().unwrap_or_else(|| Settings {
+        base_url: String::new(),
+        credential_id: "desktop".into(),
+        api_key_env: None,
+        extra: Default::default(),
+    });
+    settings.base_url = state.address.trim().into();
+    settings.set_auto_sync(
+        state
+            .automatic_draft
+            .unwrap_or_else(|| settings.auto_sync()),
+    );
+    settings
+}
+pub fn settings_blur(state: &mut State) -> Option<Job> {
+    if state.busy || !state.settings_edited {
+        return None;
+    }
+    let mut settings = settings_draft(state);
+    let same_origin = state
+        .settings
+        .as_ref()
+        .is_some_and(|old| old.base_url == settings.base_url);
+    if settings.validate().is_err() || state.key.is_empty() && (!state.saved || !same_origin) {
+        return None;
+    }
+    let key = (!state.key.is_empty()).then(|| std::mem::take(&mut state.key));
+    if key.is_some() {
+        settings.api_key_env = None;
+    }
+    state.replacing = false;
+    state.settings_edited = false;
+    Some(Job::Save { settings, key })
+}
 pub fn settings_ui(ui: &mut eframe::egui::Ui, state: &mut State) -> Option<Job> {
-    use crate::theme::{self, ButtonStyle};
+    use crate::theme::{self, ButtonStyle, StatusStyle};
     let mut job = None;
-    ui.add_enabled_ui(!state.busy, |ui| {
-        theme::settings_group(ui, "Пространство Толка", |ui| {
-            ui.label("Адрес пространства");
-            ui.add(
-                theme::text_field(&mut state.address)
-                    .hint_text("https://space.ktalk.ru")
-                    .desired_width(ui.available_width()),
-            );
-            if state.saved && !state.replacing {
-                ui.horizontal(|ui| {
-                    ui.weak("Персональный ключ: сохранён");
-                    if theme::button(ui, "Заменить", ButtonStyle::Ghost).clicked() {
-                        state.replacing = true;
-                    }
-                });
-            } else {
-                ui.label("Персональный ключ");
-                ui.add(
-                    theme::text_field(&mut state.key)
-                        .password(true)
-                        .desired_width(ui.available_width()),
-                );
-            }
-            ui.hyperlink_to(
-                "Где взять ключ",
-                "https://support.kontur.ru/talk/86797-personalnyj_apiklyuch_dostupa_v_tolke",
-            );
-            let mut settings = state.settings.clone().unwrap_or_else(|| Settings {
-                base_url: String::new(),
-                credential_id: "desktop".into(),
-                api_key_env: None,
-                extra: Default::default(),
+    let mut flush = false;
+    let mut settings = settings_draft(state);
+    theme::settings_group(ui, "Пространство Толка", |ui| {
+        ui.add_enabled_ui(!state.busy,|ui| {
+            theme::setting_row(ui,"Адрес пространства",|ui| {
+                let response=ui.add(theme::text_field(&mut state.address).hint_text("https://space.ktalk.ru").desired_width(ui.available_width()));
+                state.settings_edited|=response.changed();flush|=response.lost_focus();
             });
-            settings.base_url = state.address.trim().into();
-            let mut automatic = state
-                .automatic_draft
-                .unwrap_or_else(|| settings.auto_sync());
-            theme::toggle(
-                ui,
-                &mut automatic,
-                "Подписывать реплики именами участников после встречи",
-            );
-            settings.set_auto_sync(automatic);
-            state.automatic_draft = Some(automatic);
-            let valid = settings.validate();
-            if let Err(error) = &valid
+            theme::setting_row(ui,"Персональный ключ",|ui| {
+                ui.vertical(|ui| {
+                    if state.saved && !state.replacing {
+                        ui.horizontal(|ui| {
+                            ui.weak("сохранён");
+                            if theme::button(ui,"Заменить",ButtonStyle::Ghost).clicked() {state.replacing=true;}
+                        });
+                    } else {
+                        let response=ui.add(theme::text_field(&mut state.key).password(true).desired_width(ui.available_width()));
+                        state.settings_edited|=response.changed();flush|=response.lost_focus();
+                    }
+                    ui.hyperlink_to(eframe::egui::RichText::new("Где взять ключ").small().color(theme::Palette::of(ui).muted),
+                        "https://support.kontur.ru/talk/86797-personalnyj_apiklyuch_dostupa_v_tolke");
+                });
+            });
+            let mut automatic=state.automatic_draft.unwrap_or_else(||settings.auto_sync());
+            let response=theme::toggle(ui,&mut automatic,"Подписывать реплики именами участников после встречи");
+            state.settings_edited|=response.changed();flush|=response.changed();
+            state.automatic_draft=Some(automatic);settings.set_auto_sync(automatic);
+        });
+        settings.base_url = state.address.trim().into();
+        let same_origin = state
+            .settings
+            .as_ref()
+            .is_some_and(|old| old.base_url == settings.base_url);
+        let valid = settings.validate();
+        theme::settings_footer(ui, |ui| {
+            if ui
+                .add_enabled(
+                    !state.busy && state.saved && same_origin && valid.is_ok(),
+                    theme::styled_button(
+                        theme::Palette::of(ui),
+                        "Проверить",
+                        ButtonStyle::Secondary,
+                    ),
+                )
+                .clicked()
+            {
+                job = Some(Job::Check(settings.clone()));
+            }
+            if state.busy {
+                ui.spinner();
+            }
+            let (text, style) = if let Err(error) = &valid
                 && !state.address.is_empty()
             {
-                ui.weak(error.to_string());
-            }
-            ui.horizontal_wrapped(|ui| {
-                let same_origin = state
-                    .settings
-                    .as_ref()
-                    .is_some_and(|old| old.base_url == settings.base_url);
-                if ui
-                    .add_enabled(
-                        valid.is_ok() && (!state.key.is_empty() || state.saved && same_origin),
-                        theme::styled_button(
-                            theme::Palette::of(ui),
-                            "Сохранить",
-                            ButtonStyle::Primary,
-                        ),
-                    )
-                    .clicked()
-                {
-                    let key = (!state.key.is_empty()).then(|| std::mem::take(&mut state.key));
-                    if key.is_some() {
-                        settings.api_key_env = None;
-                    }
-                    state.replacing = false;
-                    job = Some(Job::Save {
-                        settings: settings.clone(),
-                        key,
-                    });
-                }
-                if ui
-                    .add_enabled(
-                        state.saved && same_origin && valid.is_ok(),
-                        theme::styled_button(
-                            theme::Palette::of(ui),
-                            "Проверить",
-                            ButtonStyle::Secondary,
-                        ),
-                    )
-                    .clicked()
-                {
-                    job = Some(Job::Check(settings));
-                }
-            });
+                (error.to_string(), StatusStyle::Error)
+            } else if state.settings_edited
+                || state.replacing
+                || !same_origin
+                || state.status.is_empty()
+                || state.status == "Сохранено"
+                || state.status == "Люди объединены"
+            {
+                ("Не проверено".into(), StatusStyle::Muted)
+            } else if state.status.starts_with("Подключено:") {
+                (state.status.clone(), StatusStyle::Positive)
+            } else {
+                (state.status.clone(), StatusStyle::Error)
+            };
+            theme::status_chip(ui, &text, style);
         });
+        if ui.is_enabled()
+            && flush
+            && let Some(save) = settings_blur(state)
+        {
+            job = Some(save);
+        }
     });
-    if state.busy {
-        ui.spinner();
-    }
-    if !state.status.is_empty() {
-        ui.label(&state.status);
-    }
     theme::callout(ui, theme::icons::INFO, |ui| {
         ui.weak("Только чтение из Толка. Ничего из библиотеки не отправляется. Текст транскрипции Толка не сохраняется. Работает и для Local-встреч.");
     });
     job
 }
-pub fn merge_menu(ui: &mut eframe::egui::Ui, name: &str) {
-    let people = ui
-        .ctx()
+fn merge_people(ui: &eframe::egui::Ui, name: &str) -> Vec<notetaker_core::Person> {
+    ui.ctx()
         .data(|data| {
             data.get_temp::<Vec<notetaker_core::Person>>(eframe::egui::Id::unique("ktalk-people"))
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|person| person.name != name)
+        .collect()
+}
+fn merge_options(ui: &mut eframe::egui::Ui, name: &str, people: &[notetaker_core::Person]) {
+    for person in people {
+        if crate::theme::menu_item(ui, "", &person.name, false, false).clicked() {
+            ui.ctx().data_mut(|data| {
+                data.insert_temp(
+                    eframe::egui::Id::unique("ktalk-merge"),
+                    (name.to_string(), person.clone()),
+                )
+            });
+            ui.close();
+        }
+    }
+}
+pub fn merge_menu(ui: &mut eframe::egui::Ui, name: &str) {
+    let people = merge_people(ui, name);
     crate::theme::select(("ktalk-person", name))
         .selected_text("Объединить с человеком…")
-        .show_ui(ui, |ui| {
-            for person in &people {
-                if person.name == name {
-                    continue;
+        .show_ui(ui, |ui| merge_options(ui, name, &people));
+}
+fn merge_icon(ui: &mut eframe::egui::Ui, name: &str) {
+    let people = merge_people(ui, name);
+    if people.is_empty() {
+        ui.allocate_space(eframe::egui::vec2(
+            crate::theme::COMPACT_HEIGHT,
+            crate::theme::COMPACT_HEIGHT,
+        ));
+        return;
+    }
+    let button = crate::theme::icon_button(
+        ui,
+        crate::theme::icons::USERS,
+        "Объединить с человеком из списка",
+    );
+    eframe::egui::Popup::menu(&button).show(|ui| {
+        eframe::egui::ScrollArea::vertical()
+            .max_height(240.0)
+            .show(ui, |ui| merge_options(ui, name, &people));
+    });
+}
+fn preview_speaker(transcript: Option<&Transcript>, speaker: &str, rows: &[ktalk::Row]) -> String {
+    if speaker == "me"
+        || transcript.is_some_and(|text| {
+            text.self_speaker.as_deref() == Some(speaker)
+                || text.segments.iter().any(|segment| {
+                    segment.speaker.0 == speaker && segment.channel == notetaker_core::Channel::Mic
+                })
+        })
+    {
+        return "Я".into();
+    }
+    if let Some(name) = transcript.and_then(|text| text.speaker_names.get(speaker)) {
+        return name.clone();
+    }
+    let mut ids = Vec::new();
+    for row in rows {
+        if row.speaker != "me" && !ids.contains(&row.speaker.as_str()) {
+            ids.push(row.speaker.as_str());
+        }
+    }
+    let number = ids
+        .iter()
+        .position(|id| *id == speaker)
+        .map_or(1, |index| index + 1);
+    format!("Собеседник {number}")
+}
+fn preview_participant<'a>(state: &'a State, name: &'a str) -> &'a str {
+    if let Some((from, person)) = &state.merge
+        && from == name
+    {
+        return &person.name;
+    }
+    let mut people = state.people.iter().filter(|person| person.matches(name));
+    if let Some(person) = people.next()
+        && people.next().is_none()
+    {
+        &person.name
+    } else {
+        name
+    }
+}
+fn preview_table(
+    ui: &mut eframe::egui::Ui,
+    state: &State,
+    plan: &Plan,
+    transcript: Option<&Transcript>,
+) {
+    use crate::theme;
+    let height = theme::COMPACT_HEIGHT;
+    let gap = ui.spacing().item_spacing.x;
+    let numeric = 52.0;
+    let name_width = ((ui.available_width() - 2.0 * numeric - height - 4.0 * gap) / 2.0).max(32.0);
+    eframe::egui::Grid::new("ktalk-preview-table")
+        .num_columns(5)
+        .min_col_width(0.0)
+        .min_row_height(height)
+        .spacing(eframe::egui::vec2(gap, 0.0))
+        .striped(true)
+        .show(ui, |ui| {
+            for (label, width) in [
+                ("Сейчас", name_width),
+                ("Станет", name_width),
+                ("Реплик", numeric),
+                ("Время", numeric),
+                ("", height),
+            ] {
+                ui.add_sized(
+                    [width, height],
+                    eframe::egui::Label::new(
+                        eframe::egui::RichText::new(label)
+                            .small()
+                            .color(theme::Palette::of(ui).muted),
+                    )
+                    .truncate(),
+                );
+            }
+            ui.end_row();
+            for row in &plan.rows {
+                let current = preview_speaker(transcript, &row.speaker, &plan.rows);
+                let next = preview_participant(state, &row.participant);
+                for text in [current.as_str(), next] {
+                    ui.add_sized(
+                        [name_width, height],
+                        eframe::egui::Label::new(text).truncate(),
+                    )
+                    .on_hover_text(text);
                 }
-                if crate::theme::menu_item(ui, "", &person.name, false, false).clicked() {
-                    ui.ctx().data_mut(|data| {
-                        data.insert_temp(
-                            eframe::egui::Id::unique("ktalk-merge"),
-                            (name.to_string(), person.clone()),
-                        )
-                    });
-                    ui.close();
-                }
+                ui.add_sized(
+                    [numeric, height],
+                    eframe::egui::Label::new(row.segments.to_string()),
+                );
+                let seconds = row.seconds.round() as u64;
+                ui.add_sized(
+                    [numeric, height],
+                    eframe::egui::Label::new(format!("{}:{:02}", seconds / 60, seconds % 60)),
+                );
+                ui.push_id((&row.speaker, &row.participant), |ui| {
+                    merge_icon(ui, &row.participant)
+                });
+                ui.end_row();
             }
         });
+    ui.add_space(theme::SPACE[2]);
+    let offset = format!("{:.1}", plan.offset_ms as f64 / 1000.0).replace('.', ",");
+    ui.label(
+        eframe::egui::RichText::new(format!(
+            "Сверено по тексту: совпадение {:.0}%, сдвиг времени {offset} с",
+            plan.validation_score * 100.0
+        ))
+        .small()
+        .color(theme::Palette::of(ui).muted),
+    );
 }
 pub fn windows(ctx: &eframe::egui::Context, state: &mut crate::state::AppState) {
     use crate::theme::{self, ButtonStyle};
@@ -704,36 +855,15 @@ pub fn windows(ctx: &eframe::egui::Context, state: &mut crate::state::AppState) 
                                         .format("%d.%m.%Y %H:%M")
                                         .to_string(),
                                 );
-                                ui.weak(format!(
-                                    "Смещение: {:.1} с · Сходство текста: {:.2}",
-                                    plan.offset_ms as f64 / 1000.0,
-                                    plan.validation_score
-                                ));
-                                eframe::egui::Grid::new("ktalk-preview-table")
-                                    .num_columns(4)
-                                    .max_col_width((ui.available_width() - 150.0).max(120.0) / 2.0)
-                                    .striped(true)
-                                    .show(ui, |ui| {
-                                        for label in
-                                            ["Спикер у нас", "Участник", "Реплик", "Секунд"]
-                                        {
-                                            ui.weak(label);
-                                        }
-                                        ui.end_row();
-                                        for row in &plan.rows {
-                                            ui.label(&row.speaker);
-                                            ui.vertical(|ui| {
-                                                ui.label(&row.participant);
-                                                ui.push_id(
-                                                    (&row.speaker, &row.participant),
-                                                    |ui| merge_menu(ui, &row.participant),
-                                                );
-                                            });
-                                            ui.label(row.segments.to_string());
-                                            ui.label(format!("{:.0}", row.seconds));
-                                            ui.end_row();
-                                        }
-                                    });
+                                preview_table(
+                                    ui,
+                                    &state.ktalk,
+                                    plan,
+                                    state
+                                        .documents
+                                        .get(task.meeting.path())
+                                        .map(|document| &document.data.transcript),
+                                );
                             }
                             Outcome::Choices { reason, recordings } => {
                                 ui.label(reason);
