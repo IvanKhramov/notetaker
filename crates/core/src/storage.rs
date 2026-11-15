@@ -13,9 +13,14 @@ use tempfile::NamedTempFile;
 use crate::{MeetingMeta, Result, Transcript, migrate_transcript};
 
 /// Content revision, including whether the file existed when loaded.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Revision(Option<[u8; 32]>);
 impl Revision {
+    pub fn key(self) -> String {
+        self.0
+            .map(|bytes| bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+            .unwrap_or_else(|| "missing".into())
+    }
     fn of(bytes: Option<&[u8]>) -> Self {
         Self(bytes.map(|bytes| Sha256::digest(bytes).into()))
     }

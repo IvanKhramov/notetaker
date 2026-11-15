@@ -1,6 +1,6 @@
 //! Validated Tolk word intervals are the only automatic enrollment evidence.
 use anyhow::{Context, Result, ensure};
-use notetaker_asr_proto::{SpeakerTurn, TimeRange, clean_ranges};
+use notetaker_asr_proto::TimeRange;
 use notetaker_core::{Channel, Library, Meeting, Transcript, VoiceEvidence, VoiceSample};
 
 pub struct Enrollment {
@@ -12,6 +12,7 @@ pub fn remember_named_voices(
     transcript: &Transcript,
     evidence: &[VoiceEvidence],
     own_allowed: bool,
+    enrollment: notetaker_core::VoiceEnrollmentId,
     mut embed: impl FnMut(&std::path::Path, Vec<TimeRange>) -> Result<Vec<f32>>,
     cancelled: impl Fn() -> bool,
 ) -> Result<Enrollment> {
@@ -30,16 +31,33 @@ pub fn remember_named_voices(
     }
     let work = tempfile::tempdir()?;
     let mut samples = Vec::new();
-    if meeting.system_audio_path().is_file() {
-        let wav = work.path().join("System.wav");
-        let bound = crate::decode::decode(&meeting.system_audio_path(), &wav, |_| {
+    for (channel, source) in [
+        (Channel::System, meeting.system_audio_path()),
+        (Channel::Mic, meeting.mic_audio_path()),
+    ] {
+        let voices: Vec<_> = evidence
+            .iter()
+            .filter(|voice| {
+                voice.registered
+                    && voice.track == Some(channel)
+                    && (channel != Channel::Mic || own_allowed)
+            })
+            .collect();
+        if voices.is_empty() {
+            continue;
+        }
+        if !source.is_file() {
+            report
+                .skipped
+                .push(format!("Аудио {channel:?} не хранится"));
+            continue;
+        }
+        let wav = work.path().join(format!("{channel:?}.wav"));
+        let bound = crate::decode::decode(&source, &wav, |_| {
             ensure!(!cancelled(), "Операция Толка отменена");
             Ok(())
         })? / 16;
-        for voice in evidence {
-            if !voice.registered {
-                continue;
-            }
+        for voice in voices {
             let ranges: Vec<_> = voice
                 .ranges
                 .iter()
@@ -52,65 +70,42 @@ pub fn remember_named_voices(
                 })
                 .take(8)
                 .collect();
-            if ranges.iter().map(|r| r.end_ms - r.start_ms).sum::<u64>() < 6000 {
+            if ranges
+                .iter()
+                .map(|range| range.end_ms - range.start_ms)
+                .sum::<u64>()
+                < 6000
+            {
                 report
                     .skipped
                     .push(format!("{}: меньше 6 с чистой речи", voice.name));
                 continue;
             }
+            let own = channel == Channel::Mic;
+            let name = if own {
+                transcript.speaker_names.get("me").unwrap_or(&voice.name)
+            } else {
+                &voice.name
+            };
             samples.push(VoiceSample {
-                speaker: voice.speaker.clone(),
-                name: voice.name.clone(),
+                speaker: if own {
+                    "me".into()
+                } else {
+                    voice.speaker.clone()
+                },
+                name: name.clone(),
                 embedding: embed(&wav, ranges)?,
-                own: false,
+                own,
             });
         }
-    } else if evidence.iter().any(|voice| voice.registered) {
-        report.skipped.push("Аудио собеседников не хранится".into());
     }
-    if own_allowed && let Some(name) = transcript.speaker_names.get("me") {
-        if meeting.mic_audio_path().is_file() {
-            let wav = work.path().join("Mic.wav");
-            let bound = crate::decode::decode(&meeting.mic_audio_path(), &wav, |_| {
-                ensure!(!cancelled(), "Операция Толка отменена");
-                Ok(())
-            })? / 16;
-            let turns: Vec<_> = transcript
-                .segments
-                .iter()
-                .filter(|s| s.channel == Channel::Mic)
-                .map(|s| SpeakerTurn {
-                    speaker: s.speaker.0.clone(),
-                    start_ms: s.start_ms,
-                    end_ms: s.end_ms,
-                })
-                .collect();
-            let ranges: Vec<_> = clean_ranges(&turns, "me")
-                .into_iter()
-                .filter_map(|r| {
-                    let end = r.end_ms.min(bound).min(r.start_ms.saturating_add(15000));
-                    (end.saturating_sub(r.start_ms) >= 1500).then_some(TimeRange {
-                        start_ms: r.start_ms,
-                        end_ms: end,
-                    })
-                })
-                .take(8)
-                .collect();
-            if ranges.iter().map(|r| r.end_ms - r.start_ms).sum::<u64>() >= 6000 {
-                samples.push(VoiceSample {
-                    speaker: "me".into(),
-                    name: name.clone(),
-                    embedding: embed(&wav, ranges)?,
-                    own: true,
-                });
-            } else {
-                report
-                    .skipped
-                    .push("Собственный голос: меньше 6 с чистой речи".into());
-            }
-        } else {
-            report.skipped.push("Микрофонное аудио не хранится".into());
-        }
+    if evidence
+        .iter()
+        .any(|voice| voice.registered && voice.track.is_none())
+    {
+        report.skipped.push(
+            "Владелец ключа не определён однозначно; автоматическое обучение пропущено".into(),
+        );
     }
     ensure!(
         meeting.read_transcript()? == *transcript,
@@ -119,7 +114,7 @@ pub fn remember_named_voices(
     ensure!(!cancelled(), "Операция Толка отменена");
     if !samples.is_empty() {
         report.count = Library::open(meeting.path().parent().context("Нет библиотеки")?)?
-            .remember_tolk_voices(meeting, transcript, samples, &cancelled)?;
+            .remember_tolk_voices(meeting, transcript, samples, enrollment, &cancelled)?;
     }
     Ok(report)
 }
@@ -216,6 +211,7 @@ mod tests {
             speaker: id.into(),
             name: "Олег Сидоров".into(),
             registered,
+            track: Some(Channel::System),
             ranges: vec![(0, 7000)],
         }
     }
@@ -228,13 +224,19 @@ mod tests {
                 std::collections::BTreeMap::from([("me".into(), vec![1.0, 0.0, 0.0])]),
             )
             .unwrap();
-        library.remember_speakers(&meeting, &transcript).unwrap();
+        library
+            .remember_speakers_owned(&meeting, &transcript, true)
+            .unwrap();
         let own = library.read_voices().unwrap().voices[0].clone();
         let report = remember_named_voices(
             &meeting,
             &transcript,
             &[evidence("ktalk-a", true), evidence("ktalk-b", true)],
             false,
+            notetaker_core::VoiceEnrollmentId::new(
+                meeting.read_meta().unwrap().id,
+                meeting.load_transcript().unwrap().revision,
+            ),
             |_, _| Ok(vec![0.0, 1.0, 0.0]),
             || false,
         )
@@ -260,6 +262,10 @@ mod tests {
             &transcript,
             &[evidence("ktalk-a", true)],
             false,
+            notetaker_core::VoiceEnrollmentId::new(
+                meeting.read_meta().unwrap().id,
+                meeting.load_transcript().unwrap().revision,
+            ),
             |_, _| Ok(vec![0.0, 0.0, 1.0]),
             || false,
         )
@@ -279,6 +285,10 @@ mod tests {
                 evidence("ktalk-guest-b", false),
             ],
             false,
+            notetaker_core::VoiceEnrollmentId::new(
+                meeting.read_meta().unwrap().id,
+                meeting.load_transcript().unwrap().revision,
+            ),
             |_, _| {
                 called = true;
                 Ok(vec![1.0])
@@ -291,15 +301,67 @@ mod tests {
         assert!(library.read_voices().unwrap().voices.is_empty());
     }
     #[test]
+    fn owner_intervals_never_reach_system_embed_or_create_a_ktalk_record() {
+        let (_root, library, meeting, transcript) = fixture();
+        let mut owner = evidence("ktalk-owner", true);
+        owner.track = Some(Channel::Mic);
+        owner.ranges = vec![(0, 7000)];
+        let mut peer = evidence("ktalk-peer", true);
+        peer.ranges = vec![(10000, 17000)];
+        let mut channels = Vec::new();
+        let id = notetaker_core::VoiceEnrollmentId::new(
+            meeting.read_meta().unwrap().id,
+            meeting.load_transcript().unwrap().revision,
+        );
+        let result = remember_named_voices(
+            &meeting,
+            &transcript,
+            &[owner, peer],
+            true,
+            id,
+            |path, ranges| {
+                if path.file_name().unwrap() == "System.wav" {
+                    assert!(ranges.iter().all(|range| range.start_ms >= 10000));
+                    channels.push(Channel::System);
+                    Ok(vec![0.0, 1.0])
+                } else {
+                    assert_eq!(path.file_name().unwrap(), "Mic.wav");
+                    assert_eq!(ranges[0].start_ms, 0);
+                    channels.push(Channel::Mic);
+                    Ok(vec![1.0, 0.0])
+                }
+            },
+            || false,
+        )
+        .unwrap();
+        assert_eq!(result.count, 2);
+        assert!(channels.contains(&Channel::Mic) && channels.contains(&Channel::System));
+        let bank = library.read_voices().unwrap();
+        assert!(
+            !bank
+                .voices
+                .iter()
+                .any(|voice| voice.id.as_deref() == Some("ktalk-owner"))
+        );
+        assert_eq!(bank.voices.iter().filter(|voice| voice.is_me).count(), 1);
+    }
+    #[test]
     fn trusted_microphone_uses_the_own_identity_and_short_evidence_is_skipped() {
         let (_root, library, meeting, transcript) = fixture();
         let mut short = evidence("ktalk-short", true);
         short.ranges = vec![(0, 5000)];
+        let mut owner = evidence("ktalk-owner", true);
+        owner.track = Some(Channel::Mic);
+        owner.ranges = vec![(0, 8000)];
         let report = remember_named_voices(
             &meeting,
             &transcript,
-            &[short],
+            &[short, owner],
             true,
+            notetaker_core::VoiceEnrollmentId::new(
+                meeting.read_meta().unwrap().id,
+                meeting.load_transcript().unwrap().revision,
+            ),
             |path, ranges| {
                 assert_eq!(path.file_name().unwrap(), "Mic.wav");
                 assert!(ranges.iter().all(|r| r.end_ms - r.start_ms <= 15000));
@@ -326,6 +388,10 @@ mod tests {
                 &Transcript::default(),
                 &[],
                 false,
+                notetaker_core::VoiceEnrollmentId::new(
+                    meeting.read_meta().unwrap().id,
+                    meeting.load_transcript().unwrap().revision
+                ),
                 |_, _| {
                     called = true;
                     Ok(vec![1.0])
@@ -346,6 +412,10 @@ mod tests {
             &transcript,
             &[evidence("ktalk-a", true)],
             false,
+            notetaker_core::VoiceEnrollmentId::new(
+                meeting.read_meta().unwrap().id,
+                meeting.load_transcript().unwrap().revision,
+            ),
             |_, _| {
                 cancelled.set(true);
                 Ok(vec![1.0, 0.0])

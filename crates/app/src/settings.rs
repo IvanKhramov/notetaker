@@ -469,13 +469,24 @@ impl Panel {
                     }
                     let mut delete = None;
                     for voice in &state.voices.voices {
-                        setting(ui, &voice.name, |ui| {
-                            if crate::theme::button(ui, "Удалить", crate::theme::ButtonStyle::Ghost)
+                        ui.push_id(voice.id.as_ref().unwrap_or(&voice.name), |ui| {
+                            setting(ui, &voice.name, |ui| {
+                                if crate::theme::button(
+                                    ui,
+                                    "Удалить",
+                                    crate::theme::ButtonStyle::Ghost,
+                                )
                                 .clicked()
-                            {
-                                delete = Some(voice.name.clone());
-                            }
-                        });
+                                {
+                                    delete = Some(crate::worker::VoiceDelete {
+                                        id: voice.id.clone(),
+                                        name: voice.name.clone(),
+                                    });
+                                }
+                            });
+                        })
+                        .response
+                        .on_hover_text(voice.id.as_deref().unwrap_or("Голос без ID"));
                     }
                     if let Some(name) = delete {
                         state.send(Command::Voices {

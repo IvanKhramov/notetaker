@@ -536,7 +536,9 @@ mod tests {
             .unwrap();
         let mut enrollment = Transcript::default();
         enrollment.rename_speaker("me", "Иван");
-        library.remember_speakers(&meeting, &enrollment).unwrap();
+        library
+            .remember_speakers_owned(&meeting, &enrollment, true)
+            .unwrap();
         let (tx, _rx) = std::sync::mpsc::channel();
         final_pass(
             &meeting,

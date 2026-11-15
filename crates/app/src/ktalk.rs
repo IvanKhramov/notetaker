@@ -48,6 +48,8 @@ pub struct Progress {
     #[serde(default)]
     pub enrol_pending: bool,
     #[serde(default)]
+    pub enrollment: Option<notetaker_core::VoiceEnrollmentId>,
+    #[serde(default)]
     pub recording_id: Option<String>,
     #[serde(default)]
     pub enrol_status: String,
@@ -110,6 +112,7 @@ pub struct Undo {
     pub meeting: Meeting,
     pub before: Transcript,
     pub after: Revision,
+    pub enrollment: Option<notetaker_core::VoiceEnrollmentId>,
 }
 pub struct Applied {
     pub document: Box<DocumentData>,
@@ -189,7 +192,11 @@ pub enum Message {
         automatic: bool,
         journal_error: Option<String>,
     },
-    Undone(Box<DocumentData>),
+    Undone {
+        document: Box<DocumentData>,
+        review: Vec<String>,
+        progress: Progress,
+    },
     Enrolled {
         path: PathBuf,
         status: String,
@@ -288,7 +295,7 @@ pub fn register_recording(meeting: &Meeting) -> Result<Task> {
     crate::config::atomic_write(&journal(meeting)?, &serde_json::to_string(&task.progress)?)?;
     Ok(task)
 }
-fn recorded_here(meeting: &Meeting) -> Result<bool> {
+pub(crate) fn recorded_here(meeting: &Meeting) -> Result<bool> {
     Ok(read_progress(meeting)?.recorded_here)
 }
 pub fn pickup(root: &Path, now: DateTime<Utc>) -> Result<Vec<Task>> {
@@ -390,8 +397,36 @@ fn plan_for_task(
     )
     .map_err(|error| ktalk::InvalidTranscript(error.to_string()).into())
 }
+fn pending_matches(task: &Task) -> Result<bool> {
+    let fresh = read_progress(&task.meeting)?;
+    let Some(id) = task.progress.enrollment else {
+        return Ok(false);
+    };
+    let loaded = task.meeting.load_transcript()?;
+    let library = Library::open(task.meeting.path().parent().context("Нет библиотеки")?)?;
+    Ok(library.tolk_enrollment_active(id)?
+        && fresh.enrol_pending
+        && fresh.enrollment == Some(id)
+        && id.meeting == task.meeting.read_meta()?.id
+        && loaded.revision == id.revision
+        && task
+            .progress
+            .recording_id
+            .as_ref()
+            .is_some_and(|recording| {
+                loaded
+                    .value
+                    .ktalk_sources
+                    .values()
+                    .any(|value| value == recording)
+            }))
+}
 fn enroll_plan(task: &Task, plan: &Plan, control: &Control) -> Result<String> {
     control.check()?;
+    anyhow::ensure!(
+        pending_matches(task)?,
+        "Транскрипт изменился после сверки; обучение пропущено"
+    );
     anyhow::ensure!(
         task.meeting.mic_audio_path().is_file() || task.meeting.system_audio_path().is_file(),
         "Аудио не хранится: голоса не запомнены"
@@ -420,10 +455,15 @@ fn enroll_plan(task: &Task, plan: &Plan, control: &Control) -> Result<String> {
         &transcript,
         &plan.voices,
         recorded_here(&task.meeting)?,
+        task.progress.enrollment.context("Нет unit обучения")?,
         |wav, ranges| {
             control.check()?;
             let result = client.embed(wav, ranges)?;
             control.check()?;
+            anyhow::ensure!(
+                pending_matches(task)?,
+                "Транскрипт изменился после сверки; обучение пропущено"
+            );
             Ok(result)
         },
         || control.token.is_cancelled(),
@@ -468,6 +508,10 @@ fn apply_names(
     task.progress.recording_id = Some(plan.recording.id.clone());
     task.progress.source_time = Some(plan.recording.created_date);
     task.progress.enrol_pending = voices;
+    task.progress.enrollment = Some(notetaker_core::VoiceEnrollmentId::new(
+        meeting.read_meta()?.id,
+        applied.after.revision,
+    ));
     task.progress.guest_ranges = plan
         .voices
         .iter()
@@ -517,6 +561,7 @@ fn apply(task: &mut Task, plan: &Plan, voices: bool, control: &Control) -> Resul
             meeting: meeting.clone(),
             before: applied.before,
             after: applied.after.revision,
+            enrollment: task.progress.enrollment,
         },
         segments,
         recording: plan.recording.clone(),
@@ -625,7 +670,13 @@ pub fn run_control(job: Job, store: &dyn CredentialStore, control: &Control) -> 
                 control.check()?;
                 let library = Library::open(meeting.path().parent().context("Нет библиотеки")?)?;
                 let result = library
-                    .edit_speakers(&meeting, &expected, edit, voices)
+                    .edit_speakers_owned(
+                        &meeting,
+                        &expected,
+                        edit,
+                        voices,
+                        recorded_here(&meeting)?,
+                    )
                     .map_err(|error| error.to_string());
                 Message::Named {
                     path: meeting.path().into(),
@@ -705,9 +756,33 @@ pub fn run_control(job: Job, store: &dyn CredentialStore, control: &Control) -> 
             Job::Undo(undo) => {
                 control.check()?;
                 undo.meeting.restore_transcript(&undo.before, undo.after)?;
-                Library::open(undo.meeting.path().parent().context("Нет библиотеки")?)?
-                    .reindex_incremental()?;
-                Message::Undone(Box::new(DocumentData::read(undo.meeting)?))
+                let mut task = Task {
+                    ended: undo.meeting.read_meta()?.ended_at.unwrap_or_else(Utc::now),
+                    progress: read_progress(&undo.meeting)?,
+                    meeting: undo.meeting.clone(),
+                };
+                if task.progress.enrollment == undo.enrollment {
+                    task.progress.enrol_pending = false;
+                    task.progress.enrol_status = "Сверка отменена".into();
+                    persist(&task)?;
+                }
+                let library =
+                    Library::open(undo.meeting.path().parent().context("Нет библиотеки")?)?;
+                let mut review = if let Some(id) = undo.enrollment {
+                    library
+                        .undo_tolk_voices(&undo.meeting, id)
+                        .unwrap_or_else(|error| vec![format!("Биометрия: {error}")])
+                } else {
+                    Vec::new()
+                };
+                if let Err(error) = library.reindex_incremental() {
+                    review.push(format!("Поиск: {error}"));
+                }
+                Message::Undone {
+                    document: Box::new(DocumentData::read(undo.meeting)?),
+                    review,
+                    progress: task.progress,
+                }
             }
             Job::Enroll(mut task) => {
                 task.progress.voice_offer_seen = true;
@@ -724,6 +799,12 @@ pub fn run_control(job: Job, store: &dyn CredentialStore, control: &Control) -> 
                         "Выберите запись Толка вручную перед обучением"
                     );
                     task.progress.recording_id = ids.into_iter().next();
+                }
+                if task.progress.enrollment.is_none() {
+                    task.progress.enrollment = Some(notetaker_core::VoiceEnrollmentId::new(
+                        task.meeting.read_meta()?.id,
+                        task.meeting.load_transcript()?.revision,
+                    ));
                 }
                 persist(&task)?;
                 mark_offer_seen(&task)?;
@@ -754,6 +835,17 @@ pub fn run_control(job: Job, store: &dyn CredentialStore, control: &Control) -> 
                 }
             }
             Job::Resume(mut task, settings) => {
+                if !pending_matches(&task)? {
+                    task.progress.enrol_pending = false;
+                    task.progress.enrol_status =
+                        "Транскрипт изменился после сверки; обучение пропущено".into();
+                    persist(&task)?;
+                    return Ok(Message::Enrolled {
+                        path: task.meeting.path().into(),
+                        status: task.progress.enrol_status.clone(),
+                        task,
+                    });
+                }
                 let result = if !task.meeting.mic_audio_path().is_file()
                     && !task.meeting.system_audio_path().is_file()
                 {
@@ -1659,7 +1751,35 @@ impl crate::state::AppState {
                 }
                 self.ktalk.tasks.insert(path, task);
             }
-            Message::Undone(document) => {
+            Message::Undone {
+                document,
+                review,
+                progress,
+            } => {
+                if self
+                    .ktalk
+                    .enroll_pending
+                    .as_ref()
+                    .is_some_and(|task| task.meeting.path() == document.meeting.path())
+                {
+                    self.ktalk.enroll_pending = None;
+                }
+                if let Some(task) = self.ktalk.tasks.get_mut(document.meeting.path()) {
+                    task.progress = progress;
+                }
+                if !review.is_empty() {
+                    self.notices.push((
+                        crate::theme::ToastLevel::Warning,
+                        format!(
+                            "Транскрипт восстановлен. Проверьте голоса в настройках: {}",
+                            review.join(", ")
+                        ),
+                    ));
+                }
+                self.send(crate::worker::Command::Voices {
+                    root: self.settings.library.clone(),
+                    delete: None,
+                });
                 if let Some(doc) = self.documents.get_mut(document.meeting.path()) {
                     doc.data.transcript = document.transcript;
                     doc.data.revisions.transcript = document.revisions.transcript;
@@ -1695,6 +1815,108 @@ impl crate::state::AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn undo_clears_pending_and_prevents_resume_after_asr_failure() {
+        let (_root, mut task, plan) = fixture();
+        let (applied, _) = apply_names(&mut task, &plan, true, &Control::default()).unwrap();
+        let stale = task.clone();
+        assert!(pending_matches(&task).unwrap());
+        let undo = Undo {
+            meeting: task.meeting.clone(),
+            before: applied.before,
+            after: applied.after.revision,
+            enrollment: task.progress.enrollment,
+        };
+        let message = run(Job::Undo(undo), &Store::default());
+        assert!(matches!(message, Message::Undone { .. }));
+        assert!(!read_progress(&task.meeting).unwrap().enrol_pending);
+        assert!(!pending_matches(&stale).unwrap());
+        let reply = run(Job::Resume(stale, settings()), &Store::default());
+        assert!(matches!(reply, Message::Enrolled { .. }));
+        assert!(!read_progress(&task.meeting).unwrap().enrol_pending);
+        assert!(
+            Library::open(task.meeting.path().parent().unwrap())
+                .unwrap()
+                .read_voices()
+                .unwrap()
+                .voices
+                .is_empty()
+        );
+    }
+    #[test]
+    fn an_edit_after_apply_drops_pending_without_enrollment() {
+        let (_root, mut task, plan) = fixture();
+        apply_names(&mut task, &plan, true, &Control::default()).unwrap();
+        task.meeting
+            .update_transcript(|text| text.segments[0].text = "Поздняя правка".into())
+            .unwrap();
+        let before = std::fs::read(task.meeting.path().join("transcript.json")).unwrap();
+        let reply = run(Job::Resume(task.clone(), settings()), &Store::default());
+        assert!(matches!(reply, Message::Enrolled { .. }));
+        assert!(!read_progress(&task.meeting).unwrap().enrol_pending);
+        assert_eq!(
+            std::fs::read(task.meeting.path().join("transcript.json")).unwrap(),
+            before
+        );
+    }
+    #[test]
+    fn sync_undo_reverts_biometrics_and_keeps_later_meeting_samples() {
+        let (root, mut task, plan) = fixture();
+        let (applied, _) = apply_names(&mut task, &plan, true, &Control::default()).unwrap();
+        let library = Library::open(root.path()).unwrap();
+        let voice = &plan.voices.iter().find(|voice| voice.registered).unwrap();
+        let id = task.progress.enrollment.unwrap();
+        library
+            .remember_tolk_voices(
+                &task.meeting,
+                &applied.after.value,
+                vec![notetaker_core::VoiceSample {
+                    speaker: voice.speaker.clone(),
+                    name: voice.name.clone(),
+                    embedding: vec![1.0, 0.0],
+                    own: false,
+                }],
+                id,
+                || false,
+            )
+            .unwrap();
+        let mut other_meta = notetaker_core::MeetingMeta::new("Другая встреча", Utc::now());
+        other_meta.ended_at = Some(Utc::now());
+        let other = library.create_meeting(other_meta).unwrap();
+        let other_text = other.read_transcript().unwrap();
+        let other_id = notetaker_core::VoiceEnrollmentId::new(
+            other.read_meta().unwrap().id,
+            other.load_transcript().unwrap().revision,
+        );
+        library
+            .remember_tolk_voices(
+                &other,
+                &other_text,
+                vec![notetaker_core::VoiceSample {
+                    speaker: voice.speaker.clone(),
+                    name: voice.name.clone(),
+                    embedding: vec![0.0, 1.0],
+                    own: false,
+                }],
+                other_id,
+                || false,
+            )
+            .unwrap();
+        let reply = run(
+            Job::Undo(Undo {
+                meeting: task.meeting.clone(),
+                before: applied.before.clone(),
+                after: applied.after.revision,
+                enrollment: Some(id),
+            }),
+            &Store::default(),
+        );
+        assert!(matches!(reply, Message::Undone { .. }));
+        assert_eq!(task.meeting.read_transcript().unwrap(), applied.before);
+        let bank = library.read_voices().unwrap();
+        assert_eq!(bank.voices.len(), 1);
+        assert_eq!(bank.voices[0].embeddings, vec![vec![0.0, 1.0]]);
+    }
     #[test]
     fn shared_meetings_and_imports_never_gain_local_provenance() {
         let root = tempfile::tempdir().unwrap();
@@ -2081,10 +2303,11 @@ mod tests {
             meeting: task.meeting.clone(),
             before: original.clone(),
             after: loaded.revision,
+            enrollment: None,
         };
         assert!(matches!(
             run(Job::Undo(undo), &Store::default()),
-            Message::Undone(_)
+            Message::Undone { .. }
         ));
         assert_eq!(task.meeting.read_transcript().unwrap(), original);
     }

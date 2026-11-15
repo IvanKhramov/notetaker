@@ -597,7 +597,7 @@ pub fn plan(
         .map(|segment| segment.end_ms)
         .max()
         .unwrap_or(0);
-    let voices = voice_evidence(remote, offset, bound)?;
+    let voices = voice_evidence(remote, offset, bound, owner)?;
     for voice in voices.iter().filter(|voice| voice.registered) {
         if after.speaker_names.contains_key(&voice.speaker) {
             after
@@ -660,7 +660,12 @@ pub fn apply(library: &Library, meeting: &Meeting, plan: &Plan) -> Result<Applie
 }
 
 /// Use word timings only. Other speakers, including guests, exclude a 300 ms margin.
-fn voice_evidence(remote: &Transcript, offset: i64, bound: u64) -> Result<Vec<VoiceEvidence>> {
+fn voice_evidence(
+    remote: &Transcript,
+    offset: i64,
+    bound: u64,
+    owner: Option<&User>,
+) -> Result<Vec<VoiceEvidence>> {
     use sha2::{Digest, Sha256};
     let mut speakers = BTreeMap::<String, (String, bool, Vec<Interval>)>::new();
     for track in &remote.tracks {
@@ -683,6 +688,15 @@ fn voice_evidence(remote: &Transcript, offset: i64, bound: u64) -> Result<Vec<Vo
             }
         }
     }
+    let owner_matches: Vec<_> = owner
+        .map(|owner| {
+            speakers
+                .iter()
+                .filter(|(_, (name, registered, _))| *registered && *name == owner.name())
+                .map(|(id, _)| id.clone())
+                .collect()
+        })
+        .unwrap_or_default();
     let mut result = Vec::new();
     for (id, (name, registered, words)) in &speakers {
         let mut own = union(words.clone());
@@ -734,6 +748,17 @@ fn voice_evidence(remote: &Transcript, offset: i64, bound: u64) -> Result<Vec<Vo
             speaker: id.clone(),
             name: name.clone(),
             registered: *registered,
+            track: if owner.is_some() {
+                if owner_matches.len() != 1 {
+                    None
+                } else if owner_matches.first() == Some(id) {
+                    Some(notetaker_core::Channel::Mic)
+                } else {
+                    Some(notetaker_core::Channel::System)
+                }
+            } else {
+                Some(notetaker_core::Channel::System)
+            },
             ranges,
         });
     }

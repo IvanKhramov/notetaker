@@ -172,6 +172,10 @@ pub struct RecordRequest {
     pub app: Option<String>,
 }
 
+pub struct VoiceDelete {
+    pub id: Option<String>,
+    pub name: String,
+}
 pub enum Command {
     Ktalk(Box<crate::ktalk::Job>, crate::ktalk::Control),
     RememberRecording(notetaker_core::app_config::RecordingOptions),
@@ -293,7 +297,7 @@ pub enum Command {
     Download(String),
     Voices {
         root: PathBuf,
-        delete: Option<String>,
+        delete: Option<VoiceDelete>,
     },
     Settings {
         settings: Settings,
@@ -809,8 +813,12 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                 Command::Voices { root, delete } => {
                     let result = (|| -> Result<_> {
                         let library = Library::open(root)?;
-                        if let Some(name) = delete {
-                            library.delete_voice(&name)?;
+                        if let Some(voice) = delete {
+                            if let Some(id) = voice.id {
+                                library.delete_voice_id(&id)?;
+                            } else {
+                                library.delete_voice(&voice.name)?;
+                            }
                         }
                         Ok(library.read_voices()?)
                     })()
@@ -880,8 +888,16 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                         .as_ref()
                         .map_err(|e| e.to_string())
                         .and_then(|library| {
+                            let own_allowed = crate::ktalk::recorded_here(&meeting)
+                                .map_err(|error| error.to_string())?;
                             library
-                                .edit_speakers(&meeting, &expected, edit, voice_library_enabled)
+                                .edit_speakers_owned(
+                                    &meeting,
+                                    &expected,
+                                    edit,
+                                    voice_library_enabled,
+                                    own_allowed,
+                                )
                                 .map_err(|e| e.to_string())
                         });
                     let data = DocumentData::read(meeting.clone()).ok().map(Box::new);

@@ -857,7 +857,7 @@ fn words_exclude_overlap_margin_clip_bounds_and_cap_audio() {
         {"speaker":{"isAnonymous":false,"userInfo":{"key":"a","firstname":"Same","surname":"Name"}},"chunks":[{"startTimeOffsetInMillis":0,"endTimeOffsetInMillis":30000,"words":[{"text":"one","startTimeOffsetInMillis":0,"endTimeOffsetInMillis":30000}]}]},
         {"speaker":{"isAnonymous":true,"anonymousId":"guest","anonymousName":"iPhone"},"chunks":[{"startTimeOffsetInMillis":8000,"endTimeOffsetInMillis":10000,"words":[{"text":"other","startTimeOffsetInMillis":8000,"endTimeOffsetInMillis":10000}]}]}
     ]})).unwrap();
-    let evidence = voice_evidence(&remote, 1000, 20000).unwrap();
+    let evidence = voice_evidence(&remote, 1000, 20000, None).unwrap();
     let registered = evidence.iter().find(|v| v.registered).unwrap();
     assert!(registered.ranges.contains(&(0, 6700)));
     assert!(registered.ranges.contains(&(9300, 20000)));
@@ -897,4 +897,46 @@ fn applied_revision_cannot_authorize_undo_of_a_later_writer() {
         before
     );
     assert_eq!(std::fs::read_dir(meeting.path()).unwrap().count(), files);
+}
+
+#[test]
+fn local_owner_is_identified_uniquely_and_never_uses_the_system_track() {
+    let remote:Transcript=serde_json::from_value(serde_json::json!({"status":"complete","tracks":[
+        {"speaker":{"isAnonymous":false,"userInfo":{"key":"owner-key","firstname":"Oleg","surname":"Sidorov"}},"chunks":[{"startTimeOffsetInMillis":0,"endTimeOffsetInMillis":7000,"words":[{"text":"owner","startTimeOffsetInMillis":0,"endTimeOffsetInMillis":7000}]}]},
+        {"speaker":{"isAnonymous":false,"userInfo":{"key":"peer","firstname":"Anna","surname":"Petrova"}},"chunks":[{"startTimeOffsetInMillis":10000,"endTimeOffsetInMillis":17000,"words":[{"text":"peer","startTimeOffsetInMillis":10000,"endTimeOffsetInMillis":17000}]}]}
+    ]})).unwrap();
+    let voices = voice_evidence(&remote, 0, 20000, Some(&owner())).unwrap();
+    assert_eq!(
+        voices
+            .iter()
+            .find(|voice| voice.name == "Oleg Sidorov")
+            .unwrap()
+            .track,
+        Some(Channel::Mic)
+    );
+    assert_eq!(
+        voices
+            .iter()
+            .find(|voice| voice.name == "Anna Petrova")
+            .unwrap()
+            .track,
+        Some(Channel::System)
+    );
+    assert!(
+        voice_evidence(&remote, 0, 20000, None)
+            .unwrap()
+            .iter()
+            .all(|voice| voice.track == Some(Channel::System))
+    );
+    let unknown = User {
+        key: String::new(),
+        firstname: "Unknown".into(),
+        surname: String::new(),
+    };
+    assert!(
+        voice_evidence(&remote, 0, 20000, Some(&unknown))
+            .unwrap()
+            .iter()
+            .all(|voice| voice.track.is_none())
+    );
 }
