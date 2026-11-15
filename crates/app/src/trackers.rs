@@ -116,10 +116,10 @@ impl Panel {
                         crate::theme::card(crate::theme::Palette::of(ui), false).show(ui, |ui| {
                             ui.strong(&p.task.text);
                             ui.label(&p.endpoint);
-                            ui.small(crate::wording::excerpt(&p.context.summary_excerpt));
+                            ui.small(&p.context.summary_excerpt);
                             crate::theme::disclosure("Данные для отправки").show(ui, |ui| {
                                 ui.monospace(
-                                    serde_json::to_string_pretty(&p.body).unwrap_or_default(),
+                                    serde_json::to_string(&p.body).unwrap_or_default(),
                                 );
                             });
                         });

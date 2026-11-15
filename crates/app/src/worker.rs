@@ -49,7 +49,6 @@ pub struct DocumentData {
     /// The recording or its final pass did not finish and the audio is still on disk.
     pub unfinished: bool,
     pub system_audio: bool,
-    pub audio_available: bool,
 }
 impl DocumentData {
     pub fn read(meeting: Meeting) -> Result<Self> {
@@ -61,8 +60,6 @@ impl DocumentData {
         let unfinished = (meta.ended_at.is_none() || meeting.path().join("audio/.work").is_dir())
             && (meeting.mic_audio_path().is_file() || meeting.system_audio_path().is_file());
         Ok(Self {
-            audio_available: meeting.mic_audio_path().is_file()
-                || meeting.system_audio_path().is_file(),
             system_audio: meeting.system_audio_path().is_file(),
             meta,
             unfinished,

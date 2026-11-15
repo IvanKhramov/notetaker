@@ -1897,7 +1897,6 @@ impl AppState {
                     let reloaded = result.reloaded.as_deref();
                     if let Some(data) = reloaded {
                         doc.data.system_audio = data.system_audio;
-                        doc.data.audio_available = data.audio_available;
                     }
                     // Keep edits made after enqueueing the save. If they also
                     // conflict, their next save preserves them before reloading.
@@ -2179,7 +2178,6 @@ impl AppState {
                     if let Some(doc) = self.documents.get_mut(&path) {
                         doc.data.meta = data.meta;
                         doc.data.system_audio = data.system_audio;
-                        doc.data.audio_available = data.audio_available;
                         let bookmarks = doc.data.transcript.bookmarks.clone();
                         doc.data.transcript = data.transcript;
                         for bookmark in bookmarks {

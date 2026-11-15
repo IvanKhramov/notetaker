@@ -23,51 +23,7 @@ pub fn count(n: u64, forms: [&str; 3]) -> String {
     format!("{n} {}", plural(n, forms))
 }
 
-pub fn excerpt(markdown: &str) -> String {
-    markdown
-        .lines()
-        .map(|line| {
-            let mut text = line.trim();
-            loop {
-                let prefix = text
-                    .chars()
-                    .take_while(|ch| matches!(ch, '#' | '>'))
-                    .count();
-                if prefix > 0
-                    && let Some(rest) = text
-                        .get(prefix..)
-                        .and_then(|rest| rest.strip_prefix(char::is_whitespace))
-                {
-                    text = rest.trim_start();
-                    continue;
-                }
-                if let Some(rest) = ["-", "*", "+", "[ ]", "[x]", "[X]", "[\t]"]
-                    .iter()
-                    .find_map(|prefix| {
-                        text.strip_prefix(prefix)
-                            .and_then(|rest| rest.strip_prefix(char::is_whitespace))
-                    })
-                {
-                    text = rest.trim_start();
-                    continue;
-                }
-                let digits = text.bytes().take_while(u8::is_ascii_digit).count();
-                if digits > 0
-                    && let Some(rest) = text
-                        .get(digits..)
-                        .and_then(|rest| rest.strip_prefix(['.', ')']))
-                        .and_then(|rest| rest.strip_prefix(char::is_whitespace))
-                {
-                    text = rest.trim_start();
-                    continue;
-                }
-                break;
-            }
-            text
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
+pub use notetaker_core::plain_excerpt as excerpt;
 
 pub fn audio_status(available: bool, expires: Option<chrono::DateTime<chrono::Utc>>) -> String {
     if !available {
