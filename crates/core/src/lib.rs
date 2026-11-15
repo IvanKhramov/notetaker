@@ -26,7 +26,7 @@ pub use paths::{display_path, display_text};
 mod speakers;
 mod storage;
 mod tasks;
-pub use tasks::{Task, parse_tasks, person_matches, resolve_due};
+pub use tasks::{Task, TaskLine, parse_task_lines, parse_tasks, person_matches, resolve_due};
 mod vocabulary;
 mod voices;
 pub use export::{ExportFormat, format_timestamp};

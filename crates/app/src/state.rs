@@ -1685,7 +1685,16 @@ impl AppState {
                             self.documents.insert(path, Document::new(*data));
                         }
                     }
-                    Err(error) => self.error = Some(error),
+                    Err(error) => {
+                        self.error = Some(error);
+                        if let Some(document) = self.documents.get(&path)
+                            && !document.saving
+                            && !document.dirty.any()
+                            && self.loading.insert(path)
+                        {
+                            self.send(Command::Load(document.data.meeting.clone()));
+                        }
+                    }
                 }
                 self.refresh_tasks();
             }
@@ -1851,9 +1860,14 @@ impl AppState {
                 self.loading.remove(&path);
                 match result {
                     Ok(data) => {
-                        self.documents
-                            .entry(path)
-                            .or_insert_with(|| Document::new(data));
+                        if let Some(document) = self.documents.get_mut(&path) {
+                            if !document.saving && !document.dirty.any() {
+                                document.data = data;
+                                document.changed();
+                            }
+                        } else {
+                            self.documents.insert(path, Document::new(data));
+                        }
                     }
                     Err(error) => self.error = Some(error),
                 }
