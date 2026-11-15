@@ -240,10 +240,7 @@ impl Client {
     }
     pub fn profile(&self) -> Result<User> {
         let user: User = self.get(&["api", "Users", "profile"], &[])?;
-        ensure!(
-            !user.name().is_empty(),
-            "В профиле Толка отсутствует имя"
-        );
+        ensure!(!user.name().is_empty(), "В профиле Толка отсутствует имя");
         Ok(user)
     }
     pub fn recordings(&self, query: &str, skip: usize, top: usize) -> Result<Vec<Recording>> {

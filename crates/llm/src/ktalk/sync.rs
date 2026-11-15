@@ -481,10 +481,7 @@ pub fn plan(
             continue;
         }
         if original == "me" {
-            ensure!(
-                !owner.name().is_empty(),
-                "Некорректный профиль Толка"
-            );
+            ensure!(!owner.name().is_empty(), "Некорректный профиль Толка");
             if local.speaker_suggestions.get("me") != Some(&owner.name()) {
                 after.speaker_voice_ids.remove("me");
             }
