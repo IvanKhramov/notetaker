@@ -303,29 +303,46 @@ impl Meeting {
                 "Документ изменился. Обновите список".into(),
             ));
         }
-        let mut lines: Vec<_> = loaded
-            .value
+        let mut text = loaded.value;
+        let line_start = text
             .split_inclusive('\n')
-            .map(str::to_owned)
-            .collect();
-        let line = lines
-            .get_mut(task.line.saturating_sub(1))
+            .take(task.line - 1)
+            .map(str::len)
+            .sum::<usize>();
+        let line = text[line_start..]
+            .split_inclusive('\n')
+            .next()
             .ok_or_else(|| crate::Error::TaskEdit("Строка задачи больше не существует".into()))?;
         if line.trim_end_matches(['\r', '\n']) != task.source {
             return Err(crate::Error::TaskEdit(
                 "Задача изменилась. Обновите список".into(),
             ));
         }
-        let offset = ["[ ]", "[x]", "[X]"]
-            .into_iter()
-            .filter_map(|marker| line.find(marker))
-            .min()
-            .ok_or_else(|| crate::Error::TaskEdit("Нет флажка задачи".into()))?;
-        line.replace_range(offset + 1..offset + 2, if completed { "x" } else { " " });
+        // The marker is the one the parser recognised on this line, not the
+        // first bracket pair that looks like one: `[\t]` is a marker too, and
+        // the task text may contain `[ ]`.
+        let line_end = line_start + line.len();
+        let marker =
+            pulldown_cmark::Parser::new_ext(&text, pulldown_cmark::Options::ENABLE_TASKLISTS)
+                .into_offset_iter()
+                .find_map(|(event, range)| {
+                    (matches!(event, pulldown_cmark::Event::TaskListMarker(_))
+                        && range.start >= line_start
+                        && range.end <= line_end)
+                        .then_some(range)
+                })
+                .filter(|range| {
+                    text[range.clone()].starts_with('[') && text[range.clone()].ends_with(']')
+                })
+                .ok_or_else(|| crate::Error::TaskEdit("Нет флажка задачи".into()))?;
+        text.replace_range(
+            marker.start + 1..marker.end - 1,
+            if completed { "x" } else { " " },
+        );
         if notes {
-            self.save_notes(&lines.concat(), task.revision)
+            self.save_notes(&text, task.revision)
         } else {
-            self.save_enhanced(&lines.concat(), task.revision)
+            self.save_enhanced(&text, task.revision)
         }
     }
 }
@@ -341,6 +358,8 @@ mod tests {
             "- [ ] Родитель\r\n  - [x] Вложенная 🦀\r\n\r\n1. [ ] Проверить [ ] текст\r\n",
             "- [ ] Повтор\n- [ ] Повтор\n\n> - [X] Ёжик\n\n```md\n- [ ] Код\n```\n",
             "~~~\n- [ ] Код\n\n- [x] Ещё код\n~~~\n\n* [ ] ![图](attachments/b.png)\n",
+            // A tab is a valid unchecked marker; the text has its own `[ ]`.
+            "- [\t] Проверить [ ] текст\n",
         ] {
             for notes in [false, true] {
                 let root = tempfile::tempdir().unwrap();
