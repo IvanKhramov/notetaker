@@ -1531,6 +1531,98 @@ pub fn surface_shadow(p: Palette) -> egui::epaint::Shadow {
         color: Color32::from_black_alpha(if p.bg.r() < 128 { 102 } else { 31 }),
     }
 }
+/// A menu uses frameless editor defaults; keep a visible field boundary there.
+pub fn framed_text_field(ui: &mut egui::Ui, text: &mut String, id: egui::Id) -> egui::Response {
+    let p = Palette::of(ui);
+    egui::Frame::new()
+        .fill(p.bg)
+        .stroke(Stroke::new(1.0, p.border_strong))
+        .corner_radius(RADIUS_CONTROL)
+        .show(ui, |ui| {
+            ui.add(
+                text_field(text)
+                    .frame(egui::Frame::NONE)
+                    .margin(egui::Margin::symmetric(12, 7))
+                    .id(id)
+                    .desired_width(ui.available_width()),
+            )
+        })
+        .inner
+}
+
+/// Keep struck Markdown text muted, including mixed-format CommonMark galleys.
+pub fn muted_strikethrough<R>(
+    ui: &mut egui::Ui,
+    completed: bool,
+    draw: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    fn struck(shape: &egui::epaint::Shape, completed: bool) -> bool {
+        match shape {
+            egui::epaint::Shape::Text(text) => {
+                completed
+                    || text
+                        .galley
+                        .job
+                        .sections
+                        .iter()
+                        .any(|s| s.format.strikethrough.width > 0.0)
+            }
+            egui::epaint::Shape::Vec(shapes) => shapes.iter().any(|shape| struck(shape, completed)),
+            _ => false,
+        }
+    }
+    fn recolor(ui: &egui::Ui, shape: &mut egui::epaint::Shape, color: Color32, completed: bool) {
+        match shape {
+            egui::epaint::Shape::Text(text) => {
+                let mut job = (*text.galley.job).clone();
+                for section in &mut job.sections {
+                    if completed || section.format.strikethrough.width > 0.0 {
+                        if completed {
+                            section.format.strikethrough.width = 1.0;
+                        }
+                        section.format.color = color;
+                        section.format.strikethrough.color = color;
+                    }
+                }
+                text.galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+                text.override_text_color = None;
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    if struck(shape, completed) {
+                        recolor(ui, shape, color, completed);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let layer = ui.layer_id();
+    let start = ui
+        .ctx()
+        .graphics_mut(|graphics| graphics.entry(layer).next_idx().0);
+    let result = draw(ui);
+    let shapes = ui.ctx().graphics_mut(|graphics| {
+        graphics
+            .entry(layer)
+            .all_entries()
+            .enumerate()
+            .skip(start)
+            .filter(|(_, s)| struck(&s.shape, completed))
+            .map(|(i, s)| (i, s.clone()))
+            .collect::<Vec<_>>()
+    });
+    for (index, mut shape) in shapes {
+        recolor(ui, &mut shape.shape, Palette::of(ui).muted, completed);
+        ui.ctx().graphics_mut(|graphics| {
+            graphics
+                .entry(layer)
+                .set(egui::layers::ShapeIdx(index), shape.clip_rect, shape.shape)
+        });
+    }
+    result
+}
+
 pub fn text_field(value: &mut dyn egui::TextBuffer) -> egui::TextEdit<'_> {
     egui::TextEdit::singleline(value)
         .font(FontId::proportional(BUTTON))

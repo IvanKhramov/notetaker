@@ -191,6 +191,7 @@ pub enum Command {
     },
     ToggleTask {
         meeting: Meeting,
+        notes: bool,
         task: notetaker_core::Task,
         completed: bool,
     },
@@ -559,12 +560,13 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                 }
                 Command::ToggleTask {
                     meeting,
+                    notes,
                     task,
                     completed,
                 } => {
                     let path = meeting.path().to_owned();
                     let result = (|| -> Result<_> {
-                        meeting.toggle_task(&task, completed)?;
+                        meeting.toggle_task_source(&task, completed, notes)?;
                         Ok(Box::new(DocumentData::read(meeting)?))
                     })()
                     .map_err(error_text);
@@ -1114,7 +1116,7 @@ fn list_mode(
     }
     Ok((rows, note))
 }
-fn templates(root: &Path) -> Vec<String> {
+pub(crate) fn templates(root: &Path) -> Vec<String> {
     let mut names: Vec<String> = ["general", "one-on-one", "client-call", "standup"]
         .into_iter()
         .map(str::to_owned)

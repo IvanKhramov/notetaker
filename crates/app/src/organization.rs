@@ -738,14 +738,24 @@ impl Panel {
         let width = ui.available_width();
         ui.scope(|ui| {
             ui.set_max_width(width);
-            let mut template = self.edit.template.clone().unwrap_or_default();
-            if theme::form_field(ui, "Шаблон по умолчанию", None, |ui| {
-                ui.add(theme::text_field(&mut template).desired_width(f32::INFINITY))
-            })
-            .changed()
-            {
-                self.edit.template = (!template.is_empty()).then_some(template);
-            }
+            theme::form_field(ui, "Шаблон по умолчанию", None, |ui| {
+                theme::select("folder-template")
+                    .width(ui.available_width())
+                    .selected_text(
+                        self.edit
+                            .template
+                            .as_deref()
+                            .map(|id| crate::ui::template_name(&self.root, id))
+                            .unwrap_or_else(|| "Не задан".into()),
+                    )
+                    .show_ui(ui, |ui| {
+                        theme::select_value(ui, &mut self.edit.template, None, "Не задан");
+                        for id in crate::worker::templates(&self.root) {
+                            let name = crate::ui::template_name(&self.root, &id);
+                            theme::select_value(ui, &mut self.edit.template, Some(id), name);
+                        }
+                    });
+            });
             theme::form_field(ui, "Режим", None, |ui| {
                 crate::theme::select("folder_mode")
                     .width(ui.available_width())

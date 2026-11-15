@@ -11,7 +11,7 @@ pub struct Task {
     pub meeting_id: uuid::Uuid,
     pub path: PathBuf,
     pub meeting_title: String,
-    /// One-based line number in enhanced.md.
+    /// One-based source line; the task index uses enhanced.md.
     pub line: usize,
     pub text: String,
     pub owner: String,
@@ -58,6 +58,20 @@ fn normalize_person(value: &str) -> String {
 
 /// Fenced and indented code are ignored; nested list items are accepted.
 pub fn parse_tasks(text: &str, date: NaiveDate) -> Vec<Task> {
+    parse_task_lines(text, date)
+        .into_iter()
+        .map(|line| line.task)
+        .collect()
+}
+
+#[derive(Clone, Debug)]
+pub struct TaskLine {
+    pub task: Task,
+    /// Byte range of the checkbox marker within the original source line.
+    pub marker: std::ops::Range<usize>,
+}
+
+pub fn parse_task_lines(text: &str, date: NaiveDate) -> Vec<TaskLine> {
     let mut tasks = Vec::new();
     let parser = pulldown_cmark::Parser::new_ext(text, pulldown_cmark::Options::ENABLE_TASKLISTS);
     for (event, range) in parser.into_offset_iter() {
@@ -115,46 +129,46 @@ pub fn parse_tasks(text: &str, date: NaiveDate) -> Vec<Task> {
         if fields.len() == 1 {
             fields = normalized.split("; ").map(str::trim).collect();
         }
-        let (title, owner, due_text) = if fields.len() >= 3 {
-            let due = fields.pop().unwrap();
-            let owner = fields.pop().unwrap();
-            (
-                fields.join(" - "),
+        let (title, owner, due_text) = match fields.as_slice() {
+            [title @ .., owner, due] if !title.is_empty() => (
+                title.join(" - "),
                 clean_field(owner, &["ответственный:", "владелец:", "owner:"]),
                 clean_field(due, &["срок:", "deadline:", "due:"]),
-            )
-        } else if fields.len() == 2 {
-            let last = fields[1];
-            if resolve_due(last, date).is_some() || last.to_lowercase().starts_with("до ") {
-                (
-                    fields[0].into(),
-                    String::new(),
-                    clean_field(last, &["срок:", "due:"]),
-                )
-            } else {
-                (
-                    fields[0].into(),
-                    clean_field(last, &["ответственный:", "owner:"]),
-                    String::new(),
-                )
+            ),
+            [first, last] => {
+                if resolve_due(last, date).is_some() || last.to_lowercase().starts_with("до ") {
+                    (
+                        (*first).into(),
+                        String::new(),
+                        clean_field(last, &["срок:", "due:"]),
+                    )
+                } else {
+                    (
+                        (*first).into(),
+                        clean_field(last, &["ответственный:", "owner:"]),
+                        String::new(),
+                    )
+                }
             }
-        } else {
-            (body.into(), String::new(), String::new())
+            _ => (body.into(), String::new(), String::new()),
         };
-        tasks.push(Task {
-            meeting_id: uuid::Uuid::nil(),
-            path: PathBuf::new(),
-            meeting_title: String::new(),
-            line: index + 1,
-            text: title,
-            owner,
-            requester,
-            due: resolve_due(&due_text, date),
-            due_text,
-            completed,
-            source: source.into(),
-            issue_url,
-            revision: Revision::default(),
+        tasks.push(TaskLine {
+            marker: range.start - line_start..range.end - line_start,
+            task: Task {
+                meeting_id: uuid::Uuid::nil(),
+                path: PathBuf::new(),
+                meeting_title: String::new(),
+                line: index + 1,
+                text: title,
+                owner,
+                requester,
+                due: resolve_due(&due_text, date),
+                due_text,
+                completed,
+                source: source.into(),
+                issue_url,
+                revision: Revision::default(),
+            },
         });
     }
     tasks
@@ -265,38 +279,210 @@ impl Meeting {
     }
 
     pub fn toggle_task(&self, task: &Task, completed: bool) -> Result<Revision> {
+        self.toggle_task_source(task, completed, false)
+    }
+    /// Both document sources use the same revision-checked atomic edit.
+    pub fn toggle_task_source(
+        &self,
+        task: &Task,
+        completed: bool,
+        notes: bool,
+    ) -> Result<Revision> {
         if task.line == 0 || task.path != self.path {
             return Err(crate::Error::TaskEdit(
                 "Задача относится к другой встрече".into(),
             ));
         }
-        let loaded = self.load_enhanced()?;
-        let mut lines: Vec<_> = loaded
-            .value
+        let loaded = if notes {
+            self.load_notes()?
+        } else {
+            self.load_enhanced()?
+        };
+        if loaded.revision != task.revision {
+            return Err(crate::Error::TaskEdit(
+                "Документ изменился. Обновите список".into(),
+            ));
+        }
+        let mut text = loaded.value;
+        let line_start = text
             .split_inclusive('\n')
-            .map(str::to_owned)
-            .collect();
-        let line = lines
-            .get_mut(task.line.saturating_sub(1))
+            .take(task.line - 1)
+            .map(str::len)
+            .sum::<usize>();
+        let line = text[line_start..]
+            .split_inclusive('\n')
+            .next()
             .ok_or_else(|| crate::Error::TaskEdit("Строка задачи больше не существует".into()))?;
         if line.trim_end_matches(['\r', '\n']) != task.source {
             return Err(crate::Error::TaskEdit(
                 "Задача изменилась. Обновите список".into(),
             ));
         }
-        let offset = line
-            .find("[ ]")
-            .or_else(|| line.find("[x]"))
-            .or_else(|| line.find("[X]"))
-            .ok_or_else(|| crate::Error::TaskEdit("Нет флажка задачи".into()))?;
-        line.replace_range(offset + 1..offset + 2, if completed { "x" } else { " " });
-        self.save_enhanced(&lines.concat(), task.revision)
+        // The marker is the one the parser recognised on this line, not the
+        // first bracket pair that looks like one: `[\t]` is a marker too, and
+        // the task text may contain `[ ]`.
+        let line_end = line_start + line.len();
+        let marker =
+            pulldown_cmark::Parser::new_ext(&text, pulldown_cmark::Options::ENABLE_TASKLISTS)
+                .into_offset_iter()
+                .find_map(|(event, range)| {
+                    (matches!(event, pulldown_cmark::Event::TaskListMarker(_))
+                        && range.start >= line_start
+                        && range.end <= line_end)
+                        .then_some(range)
+                })
+                .filter(|range| {
+                    text[range.clone()].starts_with('[') && text[range.clone()].ends_with(']')
+                })
+                .ok_or_else(|| crate::Error::TaskEdit("Нет флажка задачи".into()))?;
+        text.replace_range(
+            marker.start + 1..marker.end - 1,
+            if completed { "x" } else { " " },
+        );
+        if notes {
+            self.save_notes(&text, task.revision)
+        } else {
+            self.save_enhanced(&text, task.revision)
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mixed_document_markers_change_only_their_source_byte() {
+        let now = chrono::Utc::now();
+        for text in [
+            "> - [ ] ![Скриншот](attachments/a.png)\n> - [ ] Проверить",
+            "- [ ] Родитель\r\n  - [x] Вложенная 🦀\r\n\r\n1. [ ] Проверить [ ] текст\r\n",
+            "- [ ] Повтор\n- [ ] Повтор\n\n> - [X] Ёжик\n\n```md\n- [ ] Код\n```\n",
+            "~~~\n- [ ] Код\n\n- [x] Ещё код\n~~~\n\n* [ ] ![图](attachments/b.png)\n",
+            // A tab is a valid unchecked marker; the text has its own `[ ]`.
+            "- [\t] Проверить [ ] текст\n",
+        ] {
+            for notes in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let library = crate::Library::open(root.path()).unwrap();
+                let meeting = library
+                    .create_meeting(crate::MeetingMeta::new("Задачи", now))
+                    .unwrap();
+                let lines = parse_task_lines(text, now.date_naive());
+                assert!(!lines.is_empty());
+                assert!(lines.iter().all(|line| !line.task.text.contains("Код")));
+                for source in &lines {
+                    let loaded = if notes {
+                        meeting.write_notes(text).unwrap();
+                        meeting.load_notes().unwrap()
+                    } else {
+                        meeting.write_enhanced(text).unwrap();
+                        meeting.load_enhanced().unwrap()
+                    };
+                    let mut task = source.task.clone();
+                    task.path = meeting.path().into();
+                    task.revision = loaded.revision;
+                    meeting
+                        .toggle_task_source(&task, !task.completed, notes)
+                        .unwrap();
+                    let mut expected = text.to_owned();
+                    let offset: usize = text
+                        .split_inclusive('\n')
+                        .take(task.line - 1)
+                        .map(str::len)
+                        .sum();
+                    let marker = offset + source.marker.start + 1;
+                    expected
+                        .replace_range(marker..marker + 1, if task.completed { " " } else { "x" });
+                    let actual = if notes {
+                        meeting.load_notes()
+                    } else {
+                        meeting.load_enhanced()
+                    }
+                    .unwrap();
+                    assert_eq!(actual.value, expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn stale_document_toggle_never_writes_or_creates_a_conflict_copy() {
+        let root = tempfile::tempdir().unwrap();
+        let library = crate::Library::open(root.path()).unwrap();
+        let now = chrono::Utc::now();
+        let meeting = library
+            .create_meeting(crate::MeetingMeta::new("Задачи", now))
+            .unwrap();
+        meeting
+            .write_enhanced("- [ ] Проверить\nДо правки")
+            .unwrap();
+        let loaded = meeting.load_enhanced().unwrap();
+        let mut task = parse_tasks(&loaded.value, now.date_naive()).remove(0);
+        task.path = meeting.path().into();
+        task.revision = loaded.revision;
+        let changed = "- [ ] Проверить\nПосле правки";
+        meeting.write_enhanced(changed).unwrap();
+        let before: Vec<_> = std::fs::read_dir(meeting.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        let error = meeting.toggle_task_source(&task, true, false).unwrap_err();
+        assert!(error.to_string().contains("Документ изменился"));
+        assert_eq!(meeting.load_enhanced().unwrap().value, changed);
+        let after: Vec<_> = std::fs::read_dir(meeting.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn atomic_document_toggle_keeps_body_markers_and_checks_each_source_revision() {
+        for notes in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let library = crate::Library::open(root.path()).unwrap();
+            let now = chrono::Utc::now();
+            let meeting = library
+                .create_meeting(crate::MeetingMeta::new("Задачи", now))
+                .unwrap();
+            let original = "- [x] Проверить [ ] в тексте\nДругая строка\n";
+            let loaded = if notes {
+                meeting.write_notes(original).unwrap();
+                meeting.load_notes().unwrap()
+            } else {
+                meeting.write_enhanced(original).unwrap();
+                meeting.load_enhanced().unwrap()
+            };
+            let mut task = parse_tasks(&loaded.value, now.date_naive()).remove(0);
+            task.path = meeting.path().into();
+            task.revision = loaded.revision;
+            meeting.toggle_task_source(&task, false, notes).unwrap();
+            let actual = if notes {
+                meeting.read_notes().unwrap()
+            } else {
+                meeting.read_enhanced().unwrap()
+            };
+            assert_eq!(actual, "- [ ] Проверить [ ] в тексте\nДругая строка\n");
+            task.source = actual.lines().next().unwrap().into();
+            assert!(meeting.toggle_task_source(&task, true, notes).is_err());
+            assert_eq!(
+                if notes {
+                    meeting.read_notes().unwrap()
+                } else {
+                    meeting.read_enhanced().unwrap()
+                },
+                actual
+            );
+            assert!(
+                if notes {
+                    meeting.read_enhanced().unwrap()
+                } else {
+                    meeting.read_notes().unwrap()
+                }
+                .is_empty()
+            );
+        }
+    }
     #[test]
     fn marked_labels_missing_fields_and_unicode_separators() {
         let date = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
@@ -351,7 +537,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             meeting.toggle_task(&task, true),
-            Err(crate::Error::Conflict { .. })
+            Err(crate::Error::TaskEdit(message)) if message.contains("Документ изменился")
         ));
         assert!(meeting.read_enhanced().unwrap().contains("[ ] Дело"));
         lib.reindex_incremental().unwrap();

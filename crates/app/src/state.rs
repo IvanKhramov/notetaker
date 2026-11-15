@@ -260,6 +260,7 @@ pub struct Document {
     pub changed_at: Instant,
     pub generation: Option<String>,
     pub template: String,
+    pub template_pending: bool,
     pub summary_status: Option<SummaryStatus>,
 }
 impl Document {
@@ -280,6 +281,7 @@ impl Document {
             changed_at: Instant::now(),
             generation: None,
             template,
+            template_pending: false,
             summary_status: None,
         }
     }
@@ -908,8 +910,19 @@ impl AppState {
             root: self.settings.library.clone(),
         });
     }
+    pub fn can_toggle_tasks(&self) -> bool {
+        !self.unsaved() && !self.tasks_busy && self.enhancing.is_none() && !self.recording.busy()
+    }
     pub fn toggle_task(&mut self, task: notetaker_core::Task, completed: bool) {
-        if self.unsaved() || self.tasks_busy || self.enhancing.is_some() || self.recording.busy() {
+        self.toggle_document_task(task, completed, false);
+    }
+    pub fn toggle_document_task(
+        &mut self,
+        task: notetaker_core::Task,
+        completed: bool,
+        notes: bool,
+    ) {
+        if !self.can_toggle_tasks() {
             return;
         }
         let meeting = notetaker_core::Library::open(&self.settings.library)
@@ -924,6 +937,7 @@ impl AppState {
         self.tasks_busy = true;
         self.send(Command::ToggleTask {
             meeting,
+            notes,
             task,
             completed,
         });
@@ -1262,6 +1276,7 @@ impl AppState {
         self.skipped_summaries.remove(&path);
         self.generation_is_cli = provider.kind.is_cli();
         self.generation_cancel = notetaker_llm::Cancellation::default();
+        document.template_pending = false;
         document.generation = Some(String::new());
         let command = Command::Enhance {
             meeting: document.data.meeting.clone(),
@@ -1657,15 +1672,29 @@ impl AppState {
                 match result {
                     Ok(data) => {
                         if let Some(document) = self.documents.get_mut(&path) {
+                            if !document.dirty.notes && !document.saving {
+                                document.data.notes = data.notes;
+                                document.data.revisions.notes = data.revisions.notes;
+                            }
                             if !document.dirty.enhanced && !document.saving {
                                 document.data.enhanced = data.enhanced;
                                 document.data.revisions.enhanced = data.revisions.enhanced;
                             }
+                            document.changed();
                         } else {
                             self.documents.insert(path, Document::new(*data));
                         }
                     }
-                    Err(error) => self.error = Some(error),
+                    Err(error) => {
+                        self.error = Some(error);
+                        if let Some(document) = self.documents.get(&path)
+                            && !document.saving
+                            && !document.dirty.any()
+                            && self.loading.insert(path)
+                        {
+                            self.send(Command::Load(document.data.meeting.clone()));
+                        }
+                    }
                 }
                 self.refresh_tasks();
             }
@@ -1831,9 +1860,14 @@ impl AppState {
                 self.loading.remove(&path);
                 match result {
                     Ok(data) => {
-                        self.documents
-                            .entry(path)
-                            .or_insert_with(|| Document::new(data));
+                        if let Some(document) = self.documents.get_mut(&path) {
+                            if !document.saving && !document.dirty.any() {
+                                document.data = data;
+                                document.changed();
+                            }
+                        } else {
+                            self.documents.insert(path, Document::new(data));
+                        }
                     }
                     Err(error) => self.error = Some(error),
                 }
