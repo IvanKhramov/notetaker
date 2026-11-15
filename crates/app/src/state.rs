@@ -382,9 +382,11 @@ pub struct AppState {
     pub calendar_reminder: Option<(String, chrono::DateTime<chrono::Utc>)>,
     reminded_events: HashSet<(String, chrono::DateTime<chrono::Utc>)>,
     pub calendar_events: Vec<notetaker_core::calendar::CalendarEvent>,
+    pub calendar_revision: u64,
     pub calendar_secrets: HashMap<String, String>,
     pub calendar_busy: bool,
-    pub calendar_status: String,
+    pub calendar_reports: Vec<notetaker_llm::calendar::SubscriptionStatus>,
+    pub calendar_error: Option<String>,
     pub calendar_checked: Option<Instant>,
     calendar_generation: u64,
     prefilled_title: Option<String>,
@@ -487,9 +489,11 @@ impl AppState {
             calendar_reminder: None,
             reminded_events: HashSet::new(),
             calendar_events: Vec::new(),
+            calendar_revision: 0,
             calendar_secrets: HashMap::new(),
             calendar_busy: false,
-            calendar_status: String::new(),
+            calendar_reports: Vec::new(),
+            calendar_error: None,
             calendar_checked: None,
             calendar_generation: 0,
             prefilled_title: None,
@@ -1268,6 +1272,19 @@ impl AppState {
             self.flush();
         }
     }
+    fn rebuild_calendar_events(&mut self) {
+        let mut events: Vec<_> = self
+            .calendar_reports
+            .iter()
+            .flat_map(|r| r.events.iter().cloned())
+            .collect();
+        events.sort_by_key(|event| (event.start, event.link.uid.clone()));
+        events.dedup_by(|a, b| a.start == b.start && a.link.uid == b.link.uid);
+        if events != self.calendar_events {
+            self.calendar_events = events;
+            self.calendar_revision = self.calendar_revision.wrapping_add(1);
+        }
+    }
     pub fn refresh_calendar(&mut self) {
         if self.calendar_busy {
             return;
@@ -1965,15 +1982,27 @@ impl AppState {
                 if generation == self.calendar_generation {
                     self.calendar_busy = false;
                     match result {
-                        Ok(events) => {
-                            self.quickstart.calendar_error = None;
-                            self.calendar_status = format!("Событий: {}", events.len());
-                            self.calendar_events = events;
+                        Ok(mut reports) => {
+                            self.calendar_error = None;
+                            for report in &mut reports {
+                                if report.error.is_some()
+                                    && let Some(old) =
+                                        self.calendar_reports.iter().find(|old| old.id == report.id)
+                                {
+                                    report.events = old.events.clone();
+                                    report.updated_at = old.updated_at;
+                                    report.skipped = old.skipped.clone();
+                                }
+                            }
+                            self.quickstart.calendar_error =
+                                reports.iter().find_map(|report| report.error.clone());
+                            self.calendar_reports = reports;
+                            self.rebuild_calendar_events();
                             self.update_calendar_reminder(chrono::Utc::now());
                         }
                         Err(error) => {
                             self.quickstart.calendar_error = Some(error.clone());
-                            self.calendar_status = error;
+                            self.calendar_error = Some(error);
                         }
                     }
                 }
@@ -2559,17 +2588,39 @@ impl AppState {
                             self.quickstart.retry_at = None;
                             self.semantic_ready = false;
                         }
+                        let timezone_changed =
+                            self.settings.calendar_timezone != settings.calendar_timezone;
+                        let changed_secrets: std::collections::BTreeSet<_> =
+                            self.settings_secrets_sent.keys().cloned().collect();
                         let calendar_changed = self.settings.calendars != settings.calendars
-                            || self.settings.calendar_timezone != settings.calendar_timezone
-                            || !self.calendar_secrets.is_empty();
+                            || timezone_changed
+                            || !changed_secrets.is_empty();
                         self.calendar_secrets
                             .retain(|id, value| self.settings_secrets_sent.get(id) != Some(value));
                         self.settings_secrets_sent.clear();
                         if calendar_changed {
                             self.quickstart.calendar_error = None;
-                            self.calendar_events.clear();
-                            self.calendar_reminder = None;
-                            self.reminded_events.clear();
+                            self.calendar_reports.retain(|report| {
+                                !timezone_changed
+                                    && !changed_secrets.contains(&report.id)
+                                    && settings.calendars.iter().any(|s| s.id == report.id)
+                                    && self.settings.calendars.iter().any(|s| s.id == report.id)
+                            });
+                            self.rebuild_calendar_events();
+                            self.calendar_error = None;
+                            let present = |key: &(String, chrono::DateTime<chrono::Utc>)| {
+                                self.calendar_events
+                                    .iter()
+                                    .any(|e| e.link.uid == key.0 && e.start == key.1)
+                            };
+                            if self
+                                .calendar_reminder
+                                .as_ref()
+                                .is_some_and(|key| !present(key))
+                            {
+                                self.calendar_reminder = None;
+                            }
+                            self.reminded_events.retain(present);
                             self.calendar_busy = false;
                             self.calendar_generation += 1;
                             self.calendar_checked = None;
@@ -4977,11 +5028,15 @@ mod calendar_tests {
             }
             state.apply(Event::Calendar {
                 generation: state.calendar_generation,
-                result: Ok(if change == "cancelled" {
-                    vec![]
-                } else {
-                    vec![event]
-                }),
+                result: Ok(vec![notetaker_llm::calendar::SubscriptionStatus {
+                    id: "calendar-test".into(),
+                    events: if change == "cancelled" {
+                        vec![]
+                    } else {
+                        vec![event]
+                    },
+                    ..Default::default()
+                }]),
             });
             if change == "link" {
                 assert_eq!(state.calendar_reminder, key);
@@ -5035,5 +5090,147 @@ mod calendar_tests {
             commands.try_recv().unwrap(),
             Command::Calendar { .. }
         ));
+    }
+}
+
+#[cfg(test)]
+mod calendar_feed_status_tests {
+    use super::*;
+    #[test]
+    fn failed_feed_keeps_its_snapshot_other_feeds_update_and_refresh_stays_enabled() {
+        let (mut state, _, _) = crate::test_ui::state();
+        let now = chrono::Utc::now();
+        let make = |id: &str| notetaker_core::calendar::CalendarEvent {
+            link: notetaker_core::calendar::EventLink {
+                uid: id.into(),
+                title: "Рабочая встреча".into(),
+                attendees: vec![],
+                call_url: None,
+            },
+            start: now,
+            end: now + chrono::Duration::hours(1),
+            all_day: false,
+            organizer: None,
+        };
+        state.apply(Event::Calendar {
+            generation: state.calendar_generation,
+            result: Ok(vec![notetaker_llm::calendar::SubscriptionStatus {
+                id: "calendar-a".into(),
+                events: vec![make("a")],
+                updated_at: Some(now),
+                ..Default::default()
+            }]),
+        });
+        state.calendar_busy = true;
+        state.apply(Event::Calendar {
+            generation: state.calendar_generation,
+            result: Ok(vec![
+                notetaker_llm::calendar::SubscriptionStatus {
+                    id: "calendar-a".into(),
+                    error: Some("Ошибка загрузки календаря".into()),
+                    ..Default::default()
+                },
+                notetaker_llm::calendar::SubscriptionStatus {
+                    id: "calendar-b".into(),
+                    events: vec![make("b")],
+                    updated_at: Some(now),
+                    ..Default::default()
+                },
+            ]),
+        });
+        assert_eq!(state.calendar_events.len(), 2);
+        assert!(state.calendar_reports[0].error.is_some());
+        assert_eq!(state.calendar_reports[0].updated_at, Some(now));
+        assert!(crate::calendar_ui::refresh_enabled(
+            true,
+            state.calendar_busy
+        ));
+        state.calendar_busy = true;
+        state.apply(Event::Calendar {
+            generation: state.calendar_generation,
+            result: Err("Ошибка подключения".into()),
+        });
+        assert!(state.calendar_error.is_some());
+        assert_eq!(state.calendar_events.len(), 2);
+        assert!(crate::calendar_ui::refresh_enabled(
+            true,
+            state.calendar_busy
+        ));
+    }
+}
+
+#[cfg(test)]
+mod calendar_settings_retention_tests {
+    use super::*;
+    use notetaker_llm::calendar::{Subscription, SubscriptionStatus};
+    #[test]
+    fn deleting_a_offline_keeps_b_snapshot_and_name_edits_keep_its_source() {
+        let (mut state, _, _) = crate::test_ui::state();
+        let now = chrono::Utc::now();
+        state.settings.calendars = ["a", "b"]
+            .map(|id| Subscription {
+                id: format!("calendar-{id}"),
+                name: id.into(),
+            })
+            .into();
+        let statuses: Vec<_> = ["a", "b"]
+            .into_iter()
+            .map(|id| SubscriptionStatus {
+                id: format!("calendar-{id}"),
+                updated_at: Some(now),
+                events: vec![notetaker_core::calendar::CalendarEvent {
+                    link: notetaker_core::calendar::EventLink {
+                        uid: id.into(),
+                        title: "Рабочая встреча".into(),
+                        attendees: vec![],
+                        call_url: None,
+                    },
+                    start: now,
+                    end: now + chrono::Duration::hours(1),
+                    all_day: false,
+                    organizer: None,
+                }],
+                ..Default::default()
+            })
+            .collect();
+        state.apply(Event::Calendar {
+            generation: state.calendar_generation,
+            result: Ok(statuses),
+        });
+        let b = state
+            .calendar_events
+            .iter()
+            .find(|e| e.link.uid == "b")
+            .unwrap()
+            .clone();
+        let mut settings = state.settings.clone();
+        settings.calendars.remove(0);
+        settings.calendars[0].name = "Новое название".into();
+        let llm = state.llm.clone();
+        state.apply(Event::SettingsSaved(Ok((settings, llm)), false));
+        assert_eq!(state.calendar_events, vec![b.clone()]);
+        assert_eq!(state.calendar_reports.len(), 1);
+        assert_eq!(state.calendar_reports[0].updated_at, Some(now));
+        state.apply(Event::Calendar {
+            generation: state.calendar_generation,
+            result: Ok(vec![SubscriptionStatus {
+                id: "calendar-b".into(),
+                error: Some("Нет сети".into()),
+                ..Default::default()
+            }]),
+        });
+        assert_eq!(state.calendar_events, vec![b]);
+        assert_eq!(state.calendar_reports[0].updated_at, Some(now));
+        assert!(state.calendar_reports[0].error.is_some());
+        // Replacing the saved URL under the same credential id changes the source.
+        state.settings_secrets_sent.insert(
+            "calendar-b".into(),
+            "https://calendar.example.invalid/private.ics".into(),
+        );
+        let settings = state.settings.clone();
+        let llm = state.llm.clone();
+        state.apply(Event::SettingsSaved(Ok((settings, llm)), false));
+        assert!(state.calendar_reports.is_empty());
+        assert!(state.calendar_events.is_empty());
     }
 }

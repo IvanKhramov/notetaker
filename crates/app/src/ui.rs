@@ -96,7 +96,6 @@ fn meeting_audio_status(document: &Document, recording: bool) -> String {
 
 enum MeetingEntry {
     Header(String),
-    Upcoming(usize, String),
     Meeting(usize, String),
 }
 enum TaskEntry {
@@ -131,30 +130,7 @@ impl MeetingsCache {
         }
         self.entries.clear();
         self.count = 0;
-        if state.query.is_empty() && state.folder_filter.is_none() {
-            let mut events: Vec<_> = state
-                .calendar_events
-                .iter()
-                .enumerate()
-                .filter(|(_, e)| e.end >= now && e.start <= now + chrono::Duration::hours(12))
-                .collect();
-            events.sort_by_key(|(_, e)| e.start);
-            if !events.is_empty() {
-                self.entries.push(MeetingEntry::Header("Скоро".into()));
-            }
-            for (index, event) in events.into_iter().take(30) {
-                let time = if event.all_day {
-                    "Весь день".into()
-                } else {
-                    event
-                        .start
-                        .with_timezone(&chrono::Local)
-                        .format("%H:%M")
-                        .to_string()
-                };
-                self.entries.push(MeetingEntry::Upcoming(index, time));
-            }
-        }
+
         let today = chrono::Local::now().date_naive();
         let mut previous = None;
         for (index, row) in state.rows.iter().enumerate() {
@@ -199,6 +175,7 @@ pub struct NotetakerApp {
     document_preview: DocumentPreview,
     notes_cache: NotesCache,
     meetings_cache: MeetingsCache,
+    calendar_rows: crate::calendar_ui::HomeRows,
     tasks_cache: TasksCache,
     meeting_layout: MeetingLayout,
     meeting_tasks: Option<(u64, std::path::PathBuf, Vec<usize>)>,
@@ -271,6 +248,7 @@ impl NotetakerApp {
             document_preview: Default::default(),
             notes_cache: Default::default(),
             meetings_cache: Default::default(),
+            calendar_rows: Default::default(),
             tasks_cache: Default::default(),
             meeting_layout: Default::default(),
             meeting_tasks: None,
@@ -518,18 +496,47 @@ impl NotetakerApp {
         }
         let mut select = None;
         let mut start_event = None;
+        let mut calendar_settings = false;
+        let can_record = self.can_record() && cfg!(any(windows, target_os = "macos"));
         self.meetings_cache.sync(&self.state, &self.organization);
         let count = self.meetings_cache.count;
         egui::ScrollArea::vertical()
             .id_salt("meetings")
             .show_viewport(ui, |ui, viewport| {
+                let content_top = ui.cursor().min.y;
+                if !self.state.settings.calendars.is_empty() {
+                    let id = ui.make_persistent_id("calendar-expanded");
+                    let mut expanded = ui.data(|d| d.get_temp::<bool>(id).unwrap_or(false));
+                    let action = crate::calendar_ui::home(
+                        ui,
+                        crate::calendar_ui::Home {
+                            revision: self.state.calendar_revision,
+                            events: &self.state.calendar_events,
+                            reports: &self.state.calendar_reports,
+                            error: self.state.calendar_error.as_deref(),
+                            loading: self.state.calendar_reports.is_empty()
+                                && self.state.calendar_error.is_none(),
+                            now: chrono::Utc::now(),
+                            can_record,
+                        },
+                        &mut expanded,
+                        &mut self.calendar_rows,
+                    );
+                    ui.data_mut(|d| d.insert_temp(id, expanded));
+                    match action {
+                        crate::calendar_ui::HomeAction::Start(event) => start_event = Some(event),
+                        crate::calendar_ui::HomeAction::Settings => calendar_settings = true,
+                        crate::calendar_ui::HomeAction::None => {}
+                    }
+                }
                 ui.spacing_mut().item_spacing.y = 3.0;
                 let origin = ui.cursor().min;
+                let list_viewport = viewport.translate(egui::vec2(0.0, content_top - origin.y));
                 ui.set_min_size(egui::vec2(
                     ui.available_width(),
                     self.meetings_cache.layout.total(),
                 ));
-                for index in self.meetings_cache.layout.visible(viewport) {
+                for index in self.meetings_cache.layout.visible(list_viewport) {
                     let mut row_ui = ui.new_child(egui::UiBuilder::new().id_salt(index).max_rect(
                         egui::Rect::from_min_size(
                             origin + egui::vec2(0.0, self.meetings_cache.layout.offset(index)),
@@ -541,27 +548,6 @@ impl NotetakerApp {
                         MeetingEntry::Header(label) => {
                             ui.add_space(24.0);
                             theme::section_caption(ui, label);
-                        }
-                        MeetingEntry::Upcoming(index, time) => {
-                            let event = &self.state.calendar_events[*index];
-                            let meta = crate::calendar_ui::call_link(event)
-                                .as_deref()
-                                .map_or("", call_platform);
-                            let (_, record) = theme::meeting_row(
-                                ui,
-                                (&event.link.uid, event.start.timestamp()),
-                                time,
-                                &event.link.title,
-                                meta,
-                                Some((
-                                    crate::calendar_ui::action_label(event),
-                                    cfg!(any(windows, target_os = "macos")) && self.can_record(),
-                                )),
-                                false,
-                            );
-                            if record {
-                                start_event = Some(event.clone());
-                            }
                         }
                         MeetingEntry::Meeting(index, time) => {
                             let row = &self.state.rows[*index];
@@ -618,6 +604,10 @@ impl NotetakerApp {
                     ui.spinner();
                 }
             });
+        if calendar_settings {
+            self.show_settings = true;
+            self.settings_panel.section = crate::settings::Section::Calendars;
+        }
         if let Some(event) = start_event {
             self.home = false;
             self.state.start_event(event);
@@ -3111,6 +3101,13 @@ fn open_url(url: String) {
     });
 }
 fn next_state_wake(state: &AppState, now: Instant) -> Option<Duration> {
+    next_state_wake_at(state, now, chrono::Utc::now())
+}
+fn next_state_wake_at(
+    state: &AppState,
+    now: Instant,
+    utc: chrono::DateTime<chrono::Utc>,
+) -> Option<Duration> {
     let mut deadlines = Vec::new();
     if state.recording.busy() || state.quickstart.probe_busy {
         deadlines.push(Duration::from_millis(100));
@@ -3145,7 +3142,12 @@ fn next_state_wake(state: &AppState, now: Instant) -> Option<Duration> {
                 .map(|at| (at + Duration::from_secs(600)).saturating_duration_since(now)),
         );
     }
-    let utc = chrono::Utc::now();
+    if !state.settings.calendars.is_empty()
+        && let Some(midnight) = crate::calendar_ui::next_local_midnight(utc)
+        && let Ok(delay) = (midnight - utc).to_std()
+    {
+        deadlines.push(delay);
+    }
     for event in &state.calendar_events {
         for time in [
             event.start - chrono::Duration::minutes(5),
@@ -3198,20 +3200,6 @@ fn recording_pill(ui: &mut egui::Ui, elapsed: Duration, level: f32) -> (bool, bo
             });
         });
     (background.clicked(), stop)
-}
-
-fn call_platform(url: &str) -> &'static str {
-    if url.contains("zoom.") {
-        "Zoom"
-    } else if url.contains("meet.google.") {
-        "Meet"
-    } else if url.contains("teams.") {
-        "Teams"
-    } else if url.contains("telemost.") {
-        "Телемост"
-    } else {
-        "Звонок"
-    }
 }
 
 pub(crate) fn template_name(root: &std::path::Path, id: &str) -> String {
@@ -6713,5 +6701,37 @@ mod direct_action_tests {
             .collect::<Vec<_>>();
         assert_eq!(sources, vec![(true, 2), (false, 1), (false, 2)]);
         assert_eq!(document_tasks(doc).get(&(false, 1)).unwrap().task.line, 1);
+    }
+}
+
+#[cfg(test)]
+mod calendar_midnight_tests {
+    use super::*;
+    use chrono::TimeZone;
+    #[test]
+    fn configured_calendar_schedules_a_local_midnight_wake() {
+        let (mut state, _, _) = crate::test_ui::state();
+        state.ready = true;
+        state
+            .settings
+            .calendars
+            .push(notetaker_llm::calendar::Subscription {
+                id: "calendar-test".into(),
+                name: "Команда".into(),
+            });
+        let monotonic = Instant::now();
+        state.calendar_checked = Some(monotonic);
+        let before = chrono::Local
+            .with_ymd_and_hms(2026, 11, 15, 23, 59, 0)
+            .earliest()
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let wake = next_state_wake_at(&state, monotonic, before).unwrap();
+        assert_eq!(wake, Duration::from_secs(60));
+        let after = before + chrono::Duration::minutes(2);
+        assert!(
+            next_state_wake_at(&state, monotonic + Duration::from_secs(120), after).unwrap()
+                > Duration::from_secs(60)
+        );
     }
 }

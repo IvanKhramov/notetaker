@@ -94,7 +94,8 @@ impl Panel { pub fn fixture(&mut self,state:&AppState) {
         text = text.replace('let form_key = egui::Id::unique(("speaker-rename-form", meta.id, id));', 'let form_key = egui::Id::unique(("speaker-rename-form", meta.id, id)); if ui.ctx().data(|data|data.get_temp::<bool>(egui::Id::unique("fixture-rename-form")).unwrap_or(false)) {ui.data_mut(|data| {data.insert_temp(form_key,true);data.insert_temp(form_key.with("focus"),true);});}')
         text = text.replace(".close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)", '.open({let show=ui.ctx().data_mut(|data| {let id=egui::Id::unique("fixture-speaker-menu");let show=data.get_temp::<bool>(id).unwrap_or(false);data.insert_temp(id,false);show});show || egui::Popup::is_id_open(ui.ctx(), egui::Popup::menu(anchor).get_id())}).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)')
     if path.stem == "calendar_ui":
-        text = text.replace('theme::disclosure("Где взять ссылку")', 'theme::disclosure("Где взять ссылку").default_open(true)')
+        text = text.replace('theme::disclosure("Пропущенные события")', 'theme::disclosure("Пропущенные события").default_open(true)')
+        text = text.replace('theme::disclosure("Где взять ссылку")', 'theme::disclosure("Где взять ссылку").default_open(!ui.ctx().data(|d|d.get_temp::<bool>(egui::Id::unique("calendar-status-preview")).unwrap_or(false)))')
     if path.stem == "theme":
         text=text.replace('"../assets/',f'"{root / "crates/app/assets"}/')
         text=text.replace('#[path = "icons.rs"]',f'#[path = "{root / "crates/app/src/icons.rs"}"]')
@@ -231,6 +232,29 @@ impl NotetakerApp {
             if let Some(document)=app.state.documents.get_mut(row.meeting.path()) {document.data.meta=row.meta.clone();}
             app.state.calendar_events.clear();app.state.rows.rotate_right(1);
         }
+        if (68..=72).contains(&scene) {
+            app.home=true;
+            let now=chrono::Utc::now();
+            app.state.settings.calendars=vec![notetaker_llm::calendar::Subscription {id:"calendar-visible".into(),name:"Команда".into()}];
+            app.state.settings_draft=app.state.settings.clone();
+            let events:Vec<_>=(0..8).map(|i| {
+                use chrono::TimeZone;
+                let start=if i==0 {now-chrono::Duration::minutes(10)} else if i<4 {now+chrono::Duration::minutes(20*i)} else {
+                    let day=now.with_timezone(&chrono::Local).date_naive().succ_opt().unwrap();
+                    chrono::Local.from_local_datetime(&day.and_hms_opt(10+i as u32,0,0).unwrap()).earliest().unwrap().with_timezone(&chrono::Utc)
+                };
+                notetaker_core::calendar::CalendarEvent {link:notetaker_core::calendar::EventLink {uid:format!("visible-{i}"),title:["Планирование команды","Обзор прототипа","Проверка результатов","Обсуждение задач","Рабочая встреча","Итоги проекта","План следующего этапа","Обзор документации"][i as usize].into(),attendees:vec![],call_url:(i%2==0).then(||"https://zoom.us/neutral".into())},start,end:start+chrono::Duration::minutes(30),all_day:false,organizer:None}
+            }).collect();
+            let skipped=vec![notetaker_core::calendar::SkippedEvent {title:"Почасовой обзор".into(),reason:notetaker_core::calendar::SkipReason::Recurrence},notetaker_core::calendar::SkippedEvent {title:"Повтор по номеру недели".into(),reason:notetaker_core::calendar::SkipReason::Recurrence},notetaker_core::calendar::SkippedEvent {title:"Событие в неизвестной зоне с длинным названием для проверки усечения строки без изменения ширины карточки подписки".repeat(3),reason:notetaker_core::calendar::SkipReason::Timezone}];
+            let error=(scene==70 || scene==72).then(||"Не удалось загрузить календарь. Проверьте сеть и сохранённую подписку.".into());
+            app.state.calendar_reminder=Some((events[0].link.uid.clone(),events[0].start));
+            app.state.dismiss_calendar_reminder();
+            app.state.calendar_events=if scene==69 {vec![]} else {events.clone()};
+            app.state.calendar_reports=vec![notetaker_llm::calendar::SubscriptionStatus {id:"calendar-visible".into(),events:app.state.calendar_events.clone(),skipped:if scene==71 {skipped} else {vec![]},updated_at:Some(if scene==70 || scene==72 {now-chrono::Duration::days(1)} else {now}),error}];
+            app.state.calendar_busy=false;
+            app.state.calendar_checked=Some(Instant::now());
+            if scene==71 || scene==72 {app.show_settings=true;app.settings_panel.section=crate::settings::Section::Calendars;}
+        }
         app
     }
     pub fn fixture_jump_settled(&self) -> bool { self.state.selected.as_ref().and_then(|path| self.state.documents.get(path)).is_none_or(|document| document.speaker_ui.scroll_to.is_none()) }
@@ -253,6 +277,7 @@ impl eframe::App for Preview {
         ui.ctx().input_mut(|input| input.pointer = Default::default());
         ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("fixture-meeting-menu"), self.screen == 15));
         ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("preview-expand-settings"),self.screen==37 || self.screen==38));
+        ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("calendar-status-preview"),self.screen==71 || self.screen==72));
         ui.ctx().data_mut(|data| {data.insert_temp(egui::Id::unique("fixture-speaker-menu"),self.screen==58);data.insert_temp(egui::Id::unique("fixture-rename-form"),self.screen==58);});
         if self.screen==66 && ui.ctx().content_rect().height()<600.0 {
             ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("fixture-recording-settings-offset"),240.0_f32));
@@ -377,7 +402,7 @@ if shutil.disk_usage(root).free < 2 * 1024**3:
 # Resolve the derived harness root against the copied workspace lock before its locked build.
 subprocess.run(["cargo", "metadata", "--offline", "--format-version", "1", "--manifest-path", str(harness / "Cargo.toml")], cwd=root, env=env, check=True, stdout=subprocess.DEVNULL)
 subprocess.run(["cargo", "build", "--locked", "--manifest-path", str(harness / "Cargo.toml")], cwd=root, env=env, check=True)
-names = ["welcome", "name", "connections", "home", "note", "transcript", "general", "recording", "calendars", "ai", "search", "storage", "recording-pill", "connections-expanded", "delete-confirm", "meeting-menu", "toast", "empty-library", "narrow-settings", "recording-bar", "chat", "tasks", "people", "person", "series", "digest", "folders", "diagnostics", "tracker-preview", "new-recording", "rename", "regenerate", "capture-warning", "widgets", "update-card", "folder-delete", "merge-people", "folders-advanced", "ai-expanded", "performance-transcript", "performance-meetings", "performance-live", "chat-meeting-empty", "chat-library-empty", "chat-recipes", "chat-recording", "recording-silence", "recording-final-pass", "recording-ready", "recording-not-ready", "summary-skipped", "calendar-reminder-link", "calendar-reminder-no-link", "calendar-upcoming", "calendar-help", "direct-task-checkboxes", "direct-template-bar", "direct-template-picker", "direct-speaker-menu", "compact-transcript", "compact-summary", "compact-storage", "compact-person", "compact-series", "one-step-bar", "one-step-countdown", "one-step-settings", "one-step-auto-title"]
+names = ["welcome", "name", "connections", "home", "note", "transcript", "general", "recording", "calendars", "ai", "search", "storage", "recording-pill", "connections-expanded", "delete-confirm", "meeting-menu", "toast", "empty-library", "narrow-settings", "recording-bar", "chat", "tasks", "people", "person", "series", "digest", "folders", "diagnostics", "tracker-preview", "new-recording", "rename", "regenerate", "capture-warning", "widgets", "update-card", "folder-delete", "merge-people", "folders-advanced", "ai-expanded", "performance-transcript", "performance-meetings", "performance-live", "chat-meeting-empty", "chat-library-empty", "chat-recipes", "chat-recording", "recording-silence", "recording-final-pass", "recording-ready", "recording-not-ready", "summary-skipped", "calendar-reminder-link", "calendar-reminder-no-link", "calendar-upcoming", "calendar-help", "direct-task-checkboxes", "direct-template-bar", "direct-template-picker", "direct-speaker-menu", "compact-transcript", "compact-summary", "compact-storage", "compact-person", "compact-series", "one-step-bar", "one-step-countdown", "one-step-settings", "one-step-auto-title", "calendar-home-events", "calendar-home-empty", "calendar-home-error", "calendar-settings-status", "calendar-settings-error"]
 def render(spec):
     index, name, theme, width, height, zoom = spec
     actual_width = 760 if name == "narrow-settings" and zoom == 1.0 else width
