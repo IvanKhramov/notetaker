@@ -2586,26 +2586,32 @@ pub fn recording_status(
             14.0,
             ink,
         );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if let Some((done, total)) = progress {
-                let fraction = if total == 0 {
-                    0.0
-                } else {
-                    done as f32 / total as f32
-                };
+        // The text sits next to its icon; the progress bar keeps the right edge.
+        let bar = if progress.is_some() { 80.0 } else { 0.0 };
+        let width = (ui.available_width() - bar).max(0.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(width, 20.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_min_width(width);
                 ui.add(
-                    egui::ProgressBar::new(fraction)
-                        .desired_width(72.0)
-                        .desired_height(3.0),
-                );
-            }
-            ui.add_sized(
-                [ui.available_width(), 20.0],
-                egui::Label::new(egui::RichText::new(text).font(medium(SMALL)).color(ink))
-                    .truncate()
-                    .halign(egui::Align::Min),
-            )
-            .on_hover_text(text);
-        });
+                    egui::Label::new(egui::RichText::new(text).font(medium(SMALL)).color(ink))
+                        .truncate(),
+                )
+                .on_hover_text(text);
+            },
+        );
+        if let Some((done, total)) = progress {
+            let fraction = if total == 0 {
+                0.0
+            } else {
+                done as f32 / total as f32
+            };
+            ui.add(
+                egui::ProgressBar::new(fraction)
+                    .desired_width(72.0)
+                    .desired_height(3.0),
+            );
+        }
     });
 }
