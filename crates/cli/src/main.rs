@@ -3,6 +3,7 @@
 mod cmd_enhance;
 mod cmd_export;
 mod cmd_import;
+mod cmd_ktalk;
 mod cmd_mcp;
 mod cmd_people;
 mod cmd_probe;
@@ -25,6 +26,8 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Синхронизация спикеров с Контур.Толк.
+    Ktalk(cmd_ktalk::Args),
     /// Search meetings by meaning, keywords, or both.
     Search(cmd_search::SearchArgs),
     /// Rebuild the disposable search index.
@@ -68,6 +71,7 @@ fn main() -> anyhow::Result<()> {
         notetaker_core::embedding::set_models_dir(folder);
     }
     match command {
+        Command::Ktalk(args) => cmd_ktalk::run(args),
         Command::Search(args) => cmd_search::search(args),
         Command::Reindex(args) => cmd_search::reindex(args),
         Command::People(args) => cmd_people::people(args),
