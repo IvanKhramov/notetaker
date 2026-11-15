@@ -11,7 +11,7 @@ pub struct Task {
     pub meeting_id: uuid::Uuid,
     pub path: PathBuf,
     pub meeting_title: String,
-    /// One-based line number in enhanced.md.
+    /// One-based source line; the task index uses enhanced.md.
     pub line: usize,
     pub text: String,
     pub owner: String,
@@ -265,12 +265,25 @@ impl Meeting {
     }
 
     pub fn toggle_task(&self, task: &Task, completed: bool) -> Result<Revision> {
+        self.toggle_task_source(task, completed, false)
+    }
+    /// Both document sources use the same revision-checked atomic edit.
+    pub fn toggle_task_source(
+        &self,
+        task: &Task,
+        completed: bool,
+        notes: bool,
+    ) -> Result<Revision> {
         if task.line == 0 || task.path != self.path {
             return Err(crate::Error::TaskEdit(
                 "Задача относится к другой встрече".into(),
             ));
         }
-        let loaded = self.load_enhanced()?;
+        let loaded = if notes {
+            self.load_notes()?
+        } else {
+            self.load_enhanced()?
+        };
         let mut lines: Vec<_> = loaded
             .value
             .split_inclusive('\n')
@@ -284,19 +297,70 @@ impl Meeting {
                 "Задача изменилась. Обновите список".into(),
             ));
         }
-        let offset = line
-            .find("[ ]")
-            .or_else(|| line.find("[x]"))
-            .or_else(|| line.find("[X]"))
+        let offset = ["[ ]", "[x]", "[X]"]
+            .into_iter()
+            .filter_map(|marker| line.find(marker))
+            .min()
             .ok_or_else(|| crate::Error::TaskEdit("Нет флажка задачи".into()))?;
         line.replace_range(offset + 1..offset + 2, if completed { "x" } else { " " });
-        self.save_enhanced(&lines.concat(), task.revision)
+        if notes {
+            self.save_notes(&lines.concat(), task.revision)
+        } else {
+            self.save_enhanced(&lines.concat(), task.revision)
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn atomic_document_toggle_keeps_body_markers_and_checks_each_source_revision() {
+        for notes in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let library = crate::Library::open(root.path()).unwrap();
+            let now = chrono::Utc::now();
+            let meeting = library
+                .create_meeting(crate::MeetingMeta::new("Задачи", now))
+                .unwrap();
+            let original = "- [x] Проверить [ ] в тексте\nДругая строка\n";
+            let loaded = if notes {
+                meeting.write_notes(original).unwrap();
+                meeting.load_notes().unwrap()
+            } else {
+                meeting.write_enhanced(original).unwrap();
+                meeting.load_enhanced().unwrap()
+            };
+            let mut task = parse_tasks(&loaded.value, now.date_naive()).remove(0);
+            task.path = meeting.path().into();
+            task.revision = loaded.revision;
+            meeting.toggle_task_source(&task, false, notes).unwrap();
+            let actual = if notes {
+                meeting.read_notes().unwrap()
+            } else {
+                meeting.read_enhanced().unwrap()
+            };
+            assert_eq!(actual, "- [ ] Проверить [ ] в тексте\nДругая строка\n");
+            task.source = actual.lines().next().unwrap().into();
+            assert!(meeting.toggle_task_source(&task, true, notes).is_err());
+            assert_eq!(
+                if notes {
+                    meeting.read_notes().unwrap()
+                } else {
+                    meeting.read_enhanced().unwrap()
+                },
+                actual
+            );
+            assert!(
+                if notes {
+                    meeting.read_enhanced().unwrap()
+                } else {
+                    meeting.read_notes().unwrap()
+                }
+                .is_empty()
+            );
+        }
+    }
     #[test]
     fn marked_labels_missing_fields_and_unicode_separators() {
         let date = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();

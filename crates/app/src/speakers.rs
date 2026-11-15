@@ -85,112 +85,140 @@ pub fn rename_menu(
     id: &str,
     voices: Option<&notetaker_core::VoiceLibrary>,
     global_allowed: bool,
-    show_actions: bool,
+    anchor: (&egui::Response, bool),
 ) -> Option<SpeakerEdit> {
+    let (anchor, show_actions) = anchor;
     let mut edit = None;
     // Quiet, frameless: a framed 32px button outweighed the speaker name.
     let more = crate::theme::icon_button_visible(
         ui,
         crate::theme::icons::ELLIPSIS,
         "Действия собеседника",
-        show_actions || egui::Popup::is_any_open(ui.ctx()),
+        show_actions
+            || ui.ctx().content_rect().width() < 900.0
+            || egui::Popup::is_any_open(ui.ctx()),
     );
-    egui::Popup::menu(&more).show(|ui| {
-        let name_key = ui.make_persistent_id(("speaker-name", meta.id, id));
-        let all_key = name_key.with("everywhere");
-        let mut name = ui
-            .data_mut(|data| data.get_temp::<String>(name_key))
-            .unwrap_or_else(|| transcript.speaker_name(id).into());
-        let mut everywhere = ui
-            .data_mut(|data| data.get_temp::<bool>(all_key))
-            .unwrap_or(false);
-        if voices.is_some_and(|voices| {
-            transcript.speaker_voice_ids.get(id).is_some_and(|linked| {
-                voices
-                    .voices
-                    .iter()
-                    .any(|voice| voice.id.as_ref() == Some(linked))
-            })
-        }) {
-            ui.add_enabled(
-                global_allowed,
-                crate::theme::Checkbox::new(
-                    &mut everywhere,
-                    "Применить ко всем встречам с этим голосом",
-                ),
-            );
-            if !global_allowed {
-                everywhere = false;
-                ui.weak("Дождитесь сохранения правок");
+    egui::Popup::menu(anchor)
+        .open_memory((anchor.clicked() || more.clicked()).then_some(egui::SetOpenCommand::Toggle))
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            ui.set_width(ui.available_width().min(300.0));
+            let name_key = ui.make_persistent_id(("speaker-name", meta.id, id));
+            let all_key = name_key.with("everywhere");
+            let focus = crate::theme::menu_item(ui, "", "Переименовать", false, false).clicked();
+            if let Some(voice) = transcript.speaker_voice_ids.get(id)
+                && crate::theme::menu_item(ui, "", "Открыть человека", false, false).clicked()
+            {
+                crate::people::request(
+                    ui,
+                    crate::people::Request {
+                        name: transcript.speaker_name(id).into(),
+                        email: String::new(),
+                        voice: Some(voice.clone()),
+                    },
+                );
+                ui.close();
             }
-        } else {
-            everywhere = false;
-        }
-        let mut choose = |ui: &mut egui::Ui, name: String, is_me: bool| {
-            edit = Some(SpeakerEdit::Rename {
-                speaker: id.into(),
-                name,
-                is_me,
-                everywhere,
-            });
-            ui.close();
-        };
-        if let Some(suggestion) = transcript.speaker_suggestions.get(id)
-            && crate::theme::button(
-                ui,
-                &format!("Подтвердить: {suggestion}"),
-                crate::theme::ButtonStyle::Ghost,
-            )
-            .clicked()
-        {
-            choose(ui, suggestion.clone(), false);
-        }
-        if let Some(event) = &meta.calendar_event {
-            for attendee in &event.attendees {
-                if crate::theme::button(ui, attendee.label(), crate::theme::ButtonStyle::Ghost)
-                    .clicked()
-                {
-                    choose(ui, attendee.label().into(), false);
+            let mut name = ui
+                .data_mut(|data| data.get_temp::<String>(name_key))
+                .unwrap_or_else(|| transcript.speaker_name(id).into());
+            let mut everywhere = ui
+                .data_mut(|data| data.get_temp::<bool>(all_key))
+                .unwrap_or(false);
+            if voices.is_some_and(|voices| {
+                transcript.speaker_voice_ids.get(id).is_some_and(|linked| {
+                    voices
+                        .voices
+                        .iter()
+                        .any(|voice| voice.id.as_ref() == Some(linked))
+                })
+            }) {
+                ui.add_enabled(
+                    global_allowed,
+                    crate::theme::Checkbox::new(
+                        &mut everywhere,
+                        "Применить ко всем встречам с этим голосом",
+                    ),
+                );
+                if !global_allowed {
+                    everywhere = false;
+                    ui.weak("Дождитесь сохранения правок");
+                }
+            } else {
+                everywhere = false;
+            }
+            let mut choose = |ui: &mut egui::Ui, name: String, is_me: bool| {
+                edit = Some(SpeakerEdit::Rename {
+                    speaker: id.into(),
+                    name,
+                    is_me,
+                    everywhere,
+                });
+                ui.close();
+            };
+            if let Some(suggestion) = transcript.speaker_suggestions.get(id)
+                && crate::theme::button(
+                    ui,
+                    &format!("Подтвердить: {suggestion}"),
+                    crate::theme::ButtonStyle::Ghost,
+                )
+                .clicked()
+            {
+                choose(ui, suggestion.clone(), false);
+            }
+            if let Some(event) = &meta.calendar_event {
+                for attendee in &event.attendees {
+                    if crate::theme::button(ui, attendee.label(), crate::theme::ButtonStyle::Ghost)
+                        .clicked()
+                    {
+                        choose(ui, attendee.label().into(), false);
+                    }
                 }
             }
-        }
-        ui.add(crate::theme::text_field(&mut name));
-        if ui
-            .add_enabled(
-                !name.trim().is_empty(),
-                crate::theme::styled_button(
-                    crate::theme::Palette::of(ui),
-                    "Назвать",
-                    crate::theme::ButtonStyle::Secondary,
-                ),
-            )
-            .clicked()
-        {
-            choose(ui, name.clone(), false);
-        }
-        if voices.is_some()
-            && crate::theme::button(ui, "Это я", crate::theme::ButtonStyle::Ghost).clicked()
-        {
-            choose(
-                ui,
-                transcript
-                    .speaker_names
-                    .get(id)
-                    .or_else(|| transcript.speaker_suggestions.get(id))
-                    .cloned()
-                    .unwrap_or_else(|| "Я".into()),
-                true,
+            let field = ui.add(
+                crate::theme::text_field(&mut name)
+                    .id(name_key)
+                    .desired_width(ui.available_width()),
             );
-        }
-        if let Some(SpeakerEdit::Rename { name: next, .. }) = &edit {
-            name.clone_from(next);
-            everywhere = false;
-        }
-        ui.data_mut(|data| {
-            data.insert_temp(name_key, name);
-            data.insert_temp(all_key, everywhere);
+            if focus {
+                field.request_focus();
+            }
+            if ui
+                .add_enabled(
+                    !name.trim().is_empty(),
+                    crate::theme::styled_button(
+                        crate::theme::Palette::of(ui),
+                        "Назвать",
+                        crate::theme::ButtonStyle::Secondary,
+                    ),
+                )
+                .clicked()
+            {
+                choose(ui, name.clone(), false);
+            }
+            if voices.is_some()
+                && crate::theme::button(ui, "Это я", crate::theme::ButtonStyle::Ghost).clicked()
+            {
+                choose(
+                    ui,
+                    transcript
+                        .speaker_names
+                        .get(id)
+                        .or_else(|| transcript.speaker_suggestions.get(id))
+                        .cloned()
+                        .unwrap_or_else(|| "Я".into()),
+                    true,
+                );
+            }
+            if let Some(SpeakerEdit::Rename { name: next, .. }) = &edit {
+                name.clone_from(next);
+                everywhere = false;
+            }
+            ui.data_mut(|data| {
+                data.insert_temp(name_key, name);
+                data.insert_temp(all_key, everywhere);
+            });
         });
-    });
     edit
 }
 
@@ -475,5 +503,62 @@ mod tests {
         assert_eq!(state.selected, ids[1..=4].iter().copied().collect());
         state.select(&transcript, 0, false, false);
         assert_eq!(state.selected, BTreeSet::from([ids[0]]));
+    }
+}
+
+#[cfg(test)]
+mod direct_rename_tests {
+    use super::*;
+    #[test]
+    fn name_menu_renames_with_focus_and_only_links_known_voices() {
+        for linked in [false, true] {
+            let ctx = egui::Context::default();
+            crate::theme::install(&ctx);
+            let mut transcript = Transcript::default();
+            transcript
+                .speaker_names
+                .insert("s1".into(), "Алексей".into());
+            if linked {
+                transcript
+                    .speaker_voice_ids
+                    .insert("s1".into(), "voice-1".into());
+            }
+            let meta = MeetingMeta::new("Встреча", chrono::Utc::now());
+            let mut edit = None;
+            let mut draw = |ui: &mut egui::Ui| {
+                let anchor = ui.add(egui::Label::new("Алексей").sense(egui::Sense::click()));
+                if let Some(next) =
+                    rename_menu(ui, &transcript, &meta, "s1", None, true, (&anchor, false))
+                {
+                    edit = Some(next);
+                }
+            };
+            crate::test_ui::click(&ctx, &mut draw, "Алексей");
+            let output = crate::test_ui::frame(&ctx, vec![], &mut draw);
+            crate::test_ui::text_rect(&output.shapes, "Переименовать");
+            let person=output.shapes.iter().any(|s|matches!(&s.shape,egui::epaint::Shape::Text(text) if text.galley.text()=="Открыть человека"));
+            assert_eq!(person, linked);
+            output.drop_without_applying_deltas();
+            crate::test_ui::click(&ctx, &mut draw, "Переименовать");
+            let focus = ctx.memory(|m| m.focused()).expect("rename field focused");
+            assert!(egui::TextEdit::load_state(&ctx, focus).is_some());
+            crate::test_ui::frame(
+                &ctx,
+                vec![
+                    egui::Event::Key {
+                        key: egui::Key::A,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::COMMAND,
+                    },
+                    egui::Event::Text("Новое имя".into()),
+                ],
+                &mut draw,
+            )
+            .drop_without_applying_deltas();
+            crate::test_ui::click(&ctx, &mut draw, "Назвать");
+            assert!(matches!(edit,Some(SpeakerEdit::Rename {name,..}) if name=="Новое имя"));
+        }
     }
 }

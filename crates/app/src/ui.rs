@@ -887,10 +887,7 @@ impl NotetakerApp {
             ui.label("Укажите «Как вас зовут» в настройках");
         }
         self.sync_tasks_cache();
-        let can_toggle = !self.state.tasks_busy
-            && !self.state.unsaved()
-            && !self.state.recording.busy()
-            && self.state.enhancing.is_none();
+        let can_toggle = self.state.can_toggle_tasks();
         let mut send_task = None;
         let mut toggle = None;
         let mut open = None;
@@ -1102,6 +1099,17 @@ impl NotetakerApp {
             return;
         };
         let skipped_summary = self.state.skipped_summary_notice(&path);
+        let can_toggle_tasks = self.state.can_toggle_tasks();
+        let readiness = self.state.documents.get(&path).map(|doc| {
+            crate::state::summary_provider(
+                self.state.llm_configured,
+                &self.state.llm,
+                doc.data.meta.mode,
+            )
+            .map(|_| ())
+            .map_err(|e| format!("{e:#}"))
+        });
+
         let mut open_ai = false;
         let can_enhance = self.state.enhancing.is_none()
             && !self.state.recording.busy()
@@ -1143,6 +1151,8 @@ impl NotetakerApp {
             ui.spinner();
             return;
         };
+        let previous_template = document.template.clone();
+        let mut document_toggle = None;
         let mut enhance = false;
         let mut retranscribe = false;
         let mut export = None;
@@ -1419,6 +1429,9 @@ impl NotetakerApp {
             .as_ref()
             .map(|e| e.attendees.len())
             .unwrap_or(timeline.timeline.speakers.len());
+        if document.template != previous_template {
+            document.template_pending = !document.data.enhanced.trim().is_empty();
+        }
         ui.horizontal_wrapped(|ui| {
             ui.label(
                 RichText::new(theme::icons::CALENDAR)
@@ -1450,15 +1463,66 @@ impl NotetakerApp {
             self.organization.meeting(ui, &mut self.state);
         });
         ui.add_space(if compact { 4.0 } else { 16.0 });
-        theme::segmented(
-            ui,
-            &mut self.state.tab,
-            &[
-                (Tab::Enhanced, "Конспект"),
-                (Tab::Transcript, "Транскрипт"),
-                (Tab::Notes, "Заметки"),
-            ],
-        );
+        let Some(document) = self.state.documents.get_mut(&path) else {
+            return;
+        };
+        let previous_template = document.template.clone();
+        ui.horizontal_wrapped(|ui| {
+            theme::segmented(
+                ui,
+                &mut self.state.tab,
+                &[
+                    (Tab::Enhanced, "Конспект"),
+                    (Tab::Transcript, "Транскрипт"),
+                    (Tab::Notes, "Заметки"),
+                ],
+            );
+            if self.state.tab == Tab::Enhanced {
+                ui.add_enabled_ui(can_enhance, |ui| {
+                    theme::select("document-template")
+                        .width(160.0)
+                        .selected_text(format!("Шаблон: {}", document.template))
+                        .show_ui(ui, |ui| {
+                            for name in &self.state.templates {
+                                theme::select_value(ui, &mut document.template, name.clone(), name);
+                            }
+                        });
+                });
+            }
+        });
+        if document.template != previous_template {
+            document.template_pending = !document.data.enhanced.trim().is_empty();
+        }
+        if self.state.tab == Tab::Enhanced
+            && document.template_pending
+            && document.generation.is_none()
+        {
+            theme::callout(ui, theme::icons::FILE_TEXT, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(format!("Шаблон: {}", document.template));
+                    match readiness.as_ref().expect("open document") {
+                        Ok(()) => {
+                            enhance |= ui
+                                .add_enabled(
+                                    can_enhance,
+                                    theme::styled_button(
+                                        Palette::of(ui),
+                                        "Пересоздать конспект",
+                                        ButtonStyle::Primary,
+                                    ),
+                                )
+                                .clicked();
+                        }
+                        Err(reason) => {
+                            ui.weak(reason);
+                        }
+                    }
+                    if theme::button(ui, "Не сейчас", ButtonStyle::Ghost).clicked() {
+                        document.template_pending = false;
+                    }
+                });
+            });
+        }
         if let Some(item) = pin_toggle {
             let mut list = pinned;
             if let Some(index) = list.iter().position(|a| *a == item) {
@@ -1659,13 +1723,16 @@ impl NotetakerApp {
                     .clicked();
                 ui.add_space(12.0);
             }
-            images = notes_editor(
+            let (attached, toggle) = notes_editor(
                 ui,
                 document,
                 &mut self.notes_cache,
                 &path,
                 &mut self.image_viewer,
+                can_toggle_tasks,
             );
+            images = attached;
+            document_toggle = toggle.map(|(line, completed)| (true, line, completed));
         } else if !self.enhanced_preview && document.generation.is_none() {
             if crate::theme::button(ui, "Готово", crate::theme::ButtonStyle::Ghost).clicked()
             {
@@ -1725,14 +1792,23 @@ impl NotetakerApp {
                 });
         } else {
             self.document_preview.prepare(document, &path);
-            ui.push_id(&path, |ui| {
-                enhanced_document(
-                    ui,
-                    &mut self.cache,
-                    &mut self.document_preview,
-                    &mut self.image_viewer,
-                )
-            });
+            document_toggle = ui
+                .push_id(&path, |ui| {
+                    enhanced_document(
+                        ui,
+                        &mut self.cache,
+                        &mut self.document_preview,
+                        &mut self.image_viewer,
+                        can_toggle_tasks,
+                    )
+                })
+                .inner;
+        }
+        let task_toggle = document_toggle.and_then(|(notes, line, completed)| {
+            document_task(document, notes, line).map(|task| (task, completed, notes))
+        });
+        if let Some((task, completed, notes)) = task_toggle {
+            self.state.toggle_document_task(task, completed, notes);
         }
 
         if let Some(count) = rediarize {
@@ -2794,13 +2870,19 @@ fn call_platform(url: &str) -> &'static str {
 }
 
 fn note_line_key(line: &str) -> &str {
-    line.trim()
-        .trim_start_matches(['#', '-', '*', '+', '>', ' '])
+    let line = line
         .trim()
+        .trim_start_matches(['#', '-', '*', '+', '>', ' '])
+        .trim();
+    line.strip_prefix("[ ] ")
+        .or_else(|| line.strip_prefix("[x] "))
+        .or_else(|| line.strip_prefix("[X] "))
+        .unwrap_or(line)
 }
 
 /// Only exact source lines are attributed to the author. Paraphrases remain AI text.
-fn document_runs(notes: &str, enhanced: &str) -> Vec<(bool, String)> {
+type DocumentRun = (bool, String, Vec<Option<(bool, usize)>>);
+fn document_runs(notes: &str, enhanced: &str) -> Vec<DocumentRun> {
     let originals: std::collections::BTreeSet<_> = notes
         .lines()
         .map(note_line_key)
@@ -2808,26 +2890,56 @@ fn document_runs(notes: &str, enhanced: &str) -> Vec<(bool, String)> {
         .collect();
     let enhanced_lines: std::collections::BTreeSet<_> =
         enhanced.lines().map(note_line_key).collect();
-    let missing = notes
+    let missing: Vec<_> = notes
         .lines()
-        .filter(|line| !enhanced_lines.contains(note_line_key(line)))
+        .enumerate()
+        .filter(|(_, line)| !enhanced_lines.contains(note_line_key(line)))
+        .collect();
+    let missing_text = missing
+        .iter()
+        .map(|(_, line)| *line)
         .collect::<Vec<_>>()
         .join("\n");
-    let mut runs = Vec::new();
-    if !missing.trim().is_empty() {
-        runs.push((true, format!("{missing}\n\n")));
+    let mut runs: Vec<DocumentRun> = Vec::new();
+    if !missing_text.trim().is_empty() {
+        let mut sources: Vec<_> = missing
+            .iter()
+            .map(|(index, _)| Some((true, index + 1)))
+            .collect();
+        sources.push(None);
+        runs.push((true, format!("{missing_text}\n\n"), sources));
     }
-    for line in enhanced.split_inclusive('\n') {
+    for (index, line) in enhanced.split_inclusive('\n').enumerate() {
         let own = originals.contains(note_line_key(line));
-        if let Some((last_own, text)) = runs.last_mut()
+        if let Some((last_own, text, sources)) = runs.last_mut()
             && *last_own == own
         {
             text.push_str(line);
+            sources.push(Some((false, index + 1)));
         } else {
-            runs.push((own, line.to_owned()));
+            runs.push((own, line.into(), vec![Some((false, index + 1))]));
         }
     }
     runs
+}
+fn document_task(document: &Document, notes: bool, line: usize) -> Option<notetaker_core::Task> {
+    let text = if notes {
+        &document.data.notes
+    } else {
+        &document.data.enhanced
+    };
+    let mut task = notetaker_core::parse_tasks(text, document.data.meta.started_at.date_naive())
+        .into_iter()
+        .find(|task| task.line == line)?;
+    task.path = document.data.meeting.path().into();
+    task.meeting_id = document.data.meta.id;
+    task.meeting_title = document.data.meta.title.clone();
+    task.revision = if notes {
+        document.data.revisions.notes
+    } else {
+        document.data.revisions.enhanced
+    };
+    Some(task)
 }
 
 #[derive(Default)]
@@ -2844,6 +2956,7 @@ struct DocumentPreview {
 }
 struct DocumentBlock {
     own: bool,
+    source: Option<(bool, usize)>,
     kind: DocumentBlockKind,
 }
 enum DocumentBlockKind {
@@ -2871,12 +2984,17 @@ impl DocumentPreview {
         );
         let lines: Vec<_> = runs
             .iter()
-            .flat_map(|(own, text)| text.lines().map(move |line| (*own, line)))
+            .flat_map(|(own, text, sources)| {
+                assert_eq!(text.lines().count(), sources.len());
+                text.lines()
+                    .zip(sources)
+                    .map(move |(line, source)| (*own, line, *source))
+            })
             .collect();
         self.blocks.clear();
         let mut index = 0;
         while index < lines.len() {
-            let (own, line) = lines[index];
+            let (own, line, source) = lines[index];
             if line.trim().is_empty() {
                 index += 1;
                 continue;
@@ -2884,16 +3002,18 @@ impl DocumentPreview {
             if let Some((level, title)) = note_heading(line) {
                 self.blocks.push(DocumentBlock {
                     own,
+                    source,
                     kind: DocumentBlockKind::Heading(level, title.into()),
                 });
                 index += 1;
             } else if let Some((_, task, body)) = note_item(line)
                 && lines
                     .get(index + 1)
-                    .is_none_or(|(_, next)| !next.starts_with([' ', '\t']))
+                    .is_none_or(|(_, next, _)| !next.starts_with([' ', '\t']))
             {
                 self.blocks.push(DocumentBlock {
                     own,
+                    source,
                     kind: DocumentBlockKind::Item(task, PreparedMarkdown::new(body, path)),
                 });
                 index += 1;
@@ -2919,12 +3039,21 @@ impl DocumentPreview {
                 for run in lines[start..index].chunk_by(|a, b| a.0 == b.0) {
                     let text = run
                         .iter()
-                        .map(|(_, line)| *line)
+                        .map(|(_, line, _)| *line)
                         .collect::<Vec<_>>()
                         .join("\n");
+                    let mut markdown = PreparedMarkdown::new(&text, path);
+                    markdown.task_sources = notetaker_core::parse_tasks(
+                        &text,
+                        document.data.meta.started_at.date_naive(),
+                    )
+                    .iter()
+                    .map(|task| run[task.line - 1].2.expect("task source line"))
+                    .collect();
                     self.blocks.push(DocumentBlock {
                         own: run[0].0,
-                        kind: DocumentBlockKind::Markdown(PreparedMarkdown::new(&text, path)),
+                        source: None,
+                        kind: DocumentBlockKind::Markdown(markdown),
                     });
                 }
             }
@@ -2938,7 +3067,9 @@ fn enhanced_document(
     cache: &mut CommonMarkCache,
     prepared: &mut DocumentPreview,
     viewer: &mut Option<String>,
-) {
+    can_toggle: bool,
+) -> Option<(bool, usize, bool)> {
+    let mut toggle = None;
     let p = Palette::of(ui);
     prepared.layout.sync(
         prepared.revision,
@@ -2988,14 +3119,34 @@ fn enhanced_document(
                     }
                     DocumentBlockKind::Item(task, markdown) => {
                         ui.horizontal_top(|ui| {
-                            let (rect, _) = ui
-                                .allocate_exact_size(egui::vec2(14.0, 22.0), egui::Sense::hover());
-                            note_marker(ui.painter(), rect.center(), *task, ink);
-                            markdown_preview(ui, cache, markdown, viewer);
+                            if let (Some(completed), Some((notes, line))) = (task, block.source) {
+                                let mut completed = *completed;
+                                let response = ui.add_enabled(
+                                    can_toggle,
+                                    theme::Checkbox::without_text(&mut completed),
+                                );
+                                if response.clicked() {
+                                    response.request_focus();
+                                }
+                                if response.changed() {
+                                    toggle = Some((notes, line, completed));
+                                }
+                            } else {
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(14.0, 22.0),
+                                    egui::Sense::hover(),
+                                );
+                                note_marker(ui.painter(), rect.center(), *task, ink);
+                            }
+                            markdown_preview(ui, cache, markdown, viewer, false);
                         });
                     }
                     DocumentBlockKind::Markdown(markdown) => {
-                        markdown_preview(ui, cache, markdown, viewer)
+                        if let Some(action) =
+                            markdown_preview(ui, cache, markdown, viewer, can_toggle)
+                        {
+                            toggle = Some(action);
+                        }
                     }
                 }
                 let measured = row.min_rect().height() + 6.0;
@@ -3006,6 +3157,7 @@ fn enhanced_document(
                 }
             }
         });
+    toggle
 }
 
 fn mode_label(mode: Mode) -> &'static str {
@@ -3172,6 +3324,7 @@ fn attachment_strip(ui: &mut egui::Ui, images: &[String], viewer: &mut Option<St
 
 struct PreparedMarkdown {
     markdown: String,
+    task_sources: Vec<(bool, usize)>,
     uris: std::sync::Arc<Vec<Option<String>>>,
     image_text: std::sync::Arc<Vec<String>>,
 }
@@ -3185,6 +3338,7 @@ impl PreparedMarkdown {
         let (markdown, uris) = preview_markdown(text, path);
         Self {
             markdown,
+            task_sources: Vec::new(),
             uris: std::sync::Arc::new(uris),
             image_text: std::sync::Arc::new(image_text),
         }
@@ -3195,7 +3349,8 @@ fn markdown_preview(
     cache: &mut CommonMarkCache,
     prepared: &PreparedMarkdown,
     viewer: &mut Option<String>,
-) {
+    can_toggle: bool,
+) -> Option<(bool, usize, bool)> {
     let clicked = std::rc::Rc::new(std::cell::Cell::new(None));
     let selected = clicked.clone();
     let image_uris = prepared.uris.clone();
@@ -3227,12 +3382,32 @@ fn markdown_preview(
             ui.label(html);
         }
     };
-    CommonMarkViewer::new()
-        .render_html_fn(Some(&render))
-        .show(ui, cache, &prepared.markdown);
+    let mut text = prepared.markdown.clone();
+    let markdown_viewer = CommonMarkViewer::new().render_html_fn(Some(&render));
+    if can_toggle && !prepared.task_sources.is_empty() {
+        markdown_viewer.show_mut(ui, cache, &mut text);
+    } else {
+        markdown_viewer.show(ui, cache, &prepared.markdown);
+    }
     if let Some(index) = clicked.get() {
         *viewer = prepared.uris[index].clone();
     }
+    if text != prepared.markdown {
+        let date = chrono::Utc::now().date_naive();
+        let before = notetaker_core::parse_tasks(&prepared.markdown, date);
+        let after = notetaker_core::parse_tasks(&text, date);
+        assert_eq!(before.len(), prepared.task_sources.len());
+        assert_eq!(before.len(), after.len());
+        if let Some(index) = before
+            .iter()
+            .zip(&after)
+            .position(|(a, b)| a.completed != b.completed)
+        {
+            let (notes, line) = prepared.task_sources[index];
+            return Some((notes, line, after[index].completed));
+        }
+    }
+    None
 }
 
 /// Only recognize ATX headings, not inline hashes or a thematic break.
@@ -3353,7 +3528,7 @@ fn note_layout(text: &str, p: Palette, width: f32) -> egui::text::LayoutJob {
 struct NotesCache {
     key: Option<(u64, u32, u32, bool)>,
     galley: Option<std::sync::Arc<egui::Galley>>,
-    markers: Vec<(egui::Pos2, Option<bool>)>,
+    markers: Vec<(egui::Pos2, Option<bool>, usize)>,
     attachment_key: Option<(Instant, notetaker_core::Revision)>,
     path: std::path::PathBuf,
     attachments: Vec<String>,
@@ -3372,14 +3547,17 @@ impl NotesCache {
             self.markers.clear();
             let mut offset = 0;
             let mut fenced = false;
-            for line in text.split_inclusive('\n') {
+            for (line_index, line) in text.split_inclusive('\n').enumerate() {
                 if line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~") {
                     fenced = !fenced;
                 }
                 if !fenced && let Some((_, task, _)) = note_item(line) {
                     let rect = galley.pos_from_cursor(egui::text::CCursor::new(offset));
-                    self.markers
-                        .push((egui::pos2(rect.left() + 7.0, rect.center().y), task));
+                    self.markers.push((
+                        egui::pos2(rect.left() + 7.0, rect.center().y),
+                        task,
+                        line_index + 1,
+                    ));
                 }
                 offset += line.chars().count();
             }
@@ -3396,7 +3574,9 @@ fn notes_editor(
     cache: &mut NotesCache,
     path: &std::path::Path,
     viewer: &mut Option<String>,
-) -> Vec<ImageInput> {
+    can_toggle: bool,
+) -> (Vec<ImageInput>, Option<(usize, bool)>) {
+    let mut toggle = None;
     let attachment_key = (document.changed_at, document.data.revisions.notes);
     if cache.attachment_key != Some(attachment_key) || cache.path != path {
         cache.path = path.to_owned();
@@ -3452,17 +3632,39 @@ fn notes_editor(
                 .with_clip_rect(output.response.rect.intersect(ui.clip_rect()));
             let top = painter.clip_rect().top() - output.galley_pos.y;
             let bottom = painter.clip_rect().bottom() - output.galley_pos.y;
-            let first = cache.markers.partition_point(|(pos, _)| pos.y < top);
-            for (pos, task) in cache.markers[first..]
+            let first = cache.markers.partition_point(|(pos, _, _)| pos.y < top);
+            for (pos, task, line) in cache.markers[first..]
                 .iter()
-                .take_while(|(pos, _)| pos.y <= bottom)
+                .take_while(|(pos, _, _)| pos.y <= bottom)
             {
-                note_marker(
-                    &painter,
-                    *pos + output.galley_pos.to_vec2(),
-                    *task,
-                    Palette::of(ui).muted,
-                );
+                if let Some(checked) = task {
+                    let rect = egui::Rect::from_center_size(
+                        *pos + output.galley_pos.to_vec2(),
+                        egui::vec2(18.0, 22.0),
+                    );
+                    let mut checked = *checked;
+                    let mut row = ui.new_child(
+                        egui::UiBuilder::new()
+                            .id_salt(("notes-task", line))
+                            .max_rect(rect),
+                    );
+                    let response =
+                        row.add_enabled(can_toggle, theme::Checkbox::without_text(&mut checked));
+                    if response.clicked() {
+                        response.request_focus();
+                    }
+                    // The editor keeps its text path; only a clean document may atomically toggle.
+                    if can_toggle && response.changed() {
+                        toggle = Some((*line, checked));
+                    }
+                } else {
+                    note_marker(
+                        &painter,
+                        *pos + output.galley_pos.to_vec2(),
+                        *task,
+                        Palette::of(ui).muted,
+                    );
+                }
             }
             if let Some(cursor) = scroll_cursor {
                 output.response.request_focus();
@@ -3483,7 +3685,7 @@ fn notes_editor(
                 document.changed();
             }
         });
-    images
+    (images, toggle)
 }
 #[derive(Default)]
 struct TranscriptCache {
@@ -3712,31 +3914,14 @@ fn transcript_view(
                             ui.horizontal(|ui| {
                                 let name =
                                     document.data.transcript.speaker_name(&segment.speaker.0);
-                                if ui
-                                    .add(
-                                        egui::Label::new(
-                                            RichText::new(if me { "Я" } else { name })
-                                                .font(theme::medium(13.0))
-                                                .color(p.text),
-                                        )
-                                        .sense(egui::Sense::click()),
+                                let name_response = ui.add(
+                                    egui::Label::new(
+                                        RichText::new(if me { "Я" } else { name })
+                                            .font(theme::medium(13.0))
+                                            .color(p.text),
                                     )
-                                    .clicked()
-                                {
-                                    crate::people::request(
-                                        ui,
-                                        crate::people::Request {
-                                            name: name.into(),
-                                            email: String::new(),
-                                            voice: document
-                                                .data
-                                                .transcript
-                                                .speaker_voice_ids
-                                                .get(&segment.speaker.0)
-                                                .cloned(),
-                                        },
-                                    );
-                                }
+                                    .sense(egui::Sense::click()),
+                                );
                                 ui.spacing_mut().item_spacing.x = 8.0;
                                 let label = &cache.times[index];
                                 if ui
@@ -3766,7 +3951,7 @@ fn transcript_view(
                                                 &segment.speaker.0,
                                                 voices,
                                                 global_allowed,
-                                                row_hover,
+                                                (&name_response, row_hover),
                                             ) {
                                                 action = Some(rename);
                                             }
@@ -4073,7 +4258,7 @@ mod tests {
                 let first = notes.layout(ui, "## Заголовок\n- [ ] Задача", 500.0);
                 let second = notes.layout(ui, "## Заголовок\n- [ ] Задача", 500.0);
                 assert!(std::sync::Arc::ptr_eq(&first, &second));
-                enhanced_document(ui, &mut markdown_cache, &mut prepared, &mut None);
+                enhanced_document(ui, &mut markdown_cache, &mut prepared, &mut None, false);
             })
             .drop_without_applying_deltas();
             let count = ctx
@@ -4292,6 +4477,7 @@ mod tests {
             changed_at: Instant::now(),
             generation: None,
             template: "general".into(),
+            template_pending: false,
             summary_status: None,
         };
         (dir, document, path)
@@ -4419,17 +4605,17 @@ mod tests {
         let runs = super::document_runs(notes, enhanced);
         assert!(
             runs.iter()
-                .any(|(own, text)| *own && text.contains("Не забыть проверить бюджет"))
+                .any(|(own, text, _)| *own && text.contains("Не забыть проверить бюджет"))
         );
         assert!(
             runs.iter()
-                .any(|(own, text)| *own && text.contains("Переходим на новый пайплайн"))
+                .any(|(own, text, _)| *own && text.contains("Переходим на новый пайплайн"))
         );
         assert!(
             runs.iter()
-                .any(|(own, text)| !*own && text.contains("Запуск нового пайплайна в пятницу"))
+                .any(|(own, text, _)| !*own && text.contains("Запуск нового пайплайна в пятницу"))
         );
-        let rendered: String = runs.iter().map(|(_, text)| text.as_str()).collect();
+        let rendered: String = runs.iter().map(|(_, text, _)| text.as_str()).collect();
         assert_eq!(rendered.matches("Переходим на новый пайплайн").count(), 1);
         assert!(rendered.ends_with(enhanced));
     }
@@ -4437,7 +4623,12 @@ mod tests {
     #[test]
     fn empty_personal_notes_leave_all_generated_text_gray() {
         let runs = super::document_runs("", "## Решения\n- Готово\n");
-        assert_eq!(runs, vec![(false, "## Решения\n- Готово\n".into())]);
+        assert_eq!(
+            runs.iter()
+                .map(|(own, text, _)| (*own, text.clone()))
+                .collect::<Vec<_>>(),
+            vec![(false, "## Решения\n- Готово\n".into())]
+        );
     }
 
     #[test]
@@ -4517,6 +4708,7 @@ mod tests {
             generation: None,
             summary_status: None,
             template: "general".into(),
+            template_pending: false,
         };
         let ctx = egui::Context::default();
         crate::theme::install(&ctx);
@@ -4543,8 +4735,9 @@ mod tests {
                         &mut NotesCache::default(),
                         &path,
                         &mut viewer,
+                        false,
                     );
-                    assert_eq!(imported.len(), usize::from(focused));
+                    assert_eq!(imported.0.len(), usize::from(focused));
                 });
             });
             output.drop_without_applying_deltas();
@@ -4998,5 +5191,291 @@ mod calendar_review_tests {
             }
         }
         assert!(opened && started);
+    }
+}
+
+#[cfg(test)]
+mod direct_action_tests {
+    use super::*;
+    use crate::worker::{DocumentData, Event};
+    fn fixture() -> (
+        NotetakerApp,
+        std::sync::mpsc::Receiver<Command>,
+        std::sync::mpsc::Sender<Event>,
+        tempfile::TempDir,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let library = notetaker_core::Library::open(root.path()).unwrap();
+        let meeting = library
+            .create_meeting(notetaker_core::MeetingMeta::new(
+                "Встреча",
+                chrono::Utc::now(),
+            ))
+            .unwrap();
+        meeting.write_notes("- [ ] Личная задача").unwrap();
+        meeting
+            .write_enhanced("- [ ] Проверить кластер\n- [x] Готовая задача")
+            .unwrap();
+        let (mut state, commands, events) = crate::test_ui::state();
+        state.ready = true;
+        state.settings.library = root.path().into();
+        state.llm_configured = true;
+        let path = meeting.path().to_owned();
+        state.selected = Some(path.clone());
+        state
+            .documents
+            .insert(path, Document::new(DocumentData::read(meeting).unwrap()));
+        state.templates = vec!["general".into(), "standup".into()];
+        let mut app = NotetakerApp::with_state(state);
+        app.home = false;
+        app.enhanced_preview = true;
+        (app, commands, events, root)
+    }
+    fn marker_click(ctx: &egui::Context, app: &mut NotetakerApp, text: &str) {
+        for _ in 0..3 {
+            crate::test_ui::frame(ctx, vec![], &mut |ui| app.frame(ui))
+                .drop_without_applying_deltas();
+        }
+        let output = crate::test_ui::frame(ctx, vec![], &mut |ui| app.frame(ui));
+        let text = crate::test_ui::text_rect(&output.shapes, text);
+        fn squares(shape: &egui::epaint::Shape, output: &mut Vec<egui::Rect>) {
+            match shape {
+                egui::epaint::Shape::Rect(rect) => output.push(rect.rect),
+                egui::epaint::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        squares(shape, output);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut rects = Vec::new();
+        for shape in &output.shapes {
+            squares(&shape.shape, &mut rects);
+        }
+        let pos = rects
+            .iter()
+            .filter(|rect| {
+                (10.0..=24.0).contains(&rect.width())
+                    && (rect.center().y - text.center().y).abs() < 12.0
+                    && rect.center().x < text.left() + 24.0
+                    && rect.center().x > text.left() - 40.0
+            })
+            .map(|rect| rect.center())
+            .max_by(|a, b| a.x.total_cmp(&b.x))
+            .unwrap_or_else(|| {
+                panic!("visible checkbox square near {text:?}; candidates={rects:?}")
+            });
+        output.drop_without_applying_deltas();
+        for pressed in [true, false] {
+            crate::test_ui::frame(
+                ctx,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                &mut |ui| app.frame(ui),
+            )
+            .drop_without_applying_deltas();
+        }
+    }
+    #[track_caller]
+    fn finish_toggle(
+        app: &mut NotetakerApp,
+        commands: &std::sync::mpsc::Receiver<Command>,
+        events: &std::sync::mpsc::Sender<Event>,
+        fail: bool,
+    ) -> (bool, bool) {
+        let command = commands
+            .try_iter()
+            .find(|cmd| matches!(cmd, Command::ToggleTask { .. }))
+            .expect("checkbox sends an atomic task edit");
+        let Command::ToggleTask {
+            meeting,
+            task,
+            completed,
+            notes,
+        } = command
+        else {
+            unreachable!()
+        };
+        let path = meeting.path().to_owned();
+        let result = if fail {
+            Err("Ошибка записи".into())
+        } else {
+            meeting.toggle_task_source(&task, completed, notes).unwrap();
+            Ok(Box::new(DocumentData::read(meeting).unwrap()))
+        };
+        events.send(Event::TaskToggled { path, result }).unwrap();
+        app.state.poll();
+        let library = notetaker_core::Library::open(&app.state.settings.library).unwrap();
+        library.reindex_incremental().unwrap();
+        events
+            .send(Event::Tasks {
+                root: app.state.settings.library.clone(),
+                result: Ok(library.list_tasks(None, None, false).unwrap()),
+            })
+            .unwrap();
+        app.state.poll();
+        (completed, notes)
+    }
+    #[test]
+    fn summary_checkbox_click_space_failure_and_notes_use_atomic_source() {
+        let (mut app, commands, events, _root) = fixture();
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        marker_click(&ctx, &mut app, "Проверить кластер");
+        assert_eq!(
+            finish_toggle(&mut app, &commands, &events, false),
+            (true, false)
+        );
+        assert!(
+            app.state
+                .tasks
+                .iter()
+                .find(|t| t.text == "Проверить кластер")
+                .unwrap()
+                .completed
+        );
+        crate::test_ui::frame(
+            &ctx,
+            vec![egui::Event::Key {
+                key: egui::Key::Space,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            &mut |ui| app.frame(ui),
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(
+            finish_toggle(&mut app, &commands, &events, false),
+            (false, false)
+        );
+        marker_click(&ctx, &mut app, "Проверить кластер");
+        finish_toggle(&mut app, &commands, &events, true);
+        assert!(app.state.error.as_ref().unwrap().contains("Ошибка записи"));
+        marker_click(&ctx, &mut app, "Проверить кластер");
+        assert_eq!(
+            finish_toggle(&mut app, &commands, &events, false),
+            (true, false)
+        );
+        app.state.error = None;
+        marker_click(&ctx, &mut app, "Личная задача");
+        assert_eq!(
+            finish_toggle(&mut app, &commands, &events, false),
+            (true, true)
+        );
+        let path = app.state.selected.as_ref().unwrap();
+        assert!(app.state.documents[path].data.notes.contains("[x]"));
+    }
+    #[test]
+    fn template_choice_bar_dismiss_readiness_and_manual_confirmation() {
+        let (mut app, commands, _events, _root) = fixture();
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        crate::test_ui::click(&ctx, &mut |ui| app.frame(ui), "Шаблон: general");
+        crate::test_ui::click(&ctx, &mut |ui| app.frame(ui), "standup");
+        let path = app.state.selected.clone().unwrap();
+        assert!(app.state.documents[&path].template_pending);
+        crate::test_ui::click(&ctx, &mut |ui| app.frame(ui), "Не сейчас");
+        assert!(!app.state.documents[&path].template_pending);
+        app.state.documents.get_mut(&path).unwrap().template_pending = true;
+        app.state.llm.providers[0].base_url = "https://example.invalid/v1".into();
+        let output = crate::test_ui::frame(&ctx, vec![], &mut |ui| app.frame(ui));
+        assert!(output.shapes.iter().any(|shape|matches!(&shape.shape,egui::epaint::Shape::Text(text) if text.galley.text().contains("loopback"))));
+        output.drop_without_applying_deltas();
+        app.state.llm.providers[0].base_url = "http://localhost:11434/v1".into();
+        crate::test_ui::click(&ctx, &mut |ui| app.frame(ui), "Пересоздать конспект");
+        assert!(app.confirm_regenerate);
+        crate::test_ui::click(&ctx, &mut |ui| app.frame(ui), "Пересоздать");
+        assert!(
+            commands
+                .try_iter()
+                .any(|cmd| matches!(cmd, Command::Enhance { .. }))
+        );
+        assert!(!app.state.documents[&path].template_pending);
+    }
+    #[test]
+    fn nested_task_and_generated_template_use_existing_paths() {
+        let (mut app, commands, events, _root) = fixture();
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let path = app.state.selected.clone().unwrap();
+        let meeting = app.state.documents[&path].data.meeting.clone();
+        meeting
+            .write_enhanced("- [ ] Родитель\n  - [ ] Вложенная")
+            .unwrap();
+        app.state.documents.insert(
+            path.clone(),
+            Document::new(DocumentData::read(meeting).unwrap()),
+        );
+        marker_click(&ctx, &mut app, "Вложенная");
+        assert_eq!(
+            finish_toggle(&mut app, &commands, &events, false),
+            (true, false)
+        );
+        assert!(
+            app.state
+                .tasks
+                .iter()
+                .find(|t| t.text == "Вложенная")
+                .unwrap()
+                .completed
+        );
+        let doc = app.state.documents.get_mut(&path).unwrap();
+        doc.data.meta.summary = Some(notetaker_core::SummaryStamp::new(
+            &doc.data.notes,
+            &doc.data.transcript,
+            &doc.template,
+            &doc.data.enhanced,
+        ));
+        crate::test_ui::click(&ctx, &mut |ui| app.frame(ui), "Шаблон: general");
+        crate::test_ui::click(&ctx, &mut |ui| app.frame(ui), "standup");
+        crate::test_ui::click(&ctx, &mut |ui| app.frame(ui), "Пересоздать конспект");
+        assert!(!app.confirm_regenerate);
+        assert!(
+            commands
+                .try_iter()
+                .any(|cmd| matches!(cmd,Command::Enhance {template,..} if template=="standup"))
+        );
+    }
+    #[test]
+    fn selecting_template_without_summary_has_no_apply_bar() {
+        let (mut app, _commands, _events, _root) = fixture();
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let path = app.state.selected.clone().unwrap();
+        app.state
+            .documents
+            .get_mut(&path)
+            .unwrap()
+            .data
+            .enhanced
+            .clear();
+        crate::test_ui::click(&ctx, &mut |ui| app.frame(ui), "Шаблон: general");
+        crate::test_ui::click(&ctx, &mut |ui| app.frame(ui), "standup");
+        assert_eq!(app.state.documents[&path].template, "standup");
+        assert!(!app.state.documents[&path].template_pending);
+    }
+    #[test]
+    fn source_lines_do_not_depend_on_identical_text_or_checkbox_state() {
+        let (app, _commands, _events, _root) = fixture();
+        let path = app.state.selected.as_ref().unwrap();
+        let doc = &app.state.documents[path];
+        let runs = document_runs("- [ ] A\n- [ ] B", "- [x] A\n- [ ] C");
+        let sources = runs
+            .iter()
+            .flat_map(|(_, _, sources)| sources.iter().copied())
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(sources, vec![(true, 2), (false, 1), (false, 2)]);
+        assert_eq!(document_task(doc, false, 1).unwrap().line, 1);
     }
 }
