@@ -2363,7 +2363,11 @@ impl NotetakerApp {
                         toast.count,
                         if toast.undo_title.is_some() {
                             Some("Вернуть название")
-                        } else if toast.undo_ktalk.is_some() {
+                        } else if toast
+                            .undo_ktalk
+                            .as_ref()
+                            .is_some_and(|undo| self.state.ktalk_can_undo(undo))
+                        {
                             Some("Отменить")
                         } else if toast.retry_settings {
                             Some("Повторить")
@@ -3214,20 +3218,16 @@ fn next_state_wake(state: &AppState, now: Instant) -> Option<Duration> {
         );
     }
     let utc = chrono::Utc::now();
-    if !state.ktalk.busy
-        && state.ktalk.saved
-        && state
-            .ktalk
-            .settings
-            .as_ref()
-            .is_some_and(notetaker_llm::ktalk::Settings::auto_sync)
-    {
-        for task in state
-            .ktalk
-            .tasks
-            .values()
-            .filter(|task| !task.progress.done)
-        {
+    let auto_names = state
+        .ktalk
+        .settings
+        .as_ref()
+        .is_some_and(notetaker_llm::ktalk::Settings::auto_sync);
+    if !state.ktalk.busy && state.ktalk.saved {
+        for task in state.ktalk.tasks.values().filter(|task| {
+            auto_names && task.progress.recorded_here && !task.progress.done
+                || task.progress.enrol_pending
+        }) {
             let delay = task
                 .progress
                 .next
@@ -6059,6 +6059,10 @@ mod direct_action_tests {
         let (before, plan) = crate::ktalk_fixture::plan();
         let meeting = app.state.documents[&path].data.meeting.clone();
         meeting.write_transcript(&before).unwrap();
+        meeting
+            .update_meta(|meta| meta.ended_at = Some(chrono::Utc::now()))
+            .unwrap();
+        crate::ktalk::register_recording(&meeting).unwrap();
         let task = crate::ktalk::Task {
             meeting: meeting.clone(),
             ended: chrono::Utc::now(),
@@ -6085,7 +6089,7 @@ mod direct_action_tests {
         let job = commands
             .try_iter()
             .find_map(|command| {
-                if let Command::Ktalk(job) = command {
+                if let Command::Ktalk(job, _) = command {
                     Some(job)
                 } else {
                     None

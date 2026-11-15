@@ -50,7 +50,58 @@ pub fn cosine(a: &[f32], b: &[f32]) -> Option<f32> {
     (dot.is_finite() && norm.is_finite() && norm > 1e-6).then(|| (dot / norm).clamp(-1.0, 1.0))
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VoiceEvidence {
+    pub speaker: String,
+    pub name: String,
+    pub registered: bool,
+    pub ranges: Vec<(u64, u64)>,
+}
+pub struct VoiceSample {
+    pub speaker: String,
+    pub name: String,
+    pub embedding: Vec<f32>,
+    pub own: bool,
+}
+enum VoiceKey<'a> {
+    Name,
+    Linked(&'a str),
+    Stable(&'a str),
+}
 impl VoiceLibrary {
+    fn enroll(&mut self, key: VoiceKey<'_>, name: &str, is_me: bool, embedding: &Vec<f32>) {
+        let existing = self.voices.iter().position(|voice| match key {
+            VoiceKey::Name => voice.name == name,
+            VoiceKey::Linked(id) | VoiceKey::Stable(id) => voice.id.as_deref() == Some(id),
+        });
+        let index = existing.unwrap_or_else(|| {
+            self.voices.push(Voice {
+                id: Some(match key {
+                    VoiceKey::Stable(id) => id.into(),
+                    _ => uuid::Uuid::now_v7().to_string(),
+                }),
+                name: name.into(),
+                embeddings: Vec::new(),
+                updated_at: Utc::now(),
+                is_me,
+            });
+            self.voices.len() - 1
+        });
+        if is_me {
+            for voice in &mut self.voices {
+                voice.is_me = false;
+            }
+        }
+        let voice = &mut self.voices[index];
+        voice.is_me |= is_me;
+        if !voice.embeddings.contains(embedding) {
+            if voice.embeddings.len() >= 8 {
+                voice.embeddings.remove(0);
+            }
+            voice.embeddings.push(embedding.clone());
+            voice.updated_at = Utc::now();
+        }
+    }
     fn ensure_ids(&mut self) {
         for voice in &mut self.voices {
             if voice.id.is_none() {
@@ -142,6 +193,84 @@ impl Library {
         )
     }
 
+    pub fn cache_speaker_voice(
+        &self,
+        meeting: &Meeting,
+        speaker: &str,
+        embedding: Vec<f32>,
+    ) -> Result<()> {
+        let mut cache = self.read_meeting_voices(meeting)?;
+        cache.embeddings.insert(speaker.into(), embedding);
+        self.write_meeting_voices(meeting, cache.embeddings)
+    }
+    /// Tolk identities never fall back to a display-name lookup.
+    pub fn remember_tolk_voices(
+        &self,
+        meeting: &Meeting,
+        transcript: &Transcript,
+        samples: Vec<VoiceSample>,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<usize> {
+        let path = self.private_state_dir().join("voices.json");
+        let lock = meeting_lock(&path);
+        let _guard = lock.lock().unwrap_or_else(|error| error.into_inner());
+        if cancelled() {
+            return Err(crate::Error::SpeakerEdit("Операция Толка отменена".into()));
+        }
+        let mut voices = self.read_voices()?;
+        voices.ensure_ids();
+        if voices.model != VOICE_MODEL {
+            return Err(crate::Error::SpeakerEdit(
+                "Модель библиотеки голосов не совпадает".into(),
+            ));
+        }
+        let mut clusters = self.read_meeting_voices(meeting)?;
+        clusters
+            .embeddings
+            .retain(|id, _| !id.starts_with("ktalk-") && transcript.speaker_ids().contains(id));
+        let mut count = 0;
+        for sample in samples {
+            if cosine(&sample.embedding, &sample.embedding).is_none() {
+                return Err(crate::Error::SpeakerEdit(
+                    "Некорректный отпечаток голоса".into(),
+                ));
+            }
+            let id = if sample.own {
+                let own: Vec<_> = voices.voices.iter().filter(|voice| voice.is_me).collect();
+                if own.len() > 1 {
+                    return Err(crate::Error::SpeakerEdit(
+                        "Собственный голос неоднозначен".into(),
+                    ));
+                }
+                own.first()
+                    .and_then(|voice| voice.id.clone())
+                    .unwrap_or_else(|| uuid::Uuid::now_v7().to_string())
+            } else {
+                if voices
+                    .voices
+                    .iter()
+                    .any(|voice| voice.id.as_deref() == Some(&sample.speaker) && voice.is_me)
+                {
+                    continue;
+                }
+                sample.speaker.clone()
+            };
+            voices.enroll(
+                VoiceKey::Stable(&id),
+                &sample.name,
+                sample.own,
+                &sample.embedding,
+            );
+            clusters.embeddings.insert(sample.speaker, sample.embedding);
+            count += 1;
+        }
+        if cancelled() {
+            return Err(crate::Error::SpeakerEdit("Операция Толка отменена".into()));
+        }
+        self.write_meeting_voices(meeting, clusters.embeddings)?;
+        write_json(&path, &voices)?;
+        Ok(count)
+    }
     /// Called only after explicit enrollment and a successful transcript save.
     pub fn remember_speakers(&self, meeting: &Meeting, transcript: &Transcript) -> Result<()> {
         let id = meeting.read_meta()?.id;
@@ -174,36 +303,17 @@ impl Library {
                 continue;
             };
             let is_me = id == "me" || transcript.self_speaker.as_ref() == Some(id);
-            let existing = library.voices.iter().position(|v| {
-                transcript
-                    .speaker_voice_ids
-                    .get(id)
-                    .map_or(v.name == *name, |linked| v.id.as_ref() == Some(linked))
-            });
-            let index = existing.unwrap_or_else(|| {
-                library.voices.push(Voice {
-                    id: Some(uuid::Uuid::now_v7().to_string()),
-                    name: name.clone(),
-                    embeddings: Vec::new(),
-                    updated_at: Utc::now(),
-                    is_me,
+            let key = transcript
+                .speaker_voice_ids
+                .get(id)
+                .map_or(VoiceKey::Name, |id| {
+                    if id.starts_with("ktalk-") {
+                        VoiceKey::Stable(id)
+                    } else {
+                        VoiceKey::Linked(id)
+                    }
                 });
-                library.voices.len() - 1
-            });
-            if is_me {
-                for voice in &mut library.voices {
-                    voice.is_me = false;
-                }
-            }
-            let voice = &mut library.voices[index];
-            voice.is_me |= is_me;
-            if !voice.embeddings.contains(embedding) {
-                if voice.embeddings.len() >= 8 {
-                    voice.embeddings.remove(0);
-                }
-                voice.embeddings.push(embedding.clone());
-                voice.updated_at = Utc::now();
-            }
+            library.enroll(key, name, is_me, embedding);
         }
         write_json(&path, &library)
     }

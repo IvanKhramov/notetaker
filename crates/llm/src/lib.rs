@@ -7,6 +7,7 @@ pub mod calendar;
 mod chat;
 mod cli;
 mod config;
+pub mod config_write;
 mod credentials;
 mod drafts;
 pub mod ktalk;

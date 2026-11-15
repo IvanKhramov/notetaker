@@ -36,6 +36,7 @@ pub use speakers::{MergeUndo, SpeakerStats, SpeakerTimeline, TimelineSegment};
 pub use vocabulary::Vocabulary;
 pub use voices::{MeetingVoices, SELF_THRESHOLD, VOICE_MODEL, Voice, VoiceLibrary, cosine};
 pub use voices::{SpeakerEdit, SpeakerEditResult, SpeakerUndo};
+pub use voices::{VoiceEvidence, VoiceSample};
 
 pub use attachments::{attachment_image_path, attachment_references, markdown_images};
 pub use index::Hit;
@@ -48,6 +49,8 @@ pub use storage::{Library, Meeting, Revision, Versioned};
 /// Errors from meeting storage, schema validation, or the rebuildable index.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("Транскрипт изменился после сверки, отмена недоступна")]
+    TranscriptUndoChanged,
     #[error("Не удалось изменить название: {0}")]
     TitleEdit(String),
     #[error("filesystem operation failed: {0}")]

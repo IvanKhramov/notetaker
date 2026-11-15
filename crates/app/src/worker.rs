@@ -173,7 +173,7 @@ pub struct RecordRequest {
 }
 
 pub enum Command {
-    Ktalk(Box<crate::ktalk::Job>),
+    Ktalk(Box<crate::ktalk::Job>, crate::ktalk::Control),
     RememberRecording(notetaker_core::app_config::RecordingOptions),
     SemanticIndex {
         root: PathBuf,
@@ -306,6 +306,7 @@ pub enum Command {
 #[allow(clippy::large_enum_variant)]
 pub enum Event {
     Ktalk(crate::ktalk::Message),
+    KtalkRecorded(crate::ktalk::Task),
     RecordingRemembered(Result<(), String>),
     SemanticProgress {
         root: PathBuf,
@@ -499,13 +500,28 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
             models,
             llm_configured,
         });
+        let mut ktalk_thread: Option<std::thread::JoinHandle<()>> = None;
+        let mut ktalk_control: Option<crate::ktalk::Control> = None;
         for command in rx {
             match command {
-                Command::Ktalk(job) => {
+                Command::Ktalk(job, control) => {
+                    if let Some(thread) = ktalk_thread.take() {
+                        let _ = thread.join();
+                    }
+                    ktalk_control = Some(control.clone());
                     let events = events.clone();
-                    thread::spawn(move || {
-                        let _ = events.send(Event::Ktalk(crate::ktalk::dispatch(*job)));
-                    });
+                    ktalk_thread = Some(thread::spawn(move || {
+                        let message =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                crate::ktalk::run_control(*job, &OsCredentialStore, &control)
+                            }))
+                            .unwrap_or_else(|_| {
+                                crate::ktalk::Message::Error(
+                                    "Фоновая операция Толка завершилась с ошибкой".into(),
+                                )
+                            });
+                        let _ = events.send(Event::Ktalk(message));
+                    }));
                 }
                 Command::SemanticIndex { root } => {
                     let events = events.clone();
@@ -1032,7 +1048,11 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                         Library::open(&settings.library)?;
                         fs::create_dir_all(settings.models_path())?;
                         if persist_llm {
-                            atomic_write(&notetaker_llm::Config::path()?, &llm_text)?;
+                            notetaker_llm::config_write::save(
+                                &notetaker_llm::Config::path()?,
+                                notetaker_llm::config_write::Section::Ai,
+                                toml::from_str(&llm_text)?,
+                            )?;
                         }
                         atomic_write(&Settings::path()?, &toml::to_string_pretty(&settings)?)?;
                         for subscription in &previous.calendars {
@@ -1056,6 +1076,12 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                     let _ = events.send(Event::SettingsSaved(result, persist_llm));
                 }
             }
+        }
+        if let Some(control) = ktalk_control {
+            control.cancel();
+        }
+        if let Some(thread) = ktalk_thread {
+            let _ = thread.join();
         }
     });
     (commands, messages)
@@ -1471,6 +1497,21 @@ fn record(
     let document = meeting_for_reload
         .and_then(|meeting| DocumentData::read(meeting).ok())
         .map(Box::new);
+    if import_file.is_none()
+        && existing.is_none()
+        && let Some(data) = document.as_ref()
+    {
+        match crate::ktalk::register_recording(&data.meeting) {
+            Ok(task) => {
+                let _ = events.send(Event::KtalkRecorded(task));
+            }
+            Err(error) => {
+                let _ = events.send(Event::Pipeline(PipelineEvent::Warning(format!(
+                    "Толк: {error:#}"
+                ))));
+            }
+        }
+    }
     let source_issue = result
         .as_ref()
         .err()

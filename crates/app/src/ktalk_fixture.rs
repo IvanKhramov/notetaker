@@ -71,6 +71,6 @@ pub fn plan() -> (notetaker_core::Transcript, notetaker_llm::ktalk::Plan) {
         firstname: "Олег".into(),
         surname: "Сидоров".into(),
     };
-    let plan = notetaker_llm::ktalk::plan(&local, start, recording, &remote, &owner).unwrap();
+    let plan = notetaker_llm::ktalk::plan(&local, start, recording, &remote, Some(&owner)).unwrap();
     (local, plan)
 }

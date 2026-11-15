@@ -234,6 +234,7 @@ impl NotetakerApp {
                 let document=app.state.documents.get_mut(&path).unwrap();
                 document.data.meeting.update_meta(|meta| {meta.started_at=plan.recording.created_date;meta.ended_at=Some(meta.started_at+chrono::Duration::minutes(5));}).unwrap();
                 document.data.meeting.write_transcript(&local).unwrap();
+                crate::ktalk::register_recording(&document.data.meeting).unwrap();
                 document.data=crate::worker::DocumentData::read(document.data.meeting.clone()).unwrap();
                 let task=crate::ktalk::Task {meeting:document.data.meeting.clone(),ended:plan.recording.created_date+chrono::Duration::minutes(5),progress:Default::default()};
                 if scene==70 {

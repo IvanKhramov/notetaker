@@ -439,6 +439,22 @@ impl Meeting {
     pub fn save_enhanced(&self, text: &str, expected: Revision) -> Result<Revision> {
         self.save_checked("enhanced.md", text.as_bytes(), expected)
     }
+    /// Strict replacement: stale undo must not create a conflict copy either.
+    pub fn restore_transcript(
+        &self,
+        transcript: &Transcript,
+        expected: Revision,
+    ) -> Result<Revision> {
+        let lock = meeting_lock(&self.path);
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _file_guard = lock_meeting_files(&self.path)?;
+        if self.load_transcript()?.revision != expected {
+            return Err(crate::Error::TranscriptUndoChanged);
+        }
+        let bytes = serde_json::to_vec_pretty(transcript)?;
+        atomic_write(&self.path.join("transcript.json"), &bytes)?;
+        Ok(Revision::of(Some(&bytes)))
+    }
     pub fn save_transcript(&self, transcript: &Transcript, expected: Revision) -> Result<Revision> {
         if transcript.version != crate::SCHEMA_VERSION {
             return Err(crate::Error::UnsupportedVersion(transcript.version));
@@ -464,7 +480,13 @@ impl Meeting {
     /// Stage large transcript writes without holding the meeting file lock.
     /// Another process may save between the load and the save: the update is then
     /// applied again to the fresh transcript instead of failing with a conflict.
-    pub fn update_transcript(&self, mut update: impl FnMut(&mut Transcript)) -> Result<()> {
+    pub fn update_transcript(&self, update: impl FnMut(&mut Transcript)) -> Result<()> {
+        self.update_transcript_versioned(update).map(|_| ())
+    }
+    pub fn update_transcript_versioned(
+        &self,
+        mut update: impl FnMut(&mut Transcript),
+    ) -> Result<Versioned<Transcript>> {
         let transcript_lock = meeting_lock(&self.path.join("transcript.json"));
         let _transcript_guard = transcript_lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut attempts = 0;
@@ -478,7 +500,7 @@ impl Meeting {
             let before = loaded.value.clone();
             update(&mut loaded.value);
             if loaded.value == before {
-                return Ok(());
+                return Ok(loaded);
             }
             attempts += 1;
             match self.save_transcript(&loaded.value, loaded.revision) {
@@ -486,7 +508,12 @@ impl Meeting {
                     // The update is reapplied, so the copy of the lost attempt is not needed.
                     let _ = fs::remove_file(local);
                 }
-                result => return result.map(|_| ()),
+                result => {
+                    return result.map(|revision| Versioned {
+                        value: loaded.value,
+                        revision,
+                    });
+                }
             }
         }
     }

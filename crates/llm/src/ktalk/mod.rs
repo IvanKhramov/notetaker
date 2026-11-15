@@ -2,7 +2,10 @@
 mod client;
 mod sync;
 pub use client::{Client, Participant, Recording, Transcript, User};
-pub use sync::{Plan, Row, SelectionError, apply, match_recording, plan, select_recording};
+pub use sync::{
+    AppliedTranscript, Plan, Row, SelectionError, VoiceEvidence, apply, match_recording, plan,
+    select_recording,
+};
 
 use crate::CredentialStore;
 use anyhow::{Result, ensure};
@@ -55,29 +58,11 @@ impl Settings {
     }
     pub fn save_to(&self, path: &std::path::Path) -> Result<()> {
         client::base_url(&self.base_url)?;
-        let mut value: toml::Value = match std::fs::read_to_string(path) {
-            Ok(text) => {
-                toml::from_str(&text).map_err(|_| anyhow::anyhow!("Некорректный config.toml"))?
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                toml::Value::Table(Default::default())
-            }
-            Err(error) => return Err(error.into()),
-        };
-        value
-            .as_table_mut()
-            .ok_or_else(|| anyhow::anyhow!("Некорректный config.toml"))?
-            .insert("ktalk".into(), toml::Value::try_from(self)?);
-        let parent = path
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("Нет каталога настроек"))?;
-        std::fs::create_dir_all(parent)?;
-        let mut file = tempfile::NamedTempFile::new_in(parent)?;
-        use std::io::Write;
-        file.write_all(toml::to_string_pretty(&value)?.as_bytes())?;
-        file.as_file().sync_all()?;
-        file.persist(path).map_err(|error| error.error)?;
-        Ok(())
+        crate::config_write::save(
+            path,
+            crate::config_write::Section::Ktalk,
+            toml::Value::try_from(self)?,
+        )
     }
     pub fn auto_sync(&self) -> bool {
         self.extra

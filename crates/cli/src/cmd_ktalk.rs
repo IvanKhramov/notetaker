@@ -53,7 +53,10 @@ fn sync(
 ) -> Result<()> {
     print_plan(plan, out)?;
     if !dry_run {
-        ktalk::apply(library, meeting, plan)?;
+        let result = ktalk::apply(library, meeting, plan)?;
+        if let Some(error) = result.index_error {
+            writeln!(out, "Имена сохранены; поиск не обновлён: {error}")?;
+        }
     }
     Ok(())
 }
@@ -88,7 +91,7 @@ pub fn run(args: Args) -> Result<()> {
                 meeting.read_meta()?.started_at,
                 recording,
                 &remote,
-                &owner,
+                None,
             )?;
             sync(&library, &meeting, &plan, dry_run, &mut std::io::stdout())?;
         }
@@ -140,11 +143,6 @@ mod tests {
         let revision = meeting.load_transcript().unwrap().revision;
         let words: Vec<_> = texts.iter().enumerate().map(|(i,text)| serde_json::json!({"text":text,"startTimeOffsetInMillis":times[i],"endTimeOffsetInMillis":times[i]+3000})).collect();
         let remote = serde_json::from_value(serde_json::json!({"status":"complete","tracks":[{"speaker":{"isAnonymous":true,"anonymousId":"guest","anonymousName":"Анна Петрова"},"chunks":[{"startTimeOffsetInMillis":0,"endTimeOffsetInMillis":80000,"words":words}]}]})).unwrap();
-        let owner = ktalk::User {
-            key: "owner".into(),
-            firstname: "Oleg".into(),
-            surname: "Sidorov".into(),
-        };
         let recording = ktalk::Recording {
             id: "test".into(),
             title: "Тест".into(),
@@ -152,7 +150,7 @@ mod tests {
             duration: 80,
             status: "complete".into(),
         };
-        let plan = ktalk::plan(&local, start, recording, &remote, &owner).unwrap();
+        let plan = ktalk::plan(&local, start, recording, &remote, None).unwrap();
         let mut output = Vec::new();
         sync(&library, &meeting, &plan, true, &mut output).unwrap();
         let output = String::from_utf8(output).unwrap();

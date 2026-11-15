@@ -734,6 +734,13 @@ impl AppState {
         if self.ktalk.editing(&path) {
             return;
         }
+        if self.ktalk.busy
+            && self.settings.voice_library
+            && matches!(&edit,notetaker_core::SpeakerEdit::Rename {speaker,..} if self.documents.get(&path).is_some_and(|document|document.data.transcript.ktalk_sources.contains_key(speaker)))
+        {
+            self.error = Some("Дождитесь завершения операции Толка".into());
+            return;
+        }
         if self
             .documents
             .get(&path)
@@ -749,6 +756,17 @@ impl AppState {
         self.flush();
         let document = self.documents.get_mut(&path).expect("selected document");
         document.speaker_ui.busy = true;
+        if self.settings.voice_library
+            && matches!(&edit,notetaker_core::SpeakerEdit::Rename {speaker,..} if document.data.transcript.ktalk_sources.contains_key(speaker))
+        {
+            let job = crate::ktalk::Job::Name {
+                meeting: document.data.meeting.clone(),
+                expected: document.data.transcript.clone(),
+                edit,
+            };
+            self.ktalk_job(job);
+            return;
+        }
         let command = Command::EditSpeakers {
             meeting: document.data.meeting.clone(),
             expected: document.data.transcript.clone(),
@@ -1597,6 +1615,9 @@ impl AppState {
         self.settings_edited(false, false);
     }
     pub fn settings_edited(&mut self, delayed: bool, llm: bool) {
+        if !self.settings_draft.voice_library && self.ktalk.biometric {
+            self.ktalk.cancel.cancel();
+        }
         self.settings_autosave.edit(Instant::now(), delayed, llm);
         self.poll_settings(Instant::now());
     }
@@ -1695,6 +1716,7 @@ impl AppState {
         self.chat.cancel.cancel();
         self.draft_cancel.cancel();
         self.connections.cancel_all();
+        self.ktalk.cancel.cancel();
         self.recording.request_stop();
         self.flush();
         for action in self.connections.autosaves() {
@@ -1703,7 +1725,7 @@ impl AppState {
         self.poll_settings(Instant::now());
     }
     pub fn can_exit(&self) -> bool {
-        self.pending_ai.is_empty()
+        self.pending_ai.is_empty() && !self.ktalk.busy
             // A cancelled sign-in reports back once its process is gone.
             && !self.connections.busy()
             && (!self.settings_autosave.pending || self.settings_autosave.error.is_some())
@@ -1838,7 +1860,7 @@ impl AppState {
         }
         self.tick_call_end(Instant::now());
     }
-    fn apply(&mut self, event: Event) {
+    pub(crate) fn apply(&mut self, event: Event) {
         if matches!(
             &event,
             Event::Listed { .. }
@@ -1854,6 +1876,9 @@ impl AppState {
         }
         match event {
             Event::Ktalk(message) => self.ktalk_result(message),
+            Event::KtalkRecorded(task) => {
+                self.ktalk.tasks.insert(task.meeting.path().into(), task);
+            }
             Event::SearchNote { request, note } => {
                 if request == self.request {
                     self.semantic_note = note;
@@ -2456,9 +2481,6 @@ impl AppState {
                         self.documents.insert(path.clone(), Document::new(*data));
                     }
                     if error.is_none() {
-                        if !self.recording.importing {
-                            self.ktalk_schedule(&path);
-                        }
                         self.schedule_summary(path);
                     }
                 }
