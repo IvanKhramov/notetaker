@@ -221,8 +221,15 @@ cargo build -p notetaker-app -p notetaker-asr-worker -j 2
 ./target/debug/notetaker-app
 ```
 
-Start a recording, choose a title, GigaAM v3 / Parakeet v3, Local / Hybrid,
-and an audio session or all system audio. Write Markdown notes during the call;
+«Новая запись» and the global hotkey use the last successful recording's mode,
+ASR model and exact audio source. The chevron «Параметры записи» opens the
+recording dialog. First use, a missing/reused process, a missing microphone or a
+changed default output opens that dialog with an explanation. The dialog shows
+the devices to confirm. Current folder/calendar rules still resolve the effective
+mode through the common recording path; a one-meeting mode override is not
+carried into the next meeting. Changing defaults in Settings updates the saved
+model/mode while preserving the source. Calendar entry actions keep their direct
+start. Write Markdown notes during the call;
 notes save automatically. The transcript fills in live, then the final pass
 runs after Stop. Segment edits are available after the final pass and are saved
 atomically with `edited=true`. Use the summary header to select a built-in or
@@ -248,9 +255,31 @@ recordings; expired audio is swept at startup and after a recording finishes.
 Retention is in the main Storage settings. Without saved audio, re-recognition
 and speaker recalculation are unavailable; the meeting menu shows its expiry or removal.
 
+Auto-stop after call end is enabled by default. On Windows and macOS it uses
+only the confirmed disappearance of the attached process (PID plus start time),
+with the detector's 20-second debounce, then shows a non-modal 30-second countdown.
+Auto-stop requires a detected call at start: an accepted hint, calendar entry,
+or matching per-application source. A system recording never adopts a later call;
+using a detected name for its title alone does not enable auto-stop. Ticks consume
+at most one second; a gap over three seconds restarts the full countdown.
+Releasing the microphone, a calendar end time, sleep and failed polls do not
+start the countdown. A hang-up inside an application that remains running has
+no reliable signal today. «Продолжить запись» suppresses this countdown until a
+new unambiguous call begins and ends. Sound on the system/call track cancels it;
+microphone activity alone does not. The existing silence timeout (15 minutes by
+default, 0 disables it) remains independent. While the main window is hidden,
+the recording indicator is replaced by a non-activating floating countdown card;
+it returns after continuing or renewed sound.
+Linux has no live capture/call detector and produces no countdown events.
+
+A calendar title, a typed title and a real detected call name are preserved.
+After a successful summary an automatic placeholder gets a title from the same
+LLM request. «Вернуть название» offers the previous name once when the meeting
+is viewed, for 12 seconds of focused-window time. See [LLM setup](docs/llm.md).
+
 Windows has a tray menu, configurable global start/stop shortcut (Ctrl+Alt+R),
 and a small always-on-top recording window with timer and Stop. The shortcut
-starts immediately with the current recording options (defaults at startup);
+uses the same saved recording options and source check as «Новая запись»;
 use New Recording to choose another audio session. Closing the main window
 hides it in the tray; double-click the icon to reopen, or use Exit to stop,
 finish transcription and flush pending saves. macOS also has live capture, a menu bar icon and global shortcuts as described

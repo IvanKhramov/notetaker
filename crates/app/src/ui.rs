@@ -22,6 +22,7 @@ const TEXT_SCROLL_MARGIN: egui::Margin = egui::Margin {
 };
 
 struct Toast {
+    undo_title: Option<crate::state::TitleUndo>,
     at: Instant,
     text: String,
     path: Option<std::path::PathBuf>,
@@ -604,12 +605,13 @@ impl NotetakerApp {
                         } else {
                             "Попробуйте другие слова или другую папку."
                         },
-                        empty.then_some(("Новая запись", self.can_record())),
+                        empty.then_some((
+                            "Новая запись",
+                            self.state.can_prepare_recording()
+                                && self.state.record_options_pending.is_none(),
+                        )),
                     ) {
-                        self.state.prefill_call_title();
-                        self.show_record = true;
-                        self.state.inventory_pending = true;
-                        self.state.send(Command::Inventory);
+                        self.state.toggle_recording();
                     }
                 }
                 if self.state.listing {
@@ -727,24 +729,39 @@ impl NotetakerApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let stopping = !self.state.recording.importing
                         && matches!(phase, Phase::Starting | Phase::Recording);
+                    if !busy {
+                        let options =
+                            theme::icon_button(ui, theme::icons::CHEVRON_DOWN, "Параметры записи");
+                        #[cfg(test)]
+                        ui.ctx().data_mut(|data| {
+                            data.insert_temp(egui::Id::unique("record-options-rect"), options.rect)
+                        });
+                        if options.clicked() {
+                            self.state.open_record_options();
+                        }
+                    }
                     if stopping {
                         stop = theme::button(ui, "Стоп", ButtonStyle::Secondary).clicked();
                     } else if !busy
                         && ui
                             .add_enabled(
-                                self.can_record(),
-                                theme::styled_button(p, "Новая запись", ButtonStyle::Primary)
-                                    .min_size(egui::vec2(0.0, theme::CTA_HEIGHT)),
+                                self.state.can_prepare_recording()
+                                    && self.state.record_options_pending.is_none(),
+                                theme::styled_button(
+                                    p,
+                                    if self.state.record_options_pending.is_some() {
+                                        "Проверяю источник…"
+                                    } else {
+                                        "Новая запись"
+                                    },
+                                    ButtonStyle::Primary,
+                                )
+                                .min_size(egui::vec2(0.0, theme::CTA_HEIGHT)),
                             )
-                            .on_disabled_hover_text(
-                                "Запись станет доступна, когда загрузятся модели распознавания",
-                            )
+                            .on_disabled_hover_text("Дождитесь завершения текущей операции")
                             .clicked()
                     {
-                        self.state.prefill_call_title();
-                        self.show_record = true;
-                        self.state.inventory_pending = true;
-                        self.state.send(Command::Inventory);
+                        self.state.toggle_recording();
                     }
                     if !self.ask_text.trim().is_empty() && !self.ask_text.starts_with('/') {
                         ask |= ui
@@ -2205,6 +2222,7 @@ impl NotetakerApp {
             push_toast(
                 &mut self.toasts,
                 Toast {
+                    undo_title: None,
                     at: Instant::now(),
                     text: notetaker_core::display_text(&text),
                     path: None,
@@ -2223,9 +2241,43 @@ impl NotetakerApp {
             push_toast(
                 &mut self.toasts,
                 Toast {
+                    undo_title: None,
                     at: Instant::now(),
                     text: format!("Файл обновлён: {name}"),
                     path: Some(path),
+                    retry_settings: false,
+                    level: ToastLevel::Success,
+                    count: 1,
+                    focused_for: Duration::ZERO,
+                    last_tick: Instant::now(),
+                    was_focused: focused,
+                },
+            );
+        }
+        if focused
+            && !self.home
+            && !self.chat_page
+            && !self.people.active()
+            && !self.state.tasks_open
+            && !self.show_settings
+            && let Some(index) = self.state.title_changes.iter().position(|undo| {
+                self.state
+                    .selected
+                    .as_ref()
+                    .is_some_and(|path| undo.meeting.path() == path)
+            })
+            && let Some(undo) = self.state.title_changes.remove(index)
+        {
+            push_toast(
+                &mut self.toasts,
+                Toast {
+                    at: Instant::now(),
+                    text: format!(
+                        "Новое название: {}\nПредыдущее: {}",
+                        undo.generated, undo.previous
+                    ),
+                    undo_title: Some(undo),
+                    path: None,
                     retry_settings: false,
                     level: ToastLevel::Success,
                     count: 1,
@@ -2255,6 +2307,7 @@ impl NotetakerApp {
                 let mut reveal = None;
                 let mut dismiss = None;
                 let mut retry = false;
+                let mut restore_title = None;
                 for (index, toast) in self.toasts.iter().enumerate() {
                     let response = theme::toast(
                         ui,
@@ -2262,7 +2315,9 @@ impl NotetakerApp {
                         toast.level,
                         &toast.text,
                         toast.count,
-                        if toast.retry_settings {
+                        if toast.undo_title.is_some() {
+                            Some("Вернуть название")
+                        } else if toast.retry_settings {
                             Some("Повторить")
                         } else {
                             toast.path.as_ref().map(|_| "Показать в папке")
@@ -2272,9 +2327,16 @@ impl NotetakerApp {
                         dismiss = Some(index);
                     }
                     if response.action {
+                        if let Some(undo) = &toast.undo_title {
+                            restore_title = Some(undo.clone());
+                            dismiss = Some(index);
+                        }
                         reveal = toast.path.clone();
                         retry |= toast.retry_settings;
                     }
+                }
+                if let Some(undo) = restore_title {
+                    self.state.undo_title(undo);
                 }
                 if retry {
                     self.state
@@ -2317,9 +2379,16 @@ impl NotetakerApp {
         let mut cancel = false;
         let mut start_record = false;
         let mut open_ai = false;
-        let can_start = cfg!(any(windows, target_os = "macos")) && self.can_record();
+        let mut open_recording_settings = false;
+        let can_start = cfg!(any(windows, target_os = "macos"))
+            && self.can_record()
+            && !self.state.inventory_pending
+            && !self.state.record_source_missing;
         theme::modal(ctx,"Новая запись").open(&mut open).show_footer(ctx,|ui| {
-            theme::form_field(ui,"Название",None,|ui|ui.add(theme::text_field(&mut self.state.title).desired_width(f32::INFINITY)));
+            if let Some(reason) = &self.state.record_options_notice { ui.weak(reason); }
+            theme::form_field(ui,"Название",Some("Можно оставить пустым: название появится после конспекта."),|ui|ui.add(theme::text_field(&mut self.state.title).desired_width(f32::INFINITY)));
+            theme::form_field(ui,"Распознавание",None,|ui| model_selector(ui,"record-model",&mut self.state.record_model));
+            if !self.state.quickstart.models.speech_ready(&self.state.record_model) { ui.weak("Модель не установлена."); open_recording_settings |= ui.link("Настройки записи").clicked(); }
             let mode_description=mode_label(self.state.record_mode);
             theme::form_field(ui,"Режим",Some(mode_description),|ui| {self.state.record_mode_edited |= mode_selector(ui,&mut self.state.record_mode);});
             let readiness = self.state.summary_readiness();
@@ -2330,20 +2399,25 @@ impl NotetakerApp {
             });
             theme::form_field(ui,"Источник звука",None,|ui| {
                 ui.horizontal(|ui| {
-                    crate::theme::select("audio_session").width((ui.available_width()-36.0).max(32.0)).selected_text(self.state.inventory.sessions.iter().find(|s|Some(s.pid)==self.state.process_id).map_or_else(||"Весь системный звук".to_owned(),|s|format!("{} (PID {})",s.exe.as_deref().unwrap_or(&s.name),s.pid))).show_ui(ui,|ui| {
-                        theme::select_value(ui,&mut self.state.process_id,None,"Весь системный звук");
-                        for session in &self.state.inventory.sessions {if session.pid!=0{theme::select_value(ui,&mut self.state.process_id,Some(session.pid),format!("{} (PID {}){}",session.exe.as_deref().unwrap_or(&session.name),session.pid,if session.active{" · активна"}else{""}));}}
+                    let mut source_changed=false;
+                    crate::theme::select("audio_session").width((ui.available_width()-36.0).max(32.0)).selected_text(if self.state.record_source_missing {"Выберите источник записи".to_owned()} else {self.state.inventory.sessions.iter().find(|s|Some(s.pid)==self.state.process_id).map_or_else(|| if self.state.process_id.is_some() || self.state.record_source_missing {"Выберите источник записи".to_owned()} else {"Весь системный звук".to_owned()},|s|format!("{} (PID {})",s.exe.as_deref().unwrap_or(&s.name),s.pid))}).show_ui(ui,|ui| {
+                        if theme::select_value(ui,&mut self.state.process_id,None,"Весь системный звук").clicked() { source_changed=true; }
+                        for session in &self.state.inventory.sessions {if session.pid!=0 && theme::select_value(ui,&mut self.state.process_id,Some(session.pid),format!("{} (PID {}){}",session.exe.as_deref().unwrap_or(&session.name),session.pid,if session.active{" · активна"}else{""})).clicked() { source_changed=true; }}
                     });
+                    if source_changed { self.state.confirm_record_source(); }
                     if ui.add_enabled_ui(!self.state.inventory_pending,|ui|theme::icon_button(ui,theme::icons::REFRESH_CW,"Обновить аудиосессии")).inner.clicked(){self.state.inventory_pending=true;self.state.send(Command::Inventory);}
                 });
             });
+            let microphone=self.state.inventory.devices.iter().find(|device|device.channel==notetaker_capture::Channel::Mic && self.state.record_microphone_id.as_ref().map_or(device.is_default,|id|id==&device.id)).map_or("недоступен",|device|device.name.as_str());
+            let output=self.state.inventory.devices.iter().find(|device|device.channel==notetaker_capture::Channel::System && device.is_default).map_or("недоступен",|device|device.name.as_str());
+            ui.small(format!("Микрофон: {microphone}. Выход: {output}."));
             if self.state.inventory_pending{ui.spinner();}
             if let Some(error)=&self.state.inventory_error{theme::callout(ui,theme::icons::CIRCLE_ALERT,|ui|{ui.small(error);});}
             for warning in &self.state.inventory.warnings {theme::callout(ui,theme::icons::INFO,|ui|{ui.small(warning);});}
             #[cfg(target_os="macos")]
             theme::callout(ui,theme::icons::INFO,|ui|{ui.small("macOS: весь системный звук, кроме notetaker. Нужны разрешения Microphone и System Audio Recording.");});
             #[cfg(not(any(windows,target_os="macos")))]
-            theme::callout(ui,theme::icons::INFO,|ui|{ui.small("Захват звука пока реализован только на Windows. Библиотека, поиск, правки и конспекты работают на этой ОС.");});
+            theme::callout(ui,theme::icons::INFO,|ui|{ui.small("Захват звука доступен на Windows и macOS. На этой ОС работают библиотека, поиск, правки и конспекты.");});
             if self.state.quickstart.models.missing(&self.state.settings.model).is_some(){crate::quickstart::model_status(ui,&mut self.state);}else{
                 ui.horizontal(|ui|{let (rect,_)=ui.allocate_exact_size(egui::vec2(16.0,20.0),egui::Sense::hover());theme::paint_icon(ui,rect.center(),theme::icons::CHECK,16.0,Palette::of(ui).muted);ui.label(RichText::new("Все модели на месте").size(12.0).color(Palette::of(ui).muted));});
             }
@@ -2358,14 +2432,24 @@ impl NotetakerApp {
             self.settings_panel.section = crate::settings::Section::Ai;
             open = false;
         }
+        if open_recording_settings {
+            self.show_settings = true;
+            self.settings_panel.section = crate::settings::Section::Recording;
+            open = false;
+        }
         if start_record {
-            self.state.toggle_recording();
+            self.state.start_recording();
             self.show_record = false;
         }
         if cancel {
             open = false;
         }
         self.show_record &= open;
+        if !self.show_record {
+            self.state.record_options_pending = None;
+            self.state.record_source_guard = None;
+            self.state.record_dialog_requested = false;
+        }
     }
     fn exit(&mut self) {
         self.settings_panel.blur(&mut self.state);
@@ -2398,25 +2482,43 @@ impl NotetakerApp {
         if self.interaction_blocked(ctx) {
             return;
         }
-        let Some(event) = self.state.calendar_reminder().cloned() else {
-            return;
+        let event = self.state.calendar_reminder().cloned();
+        let ending = match self.state.call_prompt {
+            Some(CallPrompt::Stop { countdown, .. }) => Some(countdown.remaining),
+            _ => None,
         };
+        if event.is_none() && ending.is_none() {
+            return;
+        }
         let bounds = bounds.shrink(theme::SPACE[3]);
         let width = bounds.width().clamp(1.0, 340.0);
-        let action = egui::Area::new(egui::Id::unique("calendar-reminder"))
+        let mut action = crate::calendar_ui::Action::None;
+        let mut ending_action = crate::detection::StopAction::None;
+        egui::Area::new(egui::Id::unique("calendar-reminder"))
             .order(egui::Order::Foreground)
             .fixed_pos(egui::pos2(bounds.right() - width, bounds.top()))
             .constrain_to(bounds)
             .show(ctx, |ui| {
                 ui.set_width(width);
-                crate::calendar_ui::reminder(
-                    ui,
-                    &event,
-                    cfg!(any(windows, target_os = "macos")) && self.can_record(),
-                )
-            })
-            .inner;
+                if let Some(remaining) = ending {
+                    ending_action = crate::detection::stop_card(ui, remaining);
+                } else if let Some(event) = &event {
+                    action = crate::calendar_ui::reminder(
+                        ui,
+                        event,
+                        cfg!(any(windows, target_os = "macos")) && self.can_record(),
+                    );
+                }
+            });
         self.calendar_action(ctx, action);
+        self.call_end_action(ending_action);
+    }
+    fn call_end_action(&mut self, action: crate::detection::StopAction) {
+        match action {
+            crate::detection::StopAction::Stop => self.state.accept_call(),
+            crate::detection::StopAction::Continue => self.state.dismiss_call(),
+            crate::detection::StopAction::None => {}
+        }
     }
     fn calendar_action(&mut self, ctx: &egui::Context, action: crate::calendar_ui::Action) {
         match action {
@@ -2448,10 +2550,19 @@ impl NotetakerApp {
                     !i.viewport().focused.unwrap_or(true) || i.viewport().minimized.unwrap_or(false)
                 })
         });
-        let prompt = self.state.call_prompt.clone();
+        let prompt = self.state.call_prompt.clone().filter(|prompt| {
+            !matches!(prompt, CallPrompt::Stop { .. })
+                || self.interaction_blocked(ctx)
+                || ctx.input(|input| {
+                    !input.viewport().focused.unwrap_or(true)
+                        || input.viewport().minimized.unwrap_or(false)
+                })
+        });
         if prompt.is_none() && calendar.is_none() {
             return;
         }
+        let mut ending_action = crate::detection::StopAction::None;
+        let ending = matches!(prompt, Some(CallPrompt::Stop { .. }));
         let mut accept = false;
         let mut dismiss = false;
         let mut builder = egui::ViewportBuilder::default();
@@ -2469,7 +2580,9 @@ impl NotetakerApp {
                 .with_window_level(egui::WindowLevel::AlwaysOnTop)
                 .with_active(false),
             |ui, _| {
-                if let Some(event) = &calendar {
+                if let Some(CallPrompt::Stop { countdown, .. }) = &prompt {
+                    ending_action = crate::detection::stop_card(ui, countdown.remaining);
+                } else if let Some(event) = &calendar {
                     match crate::calendar_ui::reminder(
                         ui,
                         event,
@@ -2479,34 +2592,25 @@ impl NotetakerApp {
                         crate::calendar_ui::Action::Dismiss => dismiss = true,
                         crate::calendar_ui::Action::None => {}
                     }
-                } else if let Some(prompt) = &prompt {
+                } else if let Some(CallPrompt::Start {
+                    app, meeting_title, ..
+                }) = &prompt
+                {
                     theme::bar(Palette::of(ui)).show(ui, |ui| {
                         ui.set_width(318.0);
-                        let (title, question, button) = match &prompt {
-                            CallPrompt::Start {
-                                app, meeting_title, ..
-                            } => (
-                                format!("Звонок в {app}"),
-                                meeting_title.as_deref().unwrap_or("Записать встречу?"),
-                                "Записать",
-                            ),
-                            CallPrompt::Stop { .. } => (
-                                "Звонок закончился".into(),
-                                "Остановить запись?",
-                                "Остановить",
-                            ),
-                        };
+                        let title = format!("Звонок в {app}");
+                        let question = meeting_title.as_deref().unwrap_or("Записать встречу?");
+                        let button = "Записать";
                         ui.label(RichText::new(title).strong());
                         ui.weak(question);
                         ui.horizontal(|ui| {
                             ui.add_enabled_ui(
                                 self.state.ready
-                                    && (matches!(prompt, CallPrompt::Stop { .. })
-                                        || self
-                                            .state
-                                            .quickstart
-                                            .models
-                                            .speech_ready(&self.state.record_model))
+                                    && self
+                                        .state
+                                        .quickstart
+                                        .models
+                                        .speech_ready(&self.state.record_model)
                                     && !self.state.quickstart.probe_busy
                                     && !self.state.settings_pending,
                                 |ui| {
@@ -2520,24 +2624,25 @@ impl NotetakerApp {
                     });
                 }
                 if ui.input(|input| input.viewport().close_requested()) {
-                    dismiss = true;
+                    dismiss = !ending;
                     ui.ctx()
                         .send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 }
             },
         );
-        if calendar.is_some() {
+        self.call_end_action(ending_action);
+        if !ending && calendar.is_some() {
             self.calendar_action(
                 ctx,
                 if accept {
                     crate::calendar_ui::Action::Start
-                } else if dismiss {
+                } else if !ending && dismiss {
                     crate::calendar_ui::Action::Dismiss
                 } else {
                     crate::calendar_ui::Action::None
                 },
             );
-        } else if accept {
+        } else if !ending && accept {
             self.state.accept_call();
         } else if dismiss {
             self.state.dismiss_call();
@@ -2549,6 +2654,7 @@ impl NotetakerApp {
                 self.state.recording.phase,
                 input.viewport().minimized.unwrap_or(false),
                 input.viewport().focused.unwrap_or(false),
+                matches!(self.state.call_prompt, Some(CallPrompt::Stop { .. })),
             )
         });
         if !show {
@@ -2719,6 +2825,10 @@ impl eframe::App for NotetakerApp {
             }
             #[cfg(not(any(windows, target_os = "macos")))]
             self.exit();
+        }
+        if self.state.record_dialog_requested {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         }
         if self.state.can_exit() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -2945,6 +3055,13 @@ impl NotetakerApp {
             }
         }
         self.notifications(&ctx);
+        if self.state.record_dialog_requested {
+            self.show_record = true;
+            self.state.record_dialog_requested = false;
+        }
+        if self.state.recording.busy() {
+            self.show_record = false;
+        }
         if self.show_record {
             self.recording_dialog(&ctx);
         }
@@ -3532,8 +3649,8 @@ fn parse_position(text: &str) -> Option<egui::Pos2> {
     };
     (x.is_finite() && y.is_finite()).then(|| egui::pos2(x, y))
 }
-fn indicator_visible(phase: Phase, minimized: bool, focused: bool) -> bool {
-    phase == Phase::Recording && (minimized || !focused)
+fn indicator_visible(phase: Phase, minimized: bool, focused: bool, countdown: bool) -> bool {
+    phase == Phase::Recording && (minimized || !focused) && !countdown
 }
 fn day_label(date: chrono::NaiveDate, today: chrono::NaiveDate) -> String {
     if date == today {
@@ -5166,11 +5283,12 @@ mod tests {
     }
     #[test]
     fn indicator_only_shows_during_recording_outside_main_window() {
-        assert!(!indicator_visible(Phase::Recording, false, true));
-        assert!(indicator_visible(Phase::Recording, true, true));
-        assert!(indicator_visible(Phase::Recording, false, false));
+        assert!(!indicator_visible(Phase::Recording, false, true, false));
+        assert!(indicator_visible(Phase::Recording, true, true, false));
+        assert!(indicator_visible(Phase::Recording, false, false, false));
+        assert!(!indicator_visible(Phase::Recording, true, false, true));
         for phase in [Phase::Idle, Phase::Starting, Phase::Finalizing] {
-            assert!(!indicator_visible(phase, true, false));
+            assert!(!indicator_visible(phase, true, false, false));
         }
     }
     #[test]
@@ -5199,6 +5317,9 @@ impl Toast {
         self.last_tick = now;
     }
     fn expired(&self, now: Instant) -> bool {
+        if self.undo_title.is_some() {
+            return self.focused_for >= Duration::from_secs(12);
+        }
         match self.level {
             ToastLevel::Error => false,
             ToastLevel::Warning => self.focused_for >= Duration::from_secs(6),
@@ -5210,10 +5331,12 @@ impl Toast {
 }
 
 fn push_toast(queue: &mut VecDeque<Toast>, toast: Toast) {
-    if let Some(existing) = queue
-        .iter_mut()
-        .find(|t| t.level == toast.level && t.text == toast.text)
-    {
+    if let Some(existing) = queue.iter_mut().find(|t| {
+        t.level == toast.level
+            && t.text == toast.text
+            && t.undo_title.as_ref().map(|undo| undo.meeting.path())
+                == toast.undo_title.as_ref().map(|undo| undo.meeting.path())
+    }) {
         existing.count = existing.count.saturating_add(toast.count);
         existing.retry_settings |= toast.retry_settings;
         if toast.path.is_some() {
@@ -5236,6 +5359,7 @@ mod toast_lifetime_tests {
     use super::*;
     fn toast(now: Instant, level: ToastLevel) -> Toast {
         Toast {
+            undo_title: None,
             at: now,
             text: "notice".into(),
             path: None,
@@ -5747,6 +5871,139 @@ mod direct_action_tests {
         for _ in 0..40 {
             compact_frame(ctx, app, size).drop_without_applying_deltas();
         }
+    }
+    fn ready_recording(app: &mut NotetakerApp) {
+        app.state.quickstart.models = crate::quickstart::Models {
+            gigaam: crate::quickstart::Status::Ready,
+            parakeet: crate::quickstart::Status::Ready,
+            auto: crate::quickstart::Status::Ready,
+            diarization: crate::quickstart::Status::Ready,
+            semantic: crate::quickstart::Status::Ready,
+        };
+    }
+    #[test]
+    fn primary_start_uses_quick_path_and_chevron_opens_existing_options() {
+        let (mut app, commands, events, _root) = fixture();
+        ready_recording(&mut app);
+        app.state.settings.last_recording = Some(
+            crate::recording_options::remember(
+                &crate::test_ui::recording_inventory(),
+                &app.state.settings,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        crate::test_ui::click(&ctx, &mut |ui| app.frame(ui), "Новая запись");
+        assert!(!app.show_record);
+        assert!(
+            commands
+                .try_iter()
+                .any(|command| matches!(command, Command::Inventory))
+        );
+        events
+            .send(Event::Inventory(Ok(crate::test_ui::recording_inventory())))
+            .unwrap();
+        app.state.poll();
+        assert!(
+            commands
+                .try_iter()
+                .any(|command| matches!(command, Command::Record(_)))
+        );
+        let (mut app, _commands, _events, _root) = fixture();
+        ready_recording(&mut app);
+        let size = egui::vec2(1280.0, 900.0);
+        compact_frame(&ctx, &mut app, size).drop_without_applying_deltas();
+        let pos = ctx
+            .data(|data| data.get_temp::<egui::Rect>(egui::Id::unique("record-options-rect")))
+            .unwrap()
+            .center();
+        click_at(&ctx, &mut app, size, pos);
+        assert!(app.show_record);
+    }
+    #[test]
+    fn countdown_card_buttons_continue_or_stop_without_overlapping_the_bar() {
+        let (mut app, _commands, _events, _root) = fixture();
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        app.state.recording.phase = Phase::Recording;
+        app.state.recording.path = app.state.selected.clone();
+        app.state.call_prompt = Some(CallPrompt::Stop {
+            pid: 42,
+            started_at: 100,
+            countdown: crate::detection::Countdown::new(Instant::now()),
+        });
+        let size = egui::vec2(640.0, 427.0);
+        for _ in 0..3 {
+            compact_frame(&ctx, &mut app, size).drop_without_applying_deltas();
+        }
+        let output = compact_frame(&ctx, &mut app, size);
+        let button = crate::test_ui::text_rect(&output.shapes, "Продолжить запись");
+        assert!(button.bottom() < app.toast_anchor.unwrap().y);
+        output.drop_without_applying_deltas();
+        click_at(&ctx, &mut app, size, button.center());
+        assert!(app.state.call_prompt.is_none());
+        assert!(!app.state.recording.stop_requested);
+        app.state.call_prompt = Some(CallPrompt::Stop {
+            pid: 42,
+            started_at: 100,
+            countdown: crate::detection::Countdown::new(Instant::now()),
+        });
+        let output = compact_frame(&ctx, &mut app, size);
+        let button = crate::test_ui::text_rect(&output.shapes, "Остановить сейчас");
+        output.drop_without_applying_deltas();
+        click_at(&ctx, &mut app, size, button.center());
+        assert!(app.state.recording.stop_requested);
+    }
+    #[test]
+    fn title_toast_undo_restores_previous_title_and_is_offered_once() {
+        let (mut app, commands, events, _root) = fixture();
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let path = app.state.selected.clone().unwrap();
+        let doc = app.state.documents.get_mut(&path).unwrap();
+        let meeting = doc.data.meeting.clone();
+        let old = doc.data.meta.title.clone();
+        let generated = "План выпуска";
+        meeting
+            .update_meta(|meta| {
+                meta.title = generated.into();
+                meta.title_source = Some(notetaker_core::TitleSource::Generated);
+            })
+            .unwrap();
+        doc.data.meta = meeting.read_meta().unwrap();
+        app.state.title_changes.push_back(crate::state::TitleUndo {
+            meeting: meeting.clone(),
+            previous: old.clone(),
+            generated: generated.into(),
+        });
+        crate::test_ui::click(&ctx, &mut |ui| app.frame(ui), "Вернуть название");
+        let Command::Rename {
+            meeting,
+            title,
+            expected,
+        } = commands
+            .try_iter()
+            .find(|command| matches!(command, Command::Rename { .. }))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(expected.as_deref(), Some(generated));
+        meeting.rename_title(&title, expected.as_deref()).unwrap();
+        events
+            .send(Event::Renamed {
+                path: path.clone(),
+                result: Ok(title),
+            })
+            .unwrap();
+        app.state.poll();
+        assert_eq!(meeting.read_meta().unwrap().title, old);
+        assert_eq!(app.state.documents[&path].data.meta.title, old);
+        assert!(app.state.title_changes.is_empty());
+        assert!(app.toasts.iter().all(|toast| toast.undo_title.is_none()));
     }
     #[test]
     fn compact_mode_stays_stable_at_fixed_sizes_with_changing_bar_contents() {

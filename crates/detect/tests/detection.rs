@@ -74,6 +74,8 @@ fn release_is_debounced_and_resume_cancels_end_timer() {
     assert_eq!(
         d.poll(at(47)),
         vec![DetectEvent::CallEnded {
+            started_at: 100,
+            reason: notetaker_detect::CallEndReason::MicrophoneReleased,
             app: "Teams".into(),
             pid: 7
         }]
@@ -474,4 +476,100 @@ fn browser_identity_and_title_are_refreshed_after_start_and_dismissal() {
     assert_eq!(d.current_calls()[0].meeting_title, None);
     d.poll(at(8));
     assert!(d.current_calls().is_empty());
+}
+
+#[test]
+fn process_exit_is_distinct_from_microphone_release() {
+    let snapshots = [
+        vec![observation("Zoom.exe", true)],
+        vec![observation("Zoom.exe", true)],
+        vec![observation("Zoom.exe", false)],
+        vec![observation("Zoom.exe", false)],
+        vec![observation("Zoom.exe", true)],
+        vec![observation("Zoom.exe", true)],
+        vec![],
+        vec![],
+    ];
+    let mut detector = CallDetector::new(
+        Fake(
+            snapshots
+                .into_iter()
+                .map(|processes| {
+                    Ok(Snapshot {
+                        processes,
+                        warnings: vec![],
+                    })
+                })
+                .collect(),
+        ),
+        DetectConfig::default(),
+    );
+    detector.poll(at(0));
+    detector.poll(at(5));
+    detector.poll(at(6));
+    assert!(matches!(
+        detector.poll(at(26)).as_slice(),
+        [DetectEvent::CallEnded {
+            reason: notetaker_detect::CallEndReason::MicrophoneReleased,
+            started_at: 100,
+            ..
+        }]
+    ));
+    detector.poll(at(27));
+    detector.poll(at(32));
+    detector.poll(at(33));
+    assert!(matches!(
+        detector.poll(at(53)).as_slice(),
+        [DetectEvent::CallEnded {
+            reason: notetaker_detect::CallEndReason::ProcessExited,
+            started_at: 100,
+            ..
+        }]
+    ));
+}
+
+#[test]
+fn process_exit_after_microphone_release_survives_poll_errors() {
+    let snapshot = |processes| {
+        Ok(Snapshot {
+            processes,
+            warnings: vec![],
+        })
+    };
+    let mut detector = CallDetector::new(
+        Fake(VecDeque::from([
+            snapshot(vec![observation("Zoom.exe", true)]),
+            snapshot(vec![observation("Zoom.exe", true)]),
+            snapshot(vec![observation("Zoom.exe", false)]),
+            snapshot(vec![observation("Zoom.exe", false)]),
+            snapshot(vec![]),
+            Err(anyhow!("snapshot failed")),
+            snapshot(vec![]),
+            snapshot(vec![]),
+            snapshot(vec![]),
+        ])),
+        DetectConfig::default(),
+    );
+    detector.poll(at(0));
+    detector.poll(at(5));
+    detector.poll(at(6));
+    assert!(matches!(
+        detector.poll(at(26)).as_slice(),
+        [DetectEvent::CallEnded {
+            reason: notetaker_detect::CallEndReason::MicrophoneReleased,
+            ..
+        }]
+    ));
+    assert!(detector.poll(at(27)).is_empty());
+    assert!(detector.poll(at(37)).is_empty());
+    assert!(detector.poll(at(38)).is_empty());
+    assert!(detector.poll(at(57)).is_empty());
+    assert!(matches!(
+        detector.poll(at(58)).as_slice(),
+        [DetectEvent::CallEnded {
+            reason: notetaker_detect::CallEndReason::ProcessExited,
+            started_at: 100,
+            ..
+        }]
+    ));
 }

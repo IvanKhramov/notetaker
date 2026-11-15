@@ -41,13 +41,15 @@ pub use attachments::{attachment_image_path, attachment_references, markdown_ima
 pub use index::Hit;
 pub use model::{
     Bookmark, CaptureIssue, Channel, MeetingMeta, Mode, SCHEMA_VERSION, Segment, Source, SpeakerId,
-    SummaryStamp, Transcript, migrate_transcript,
+    SummaryStamp, TitleSource, Transcript, migrate_transcript,
 };
 pub use storage::{Library, Meeting, Revision, Versioned};
 
 /// Errors from meeting storage, schema validation, or the rebuildable index.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("Не удалось изменить название: {0}")]
+    TitleEdit(String),
     #[error("filesystem operation failed: {0}")]
     Io(#[from] std::io::Error),
     #[error("invalid meeting YAML: {0}")]

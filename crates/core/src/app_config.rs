@@ -1,5 +1,24 @@
 //! Shared app.toml schema and defaults.
 pub use notetaker_asr_proto::Provider;
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RecordingSource {
+    System,
+    Process {
+        pid: u32,
+        started_at: u64,
+        exe: String,
+    },
+}
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RecordingOptions {
+    pub model: String,
+    pub mode: crate::Mode,
+    pub source: RecordingSource,
+    pub microphone_id: String,
+    pub output_id: String,
+}
 pub fn default_speech_model(language: &str) -> &'static str {
     if language.to_ascii_lowercase().starts_with("ru") {
         "gigaam-v3"
@@ -89,6 +108,8 @@ macro_rules! app_settings_schema {
             pub call_apps: String,
             /// Zero disables the silence timeout.
             pub auto_stop_minutes: u32,
+            pub stop_on_call_end: bool,
+            pub last_recording: Option<$crate::app_config::RecordingOptions>,
             pub auto_summary: bool,
             pub vocabulary: String,
             pub diarize: bool,
@@ -162,6 +183,8 @@ macro_rules! app_settings_schema {
                     detect_any_microphone: true,
                     call_apps: String::new(),
                     auto_stop_minutes: 15,
+                    stop_on_call_end: true,
+                    last_recording: None,
                     auto_summary: true,
                     vocabulary: String::new(),
                     diarize: true,
@@ -244,5 +267,16 @@ mod tests {
         assert!(settings.auto_summary);
         assert_eq!(settings.retention_days, None);
         assert_eq!(AppSettings::default().retention_days, Some(7));
+    }
+}
+
+#[cfg(test)]
+mod recording_option_tests {
+    #[test]
+    fn older_configs_get_call_end_default_and_no_saved_recording() {
+        let settings: super::AppSettings = toml::from_str("auto_stop_minutes = 9").unwrap();
+        assert!(settings.stop_on_call_end);
+        assert!(settings.last_recording.is_none());
+        assert_eq!(settings.auto_stop_minutes, 9);
     }
 }

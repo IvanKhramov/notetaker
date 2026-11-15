@@ -110,6 +110,7 @@ pub struct DeviceInfo {
 #[derive(Debug, Serialize)]
 pub struct ProcessInfo {
     pub pid: u32,
+    pub started_at: u64,
     pub parent_pid: Option<u32>,
     pub exe: String,
 }

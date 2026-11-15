@@ -11,6 +11,13 @@ impl SnapshotProvider for MacosSnapshot {
         let system = System::new_with_specifics(
             RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing()),
         );
+        anyhow::ensure!(
+            system
+                .process(sysinfo::Pid::from_u32(std::process::id()))
+                .is_some(),
+            "process inventory is unavailable"
+        );
+
         let mut microphone = std::collections::BTreeSet::new();
         for pid in owners {
             let owner = sysinfo::Pid::from_u32(pid);

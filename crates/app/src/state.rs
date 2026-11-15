@@ -43,6 +43,10 @@ pub struct Recording {
     pub assist: crate::live::Assist,
     pub importing: bool,
     pub process_id: Option<u32>,
+    pub process_birth: Option<u64>,
+    pub call_id: Option<(u32, u64)>,
+    pub call_ended: bool,
+    pub call_end_suppressed: bool,
     pub path: Option<PathBuf>,
     pub started: Option<Instant>,
     pub stopped: Option<Duration>,
@@ -242,6 +246,13 @@ impl AudioWarnings {
     }
 }
 
+#[derive(Clone)]
+pub struct TitleUndo {
+    pub meeting: notetaker_core::Meeting,
+    pub previous: String,
+    pub generated: String,
+}
+
 pub struct SummaryStatus {
     changed_at: Instant,
     template: String,
@@ -414,6 +425,12 @@ pub struct AppState {
     pub record_mode: notetaker_core::Mode,
     pub record_mode_edited: bool,
     pub process_id: Option<u32>,
+    pub record_microphone_id: Option<String>,
+    pub record_source_guard: Option<notetaker_core::app_config::RecordingOptions>,
+    pub record_options_pending: Option<(notetaker_core::app_config::RecordingOptions, bool)>,
+    pub record_dialog_requested: bool,
+    pub record_options_notice: Option<String>,
+    pub record_source_missing: bool,
     pub templates: Vec<String>,
     pub enhancing: Option<PathBuf>,
     pub voices: notetaker_core::VoiceLibrary,
@@ -423,6 +440,7 @@ pub struct AppState {
     pub error: Option<String>,
     pub warnings: Vec<String>,
     pub notices: Vec<(crate::theme::ToastLevel, String)>,
+    pub title_changes: VecDeque<TitleUndo>,
     pub exported: VecDeque<PathBuf>,
     pub status: String,
     pub exit_requested: bool,
@@ -512,6 +530,12 @@ impl AppState {
             record_mode: settings.mode,
             record_mode_edited: false,
             process_id: None,
+            record_microphone_id: None,
+            record_source_guard: None,
+            record_options_pending: None,
+            record_dialog_requested: false,
+            record_options_notice: None,
+            record_source_missing: false,
             templates: vec!["general".into()],
             enhancing: None,
             voices: Default::default(),
@@ -521,6 +545,7 @@ impl AppState {
             error: None,
             warnings: Vec::new(),
             notices: Vec::new(),
+            title_changes: VecDeque::new(),
             exported: VecDeque::new(),
             status: "Открываем библиотеку…".into(),
             exit_requested: false,
@@ -749,6 +774,110 @@ impl AppState {
             self.prefilled_title = Some(title.clone());
         }
     }
+    pub fn can_prepare_recording(&self) -> bool {
+        self.ready
+            && !self.recording.busy()
+            && !self.settings_pending
+            && !self.exit_requested
+            && !self.quickstart.probe_busy
+            && !self.draft_busy
+            && self.recording.assist.bookmarks_pending == 0
+            && !self
+                .documents
+                .values()
+                .any(|document| document.speaker_ui.recalculating)
+    }
+    pub fn open_record_options(&mut self) {
+        if self.recording.busy() {
+            return;
+        }
+        self.title.clear();
+        self.prefilled_title = None;
+        self.record_options_notice = None;
+        self.record_source_missing = false;
+        self.record_model = self.settings.model.clone();
+        self.record_mode = self.settings.mode;
+        self.record_mode_edited = false;
+        self.record_microphone_id = None;
+        self.record_source_guard = None;
+        self.process_id = None;
+        if let Some(options) = self.settings.last_recording.clone() {
+            self.record_model = options.model.clone();
+            self.record_mode = options.mode;
+            self.record_mode_edited = false;
+            self.record_options_pending = Some((options, false));
+        }
+        self.record_dialog_requested = true;
+        self.inventory_pending = true;
+        self.send(Command::Inventory);
+    }
+    pub fn start_quick_recording(&mut self) {
+        if !self.can_prepare_recording() || self.record_options_pending.is_some() {
+            return;
+        }
+        let Some(options) = self.settings.last_recording.clone() else {
+            self.open_record_options();
+            return;
+        };
+        self.title.clear();
+        self.prefilled_title = None;
+        self.record_options_notice = None;
+        self.record_source_missing = false;
+        self.record_model = options.model.clone();
+        self.record_mode = options.mode;
+        self.record_mode_edited = false;
+        self.record_options_pending = Some((options, true));
+        self.inventory_pending = true;
+        self.send(Command::Inventory);
+    }
+    pub fn confirm_record_source(&mut self) {
+        match crate::recording_options::remember(
+            &self.inventory,
+            &self.recording_settings(),
+            self.process_id,
+            self.record_microphone_id.as_deref(),
+        ) {
+            Ok(options) => {
+                self.record_source_guard = Some(options);
+                self.record_source_missing = false;
+            }
+            Err(error) => {
+                self.record_source_guard = None;
+                self.record_source_missing = true;
+                self.record_options_notice = Some(error.to_string());
+            }
+        }
+    }
+    fn resolve_record_options(&mut self) {
+        if let Some((options, quick)) = self.record_options_pending.take() {
+            match crate::recording_options::resolve(&options, &self.inventory) {
+                Ok(pid) => {
+                    self.record_source_guard = Some(options.clone());
+                    self.process_id = pid;
+                    self.record_microphone_id = Some(options.microphone_id);
+                    self.record_source_missing = false;
+                    if quick && self.quickstart.models.speech_ready(&self.record_model) {
+                        self.start_recording();
+                    } else if quick {
+                        self.record_dialog_requested = true;
+                        self.record_options_notice =
+                            Some("Модель записи не готова. Проверьте параметры.".into());
+                    } else {
+                        self.prefill_call_title();
+                    }
+                }
+                Err(error) => {
+                    self.record_source_guard = None;
+                    self.record_source_missing = true;
+                    self.record_microphone_id = None;
+                    self.record_options_notice = Some(error.to_string());
+                    self.record_dialog_requested = true;
+                }
+            }
+        } else if !self.record_source_missing {
+            self.confirm_record_source();
+        }
+    }
     pub fn start_recording(&mut self) {
         self.start_recording_with_app(None);
     }
@@ -757,13 +886,19 @@ impl AppState {
             Some(CallPrompt::Start {
                 app,
                 pid,
+                started_at,
                 meeting_title,
             }) => {
                 self.process_id = Some(pid);
+                self.record_microphone_id = None;
+                self.record_source_guard = None;
+                self.record_source_missing = false;
+                self.record_options_pending = None;
                 self.record_model = self.settings.model.clone();
                 self.record_mode = self.settings.mode;
                 self.record_mode_edited = false;
                 self.start_recording_with_app(Some(notetaker_detect::DetectedCall {
+                    started_at,
                     app,
                     pid,
                     meeting_title,
@@ -780,26 +915,86 @@ impl AppState {
         }
     }
     pub fn dismiss_call(&mut self) {
-        if let Some(CallPrompt::Start { pid, .. }) = self.call_prompt.take() {
-            self.detector.dismiss(pid);
+        match self.call_prompt.take() {
+            Some(CallPrompt::Start { pid, .. }) => self.detector.dismiss(pid),
+            Some(CallPrompt::Stop { .. }) => self.recording.call_end_suppressed = true,
+            None => {}
+        }
+    }
+    fn call_end_enabled(&self) -> bool {
+        self.settings.stop_on_call_end
+            && self.settings_draft.stop_on_call_end
+            && !self.recording.importing
+    }
+    pub fn tick_call_end(&mut self, now: Instant) {
+        if matches!(self.call_prompt, Some(CallPrompt::Stop { .. })) {
+            if !self.call_end_enabled()
+                || self.exit_requested
+                || !matches!(self.recording.phase, Phase::Starting | Phase::Recording)
+                || self.recording.stop_requested
+            {
+                self.call_prompt = None;
+            } else if let Some(CallPrompt::Stop { countdown, .. }) = &mut self.call_prompt
+                && countdown.tick(now)
+            {
+                self.accept_call();
+            }
+        }
+    }
+    fn detected(&mut self, event: &notetaker_detect::DetectEvent, now: Instant) {
+        if let notetaker_detect::DetectEvent::CallStarted {
+            pid, started_at, ..
+        } = event
+            && matches!(self.recording.phase, Phase::Starting | Phase::Recording)
+            && !self.recording.importing
+            // Only a call attached at recording start can enable auto-stop.
+            && self.recording.call_id.is_some()
+            && (self.recording.call_ended
+                || self.recording.call_id == Some((*pid, *started_at)))
+            && ((self.recording.process_id == Some(*pid)
+                && self.recording.process_birth == Some(*started_at))
+                || (self.recording.process_id.is_none()
+                    && self
+                        .detector
+                        .current_call(None)
+                        .is_some_and(|call| call.pid == *pid && call.started_at == *started_at)))
+        {
+            self.recording.call_id = Some((*pid, *started_at));
+            self.recording.call_ended = false;
+            self.recording.call_end_suppressed = false;
+            if matches!(self.call_prompt, Some(CallPrompt::Stop { .. })) {
+                self.call_prompt = None;
+            }
+        }
+        if let notetaker_detect::DetectEvent::CallEnded {
+            pid, started_at, ..
+        } = event
+            && matches!(&self.call_prompt,Some(CallPrompt::Start {pid:offered,started_at:birth,..}) if offered==pid && birth==started_at)
+        {
+            self.call_prompt = None;
+        }
+        if let Some(prompt) = proposal(
+            event,
+            self.recording.phase,
+            self.recording.call_id,
+            self.recording.stop_requested,
+            self.call_end_enabled() && !self.recording.call_end_suppressed,
+            now,
+        ) {
+            if matches!(prompt, CallPrompt::Stop { .. }) {
+                self.recording.call_ended = true;
+            }
+            self.call_prompt = Some(prompt);
         }
     }
     fn start_recording_with_app(&mut self, call_override: Option<notetaker_detect::DetectedCall>) {
-        if !self.ready
-            || self
-                .documents
-                .values()
-                .any(|doc| doc.speaker_ui.recalculating)
-            || self.recording.busy()
-            || self.recording.assist.bookmarks_pending > 0
-            || !self.quickstart.models.speech_ready(&self.record_model)
-            || self.quickstart.probe_busy
-            || self.settings_pending
-            || self.draft_busy
-            || self.exit_requested
+        if !self.can_prepare_recording() || !self.quickstart.models.speech_ready(&self.record_model)
         {
             return;
         }
+        self.record_options_pending = None;
+        let attach_call_at_start =
+            call_override.is_some() || self.process_id.is_some() || self.selected_event.is_some();
         let call = call_override.or_else(|| self.detector.current_call(self.process_id).cloned());
         let app = call.as_ref().map(|call| call.app.clone()).or_else(|| {
             self.inventory
@@ -814,27 +1009,65 @@ impl AppState {
         let brief = self.recording_brief(event.as_ref());
         let typed = !self.title.trim().is_empty()
             && self.prefilled_title.as_deref() != Some(self.title.as_str());
-        let title = if let Some(event) = event.as_ref().filter(|_| !typed) {
-            event.link.title.clone()
+        let (title, title_source) = if let Some(event) = event.as_ref().filter(|_| !typed) {
+            (
+                event.link.title.clone(),
+                notetaker_core::TitleSource::Calendar,
+            )
         } else if self.title.trim().is_empty() {
-            call.and_then(|call| call.meeting_title).unwrap_or_else(|| {
-                chrono::Local::now()
+            if let Some(title) = call.as_ref().and_then(|call| call.meeting_title.clone()) {
+                (title, notetaker_core::TitleSource::Call)
+            } else {
+                let title = chrono::Local::now()
                     .format("Встреча %d.%m.%Y %H:%M")
-                    .to_string()
-            })
+                    .to_string();
+                let source = notetaker_core::TitleSource::Placeholder {
+                    value: title.clone(),
+                };
+                (title, source)
+            }
         } else {
-            self.title.trim().to_owned()
+            (
+                self.title.trim().to_owned(),
+                if typed {
+                    notetaker_core::TitleSource::User
+                } else {
+                    notetaker_core::TitleSource::Call
+                },
+            )
         };
         self.call_prompt = None;
         if let Some(event) = &event {
             self.recording_event_started(event);
         }
+        let process_birth = self.process_id.and_then(|pid| {
+            call.as_ref()
+                .filter(|call| call.pid == pid)
+                .map(|call| call.started_at)
+                .or_else(|| {
+                    self.inventory
+                        .processes
+                        .iter()
+                        .find(|process| process.pid == pid)
+                        .map(|process| process.started_at)
+                })
+        });
         self.recording = Recording {
             phase: Phase::Starting,
             process_id: self.process_id,
+            process_birth,
+            call_id: call
+                .as_ref()
+                .filter(|_| attach_call_at_start)
+                .map(|call| (call.pid, call.started_at)),
             ..Recording::default()
         };
+        let source_guard = self.record_source_guard.take();
         self.send(Command::Record(RecordRequest {
+            microphone_id: self.record_microphone_id.clone(),
+            source_guard,
+            process_birth,
+            title_source: Some(title_source),
             settings,
             title,
             brief,
@@ -904,6 +1137,8 @@ impl AppState {
         self.title.clear();
         self.prefilled_title = None;
         self.selected_event = Some(event);
+        self.record_source_guard = None;
+        self.record_microphone_id = None;
         self.record_model = self.settings.model.clone();
         self.record_mode = self.settings.mode;
         self.record_mode_edited = false;
@@ -1117,8 +1352,16 @@ impl AppState {
         }
         let meeting = self.documents[path].data.meeting.clone();
         self.send(Command::Rename {
+            expected: None,
             meeting,
             title: title.to_owned(),
+        });
+    }
+    pub fn undo_title(&mut self, undo: TitleUndo) {
+        self.send(Command::Rename {
+            meeting: undo.meeting,
+            title: undo.previous,
+            expected: Some(undo.generated),
         });
     }
     /// Moves the meeting to the library's `.trash` folder; nothing is erased.
@@ -1170,7 +1413,7 @@ impl AppState {
                 self.tab = Tab::Enhanced;
             }
         } else {
-            self.start_recording();
+            self.start_quick_recording();
         }
     }
     fn recording_settings(&self) -> Settings {
@@ -1568,39 +1811,23 @@ impl AppState {
             self.call_prompt = None;
         }
         for event in self.detector.poll() {
-            if !self.settings.detect_calls || self.exit_requested {
-                continue;
-            }
-            if let notetaker_detect::DetectEvent::CallEnded { pid, .. } = &event
-                && matches!(&self.call_prompt, Some(CallPrompt::Start { pid: offered, .. }) if offered == pid)
-            {
-                self.call_prompt = None;
-            }
-            if let Some(prompt) = proposal(
-                &event,
-                self.recording.phase,
-                self.recording.process_id,
-                self.recording.stop_requested,
-            ) {
-                self.call_prompt = Some(prompt);
+            if self.settings.detect_calls && !self.exit_requested {
+                self.detected(&event, Instant::now());
             }
         }
         if let Some(CallPrompt::Start {
             app,
             pid,
+            started_at,
             meeting_title,
         }) = &mut self.call_prompt
             && let Some(call) = self.detector.current_call(Some(*pid))
         {
             *app = call.app.clone();
+            *started_at = call.started_at;
             *meeting_title = call.meeting_title.clone();
         }
-        if matches!(self.call_prompt, Some(CallPrompt::Stop { .. }))
-            && (!matches!(self.recording.phase, Phase::Starting | Phase::Recording)
-                || self.recording.stop_requested)
-        {
-            self.call_prompt = None;
-        }
+        self.tick_call_end(Instant::now());
     }
     fn apply(&mut self, event: Event) {
         if matches!(
@@ -2027,6 +2254,7 @@ impl AppState {
                 Ok(title) => {
                     if let Some(document) = self.documents.get_mut(&path) {
                         document.data.meta.title = title;
+                        document.data.meta.title_source = Some(notetaker_core::TitleSource::User);
                     }
                     self.refresh();
                 }
@@ -2057,23 +2285,34 @@ impl AppState {
                     Ok(inventory) => {
                         self.inventory = inventory;
                         self.inventory_error = None;
-                        if !self
-                            .inventory
-                            .sessions
-                            .iter()
-                            .any(|s| Some(s.pid) == self.process_id)
-                        {
-                            self.process_id = None;
+                        self.resolve_record_options();
+                    }
+                    Err(error) => {
+                        self.inventory_error = Some(error);
+                        if self.record_options_pending.take().is_some() {
+                            self.record_dialog_requested = true;
+                            self.record_source_missing = true;
+                            self.record_options_notice =
+                                Some("Не удалось проверить источник записи.".into());
                         }
                     }
-                    Err(error) => self.inventory_error = Some(error),
                 }
             }
             Event::Started {
+                options,
                 document,
                 stop,
                 importing,
             } => {
+                if let Some(options) = options {
+                    self.settings.last_recording = Some(options.clone());
+                    self.settings_draft.last_recording = Some(options.clone());
+                    self.send(Command::RememberRecording(options));
+                }
+                if !importing {
+                    self.title.clear();
+                    self.prefilled_title = None;
+                }
                 let mut document = document;
                 document
                     .transcript
@@ -2112,6 +2351,12 @@ impl AppState {
                 self.refresh();
             }
             Event::Pipeline(event) => {
+                if matches!(&event,PipelineEvent::Levels {system,..} if *system > 0.0005)
+                    && matches!(self.call_prompt, Some(CallPrompt::Stop { .. }))
+                {
+                    self.call_prompt = None;
+                    self.recording.call_end_suppressed = true;
+                }
                 let previous = self.recording.phase;
                 self.recording.apply(&event);
                 if self.recording.phase != Phase::Recording {
@@ -2173,6 +2418,7 @@ impl AppState {
                 }
             }
             Event::RecordDone {
+                source_issue,
                 path,
                 document,
                 error,
@@ -2210,6 +2456,16 @@ impl AppState {
                     self.error = Some(error);
                     self.exit_requested = false;
                 }
+                if let Some(reason) = source_issue {
+                    self.record_options_pending = None;
+                    self.record_source_guard = None;
+                    self.record_microphone_id = None;
+                    self.record_dialog_requested = true;
+                    self.record_source_missing = true;
+                    self.record_options_notice = Some(reason);
+                    self.inventory_pending = true;
+                    self.send(Command::Inventory);
+                }
                 self.refresh();
             }
             Event::ReloadEnhanced { path, value } => {
@@ -2234,6 +2490,16 @@ impl AppState {
                     doc.generation = None;
                     match result {
                         Ok(text) => {
+                            if let Some(change) = text.title_change {
+                                doc.data.meta.title = change.generated.clone();
+                                doc.data.meta.title_source =
+                                    Some(notetaker_core::TitleSource::Generated);
+                                self.title_changes.push_back(TitleUndo {
+                                    meeting: doc.data.meeting.clone(),
+                                    previous: change.previous,
+                                    generated: change.generated,
+                                });
+                            }
                             doc.data.enhanced = text.text;
                             self.warnings = text.warnings;
                             doc.data.revisions.enhanced = text.revision;
@@ -2247,6 +2513,11 @@ impl AppState {
                     }
                 }
                 self.refresh();
+            }
+            Event::RecordingRemembered(result) => {
+                if let Err(error) = result {
+                    self.error = Some(error);
+                }
             }
             Event::Voices(result) => match result {
                 Ok(voices) => self.voices = voices,
@@ -2310,6 +2581,7 @@ impl AppState {
                         {
                             self.call_prompt = None;
                         }
+                        self.settings_draft.last_recording = settings.last_recording.clone();
                         self.record_model = settings.model.clone();
                         self.record_mode = settings.mode;
                         self.settings = settings;
@@ -2400,6 +2672,405 @@ pub fn edit_segment(transcript: &mut Transcript, id: Uuid, text: String) -> bool
 mod tests {
     use super::*;
     use notetaker_core::{Segment, Source, SpeakerId};
+    #[test]
+    fn quick_button_and_hotkey_use_saved_options_after_fresh_inventory() {
+        for hotkey in [false, true] {
+            let (mut state, commands, _root, _path) = fixture();
+            state.ready = true;
+            state.settings.auto_stop_minutes = 7;
+            let inventory = crate::test_ui::recording_inventory();
+            let mut settings = state.settings.clone();
+            settings.model = "parakeet-v3".into();
+            settings.mode = notetaker_core::Mode::Hybrid;
+            let options =
+                crate::recording_options::remember(&inventory, &settings, Some(42), None).unwrap();
+            state.settings.last_recording = Some(options);
+            state.title = "Название прошлой встречи".into();
+            if hotkey {
+                state.toggle_recording();
+            } else {
+                state.start_quick_recording();
+            }
+            assert!(matches!(commands.try_recv().unwrap(), Command::Inventory));
+            assert!(commands.try_recv().is_err());
+            state.apply(Event::Inventory(Ok(inventory)));
+            let Command::Record(request) = commands.try_recv().unwrap() else {
+                panic!("recording command");
+            };
+            assert_eq!(request.settings.model, "parakeet-v3");
+            assert_eq!(request.settings.mode, notetaker_core::Mode::Hybrid);
+            assert_eq!(request.process_id, Some(42));
+            assert_eq!(request.process_birth, Some(100));
+            assert_eq!(request.microphone_id.as_deref(), Some("mic"));
+            assert_eq!(request.settings.auto_stop_minutes, 7);
+            assert!(
+                matches!(request.title_source,Some(notetaker_core::TitleSource::Placeholder {ref value}) if value==&request.title)
+            );
+            assert!(!state.record_dialog_requested);
+        }
+    }
+    #[test]
+    fn quick_start_reapplies_the_current_folder_privacy_rule() {
+        let (mut state, commands, root, _path) = fixture();
+        state.ready = true;
+        state.settings.library = root.path().into();
+        let library = notetaker_core::Library::open(root.path()).unwrap();
+        let mut folders = library.load_folders().unwrap();
+        folders.value.insert(
+            "Личная".into(),
+            notetaker_core::folders::FolderSettings {
+                mode: Some(notetaker_core::Mode::Local),
+                ..Default::default()
+            },
+        );
+        library
+            .save_folders(&folders.value, folders.revision)
+            .unwrap();
+        state.folder_filter = Some("Личная".into());
+        let mut settings = state.settings.clone();
+        settings.mode = notetaker_core::Mode::Hybrid;
+        settings.folder_mode_override = Some(notetaker_core::Mode::Hybrid);
+        state.settings.last_recording = Some(
+            crate::recording_options::remember(
+                &crate::test_ui::recording_inventory(),
+                &settings,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+        state.start_quick_recording();
+        commands.try_recv().unwrap();
+        state.apply(Event::Inventory(Ok(crate::test_ui::recording_inventory())));
+        let Command::Record(request) = commands.try_recv().unwrap() else {
+            panic!("record");
+        };
+        assert_eq!(request.settings.folder_mode_override, None);
+        let (meta, _) = worker::recording_metadata(
+            &library,
+            &request.settings,
+            &request.title,
+            request.event.as_ref(),
+            request.brief.as_deref(),
+        )
+        .unwrap();
+        assert_eq!(meta.mode, notetaker_core::Mode::Local);
+    }
+    #[test]
+    fn source_error_retry_preserves_current_drafts_and_requires_explicit_source_choice() {
+        let (mut state, commands, _root, _path) = fixture();
+        state.ready = true;
+        state.title = "Моё название".into();
+        state.record_model = "parakeet-v3".into();
+        state.record_mode = notetaker_core::Mode::Hybrid;
+        state.record_mode_edited = true;
+        state.start_recording();
+        commands.try_iter().for_each(drop);
+        state.apply(Event::RecordDone {
+            source_issue: Some("Источник исчез".into()),
+            path: None,
+            document: None,
+            error: None,
+        });
+        state.apply(Event::Inventory(Ok(crate::test_ui::recording_inventory())));
+        assert!(state.record_source_missing && state.record_dialog_requested);
+        assert_eq!(state.title, "Моё название");
+        assert_eq!(state.record_model, "parakeet-v3");
+        assert_eq!(state.record_mode, notetaker_core::Mode::Hybrid);
+        assert!(state.record_mode_edited);
+        assert!(
+            !commands
+                .try_iter()
+                .any(|command| matches!(command, Command::Record(_)))
+        );
+        state.process_id = None;
+        state.confirm_record_source();
+        assert!(!state.record_source_missing);
+        state.start_recording();
+        let Command::Record(request) = commands
+            .try_iter()
+            .find(|command| matches!(command, Command::Record(_)))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(request.title, "Моё название");
+        assert!(request.source_guard.is_some());
+    }
+    #[test]
+    fn quick_start_first_run_or_missing_saved_source_opens_options_without_guessing() {
+        let (mut first, commands, _root, _path) = fixture();
+        first.ready = true;
+        first.toggle_recording();
+        assert!(first.record_dialog_requested);
+        assert!(matches!(commands.try_recv().unwrap(), Command::Inventory));
+        assert!(commands.try_recv().is_err());
+        for gone in ["process", "microphone", "output", "reused-pid"] {
+            let (mut state, commands, _root, _path) = fixture();
+            state.ready = true;
+            state.settings.last_recording = Some(
+                crate::recording_options::remember(
+                    &crate::test_ui::recording_inventory(),
+                    &state.settings,
+                    Some(42),
+                    None,
+                )
+                .unwrap(),
+            );
+            state.start_quick_recording();
+            assert!(matches!(commands.try_recv().unwrap(), Command::Inventory));
+            let mut inventory = crate::test_ui::recording_inventory();
+            match gone {
+                "process" => inventory.processes.clear(),
+                "microphone" => inventory
+                    .devices
+                    .retain(|device| device.channel != notetaker_capture::Channel::Mic),
+                "output" => inventory.devices[1].id = "changed-output".into(),
+                _ => inventory.processes[0].started_at = 200,
+            }
+            state.apply(Event::Inventory(Ok(inventory)));
+            assert!(
+                state.record_dialog_requested && state.record_source_missing,
+                "{gone}"
+            );
+            assert!(state.record_options_notice.is_some());
+            assert!(commands.try_recv().is_err());
+        }
+    }
+    fn call_end(
+        pid: u32,
+        birth: u64,
+        reason: notetaker_detect::CallEndReason,
+    ) -> notetaker_detect::DetectEvent {
+        notetaker_detect::DetectEvent::CallEnded {
+            pid,
+            started_at: birth,
+            reason,
+            app: "Zoom".into(),
+        }
+    }
+    fn attached_recording(state: &mut AppState) {
+        state.recording.phase = Phase::Recording;
+        state.recording.call_id = Some((42, 100));
+        state.recording.path = state.selected.clone();
+    }
+    #[test]
+    fn recording_without_an_initial_call_never_adopts_a_later_microphone_user() {
+        for source in ["unattached", "metadata_only", "process", "hint"] {
+            let attached = matches!(source, "process" | "hint");
+            let (mut state, commands, _root, _path) = fixture();
+            state.ready = true;
+            state.title.clear();
+            let calls = vec![notetaker_detect::DetectedCall {
+                pid: 42,
+                started_at: 100,
+                app: "Zoom".into(),
+                meeting_title: Some("Проверка звука".into()),
+            }];
+            if source != "unattached" {
+                state.detector = Monitor::with_calls(calls.clone());
+            }
+            if source == "process" {
+                state.process_id = Some(42);
+            }
+            if source == "hint" {
+                state.call_prompt = Some(CallPrompt::Start {
+                    pid: 42,
+                    started_at: 100,
+                    app: "Zoom".into(),
+                    meeting_title: Some("Проверка звука".into()),
+                });
+                state.accept_call();
+            } else {
+                state.start_recording();
+            }
+            let Command::Record(request) = commands.try_recv().unwrap() else {
+                panic!("expected recording");
+            };
+            assert_eq!(request.process_id, attached.then_some(42));
+            if source == "metadata_only" {
+                assert_eq!(request.title, "Проверка звука");
+            }
+            assert_eq!(state.recording.call_id, attached.then_some((42, 100)));
+            let now = Instant::now();
+            state.detector = Monitor::with_calls(calls);
+            state.detected(
+                &notetaker_detect::DetectEvent::CallStarted {
+                    pid: 42,
+                    started_at: 100,
+                    app: "Zoom".into(),
+                    meeting_title: Some("Проверка звука".into()),
+                    source: notetaker_detect::DetectSource::Microphone,
+                },
+                now,
+            );
+            assert_eq!(state.recording.call_id, attached.then_some((42, 100)));
+            state.detected(
+                &call_end(42, 100, notetaker_detect::CallEndReason::ProcessExited),
+                now,
+            );
+            assert_eq!(state.call_prompt.is_some(), attached);
+            for second in 1..=30 {
+                state.tick_call_end(now + Duration::from_secs(second));
+            }
+            assert_eq!(state.recording.stop_requested, attached);
+        }
+    }
+    #[test]
+    fn file_processing_never_attaches_to_a_live_call_or_starts_a_countdown() {
+        let (mut state, _commands, _root, _path) = fixture();
+        state.recording.phase = Phase::Starting;
+        state.recording.importing = true;
+        state.detector = Monitor::with_calls(vec![notetaker_detect::DetectedCall {
+            pid: 42,
+            started_at: 100,
+            app: "Zoom".into(),
+            meeting_title: None,
+        }]);
+        let now = Instant::now();
+        state.detected(
+            &notetaker_detect::DetectEvent::CallStarted {
+                pid: 42,
+                started_at: 100,
+                app: "Zoom".into(),
+                meeting_title: None,
+                source: notetaker_detect::DetectSource::Microphone,
+            },
+            now,
+        );
+        assert!(state.recording.call_id.is_none());
+        state.recording.call_id = Some((42, 100));
+        state.detected(
+            &call_end(42, 100, notetaker_detect::CallEndReason::ProcessExited),
+            now,
+        );
+        state.tick_call_end(now + Duration::from_secs(60));
+        assert!(state.call_prompt.is_none() && !state.recording.stop_requested);
+    }
+    #[test]
+    fn call_end_countdown_requires_exact_process_exit_and_stops_at_zero() {
+        let (mut state, _commands, _root, _path) = fixture();
+        attached_recording(&mut state);
+        let now = Instant::now();
+        for event in [
+            call_end(42, 100, notetaker_detect::CallEndReason::MicrophoneReleased),
+            call_end(7, 100, notetaker_detect::CallEndReason::ProcessExited),
+            call_end(42, 200, notetaker_detect::CallEndReason::ProcessExited),
+        ] {
+            state.detected(&event, now);
+            assert!(state.call_prompt.is_none());
+        }
+        state.detected(
+            &call_end(42, 100, notetaker_detect::CallEndReason::ProcessExited),
+            now,
+        );
+        assert!(
+            matches!(state.call_prompt,Some(CallPrompt::Stop {countdown,..}) if countdown.remaining==Duration::from_secs(30))
+        );
+        for second in 1..30 {
+            state.tick_call_end(now + Duration::from_secs(second));
+        }
+        assert!(!state.recording.stop_requested);
+        state.tick_call_end(now + Duration::from_secs(30));
+        assert!(state.recording.stop_requested);
+        assert!(state.call_prompt.is_none());
+    }
+    #[test]
+    fn call_end_countdown_caps_ticks_and_restarts_after_a_suspend_gap() {
+        let (mut state, _commands, _root, _path) = fixture();
+        attached_recording(&mut state);
+        let now = Instant::now();
+        state.detected(
+            &call_end(42, 100, notetaker_detect::CallEndReason::ProcessExited),
+            now,
+        );
+        state.tick_call_end(now + Duration::from_secs(2));
+        assert!(
+            matches!(state.call_prompt, Some(CallPrompt::Stop { countdown, .. })
+            if countdown.remaining == Duration::from_secs(29))
+        );
+        state.tick_call_end(now + Duration::from_secs(42));
+        assert!(!state.recording.stop_requested);
+        assert!(
+            matches!(state.call_prompt, Some(CallPrompt::Stop { countdown, .. })
+            if countdown.remaining == Duration::from_secs(30))
+        );
+        for second in 1..30 {
+            state.tick_call_end(now + Duration::from_secs(42 + second));
+        }
+        assert!(!state.recording.stop_requested);
+        state.tick_call_end(now + Duration::from_secs(72));
+        assert!(state.recording.stop_requested && state.call_prompt.is_none());
+    }
+    #[test]
+    fn call_end_continue_suppresses_until_a_new_attached_call() {
+        let (mut state, _commands, _root, _path) = fixture();
+        attached_recording(&mut state);
+        let now = Instant::now();
+        let event = call_end(42, 100, notetaker_detect::CallEndReason::ProcessExited);
+        state.detected(&event, now);
+        state.dismiss_call();
+        state.detected(&event, now);
+        state.tick_call_end(now + Duration::from_secs(60));
+        assert!(!state.recording.stop_requested && state.call_prompt.is_none());
+        state.detector = Monitor::with_calls(vec![notetaker_detect::DetectedCall {
+            pid: 43,
+            started_at: 200,
+            app: "Zoom".into(),
+            meeting_title: None,
+        }]);
+        state.detected(
+            &notetaker_detect::DetectEvent::CallStarted {
+                pid: 43,
+                started_at: 200,
+                app: "Zoom".into(),
+                meeting_title: None,
+                source: notetaker_detect::DetectSource::Microphone,
+            },
+            now,
+        );
+        state.detected(
+            &call_end(43, 200, notetaker_detect::CallEndReason::ProcessExited),
+            now,
+        );
+        assert!(matches!(
+            state.call_prompt,
+            Some(CallPrompt::Stop { pid: 43, .. })
+        ));
+    }
+    #[test]
+    fn call_end_setting_off_and_resumed_system_sound_cancel_countdown() {
+        let now = Instant::now();
+        let event = call_end(42, 100, notetaker_detect::CallEndReason::ProcessExited);
+        let (mut state, _commands, _root, _path) = fixture();
+        attached_recording(&mut state);
+        state.settings.stop_on_call_end = false;
+        state.detected(&event, now);
+        assert!(state.call_prompt.is_none());
+        state.settings.stop_on_call_end = true;
+        state.detected(&event, now);
+        state.apply(Event::Pipeline(PipelineEvent::Levels {
+            mic: 0.1,
+            system: 0.0,
+        }));
+        assert!(state.call_prompt.is_some());
+        state.apply(Event::Pipeline(PipelineEvent::Levels {
+            mic: 0.0,
+            system: 0.01,
+        }));
+        state.tick_call_end(now + Duration::from_secs(60));
+        assert!(state.call_prompt.is_none() && !state.recording.stop_requested);
+        state.recording.call_end_suppressed = false;
+        state.detected(&event, now);
+        state.settings.stop_on_call_end = false;
+        state.tick_call_end(now + Duration::from_secs(60));
+        assert!(state.call_prompt.is_none() && !state.recording.stop_requested);
+        state.settings.stop_on_call_end = true;
+        state.settings_draft.stop_on_call_end = false;
+        state.recording.call_end_suppressed = false;
+        state.detected(&event, now);
+        assert!(state.call_prompt.is_none() && !state.recording.stop_requested);
+    }
     #[test]
     fn live_stop_cancels_and_bookmark_button_uses_atomic_worker_commands() {
         let (mut state, commands, _root, path) = fixture();
@@ -2797,6 +3468,7 @@ mod tests {
         state.import_recording("other.wav".into());
         assert!(commands.try_recv().is_err());
         state.apply(Event::RecordDone {
+            source_issue: None,
             path: Some(path.clone()),
             document: Some(Box::new(
                 DocumentData::read(state.documents[&path].data.meeting.clone()).unwrap(),
@@ -3210,6 +3882,7 @@ mod tests {
         state.record_mode = notetaker_core::Mode::Hybrid;
         state.title = "old title".into();
         state.call_prompt = Some(CallPrompt::Start {
+            started_at: 100,
             app: "Teams".into(),
             pid: 42,
             meeting_title: Some("Planning".into()),
@@ -3225,7 +3898,11 @@ mod tests {
         assert_eq!(request.title, "old title");
         assert_eq!(state.recording.process_id, Some(42));
         assert!(state.call_prompt.is_none());
-        state.call_prompt = Some(CallPrompt::Stop { pid: 42 });
+        state.call_prompt = Some(CallPrompt::Stop {
+            pid: 42,
+            started_at: 100,
+            countdown: crate::detection::Countdown::new(Instant::now()),
+        });
         state.dismiss_call();
         assert!(!state.recording.stop_requested);
         assert!(state.call_prompt.is_none());
@@ -3237,6 +3914,7 @@ mod tests {
             state.ready = true;
             state.title = typed.into();
             state.detector = Monitor::with_calls(vec![notetaker_detect::DetectedCall {
+                started_at: 100,
                 app: "Контур.Толк (Chrome)".into(),
                 pid: 42,
                 meeting_title: Some("AI planning".into()),
@@ -3262,6 +3940,7 @@ mod tests {
         let (mut state, commands, _root, _path) = fixture();
         state.ready = true;
         state.call_prompt = Some(CallPrompt::Start {
+            started_at: 100,
             app: "Телемост".into(),
             pid: 42,
             meeting_title: Some("Planning".into()),
@@ -3278,6 +3957,7 @@ mod tests {
     fn dialog_prefill_preserves_typed_titles_and_respects_selected_pid() {
         let (mut state, _commands, _root, _path) = fixture();
         state.detector = Monitor::with_calls(vec![notetaker_detect::DetectedCall {
+            started_at: 100,
             app: "Телемост".into(),
             pid: 42,
             meeting_title: Some("Planning".into()),
@@ -3345,6 +4025,7 @@ mod tests {
         });
         state.recording.phase = Phase::Finalizing;
         state.apply(Event::RecordDone {
+            source_issue: None,
             path: Some(path.clone()),
             document: Some(Box::new(reload)),
             error: None,
@@ -3378,6 +4059,7 @@ mod tests {
         state.apply(Event::Enhanced {
             path: path.clone(),
             result: Ok(notetaker_llm::EnhanceResult {
+                title_change: None,
                 text: "committed".into(),
                 revision,
                 warnings: vec!["Index unavailable".into()],
@@ -3682,6 +4364,7 @@ mod tests {
         state.documents.get_mut(&first).unwrap().saving = true;
         let meeting = state.documents[&first].data.meeting.clone();
         state.apply(Event::RecordDone {
+            source_issue: None,
             path: Some(first.clone()),
             document: Some(Box::new(DocumentData::read(meeting).unwrap())),
             error: None,
@@ -3701,6 +4384,7 @@ mod tests {
         let second = meeting.path().to_owned();
         state.selected = Some(second.clone());
         state.apply(Event::RecordDone {
+            source_issue: None,
             path: Some(second.clone()),
             document: Some(Box::new(DocumentData::read(meeting).unwrap())),
             error: None,
@@ -3795,6 +4479,7 @@ mod tests {
         state.llm_configured = true;
         let meeting = state.documents[&path].data.meeting.clone();
         state.apply(Event::RecordDone {
+            source_issue: None,
             path: Some(path.clone()),
             document: Some(Box::new(DocumentData::read(meeting.clone()).unwrap())),
             error: None,
@@ -3802,6 +4487,7 @@ mod tests {
         assert_eq!(state.pending_summary, Some(path.clone()));
         state.pending_summary = None;
         state.apply(Event::RecordDone {
+            source_issue: None,
             path: Some(path),
             document: Some(Box::new(DocumentData::read(meeting).unwrap())),
             error: Some("final pass failed".into()),
@@ -4078,6 +4764,35 @@ mod calendar_tests {
             organizer: None,
         });
         (state, commands)
+    }
+    #[test]
+    fn calendar_start_attaches_an_already_detected_call_for_auto_stop() {
+        let (mut state, commands) = fixture();
+        state.detector = Monitor::with_calls(vec![notetaker_detect::DetectedCall {
+            pid: 42,
+            started_at: 100,
+            app: "Zoom".into(),
+            meeting_title: Some("Имя звонка".into()),
+        }]);
+        let event = state.calendar_events[0].clone();
+        state.start_event(event.clone());
+        let Command::Record(request) = commands.try_recv().unwrap() else {
+            panic!("expected recording");
+        };
+        assert_eq!(request.event.unwrap().link.uid, event.link.uid);
+        assert_eq!(request.title, event.link.title);
+        assert_eq!(state.recording.call_id, Some((42, 100)));
+        let now = Instant::now();
+        state.detected(
+            &notetaker_detect::DetectEvent::CallEnded {
+                pid: 42,
+                started_at: 100,
+                app: "Zoom".into(),
+                reason: notetaker_detect::CallEndReason::ProcessExited,
+            },
+            now,
+        );
+        assert!(matches!(state.call_prompt, Some(CallPrompt::Stop { .. })));
     }
     #[test]
     fn brief_save_requires_opt_in_and_matching_occurrence() {

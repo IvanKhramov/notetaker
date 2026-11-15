@@ -42,6 +42,13 @@ impl SnapshotProvider for WindowsSnapshot {
             RefreshKind::nothing()
                 .with_processes(ProcessRefreshKind::nothing().with_exe(UpdateKind::OnlyIfNotSet)),
         );
+        anyhow::ensure!(
+            system
+                .process(sysinfo::Pid::from_u32(std::process::id()))
+                .is_some(),
+            "process inventory is unavailable"
+        );
+
         let need_packages = usage
             .iter()
             .any(|u| u.is_active() && matches!(u.app, RegistryApp::Packaged(_)));

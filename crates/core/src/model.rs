@@ -10,6 +10,8 @@ pub const SCHEMA_VERSION: u32 = 1;
 pub struct MeetingMeta {
     pub id: Uuid,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_source: Option<TitleSource>,
     pub started_at: DateTime<Utc>,
     pub ended_at: Option<DateTime<Utc>>,
     pub app: Option<String>,
@@ -38,6 +40,7 @@ impl MeetingMeta {
             capture_issues: Vec::new(),
             id: Uuid::now_v7(),
             title: title.into(),
+            title_source: None,
             started_at,
             ended_at: None,
             app: None,
@@ -47,6 +50,26 @@ impl MeetingMeta {
             tags: Vec::new(),
             audio_expires_at: started_at.checked_add_signed(TimeDelta::days(7)),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TitleSource {
+    Placeholder { value: String },
+    User,
+    Calendar,
+    Call,
+    Generated,
+}
+impl MeetingMeta {
+    pub fn needs_auto_title(&self) -> bool {
+        self.calendar_event.is_none()
+            && match &self.title_source {
+                Some(TitleSource::Placeholder { value }) => self.title == *value,
+                None => self.title.trim().is_empty(),
+                _ => false,
+            }
     }
 }
 
@@ -360,5 +383,83 @@ mod summary_tests {
             serde_yaml::from_str::<MeetingMeta>(&serde_yaml::to_string(&meta).unwrap()).unwrap(),
             meta
         );
+    }
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::*;
+    #[test]
+    fn only_explicit_unchanged_placeholders_or_legacy_empty_titles_are_eligible() {
+        let mut meta = MeetingMeta::new("Встреча 15.11.2026 12:00", Utc::now());
+        assert!(!meta.needs_auto_title());
+        meta.title_source = Some(TitleSource::Placeholder {
+            value: meta.title.clone(),
+        });
+        assert!(meta.needs_auto_title());
+        meta.title = "Пользовательская правка файла".into();
+        assert!(!meta.needs_auto_title());
+        for source in [
+            TitleSource::User,
+            TitleSource::Calendar,
+            TitleSource::Call,
+            TitleSource::Generated,
+        ] {
+            meta.title_source = Some(source);
+            assert!(!meta.needs_auto_title());
+        }
+        meta.title.clear();
+        meta.title_source = None;
+        assert!(meta.needs_auto_title());
+        meta.calendar_event = Some(crate::calendar::EventLink {
+            uid: "event".into(),
+            title: String::new(),
+            attendees: vec![],
+            call_url: None,
+        });
+        assert!(!meta.needs_auto_title());
+    }
+    #[test]
+    fn legacy_title_meta_is_read_without_rewriting_and_old_readers_ignore_provenance() {
+        let root = tempfile::tempdir().unwrap();
+        let library = crate::Library::open(root.path()).unwrap();
+        let meeting = library
+            .create_meeting(MeetingMeta::new("Старая встреча", Utc::now()))
+            .unwrap();
+        let path = meeting.path().join("meta.yaml");
+        let original = std::fs::read(&path).unwrap();
+        assert!(!String::from_utf8_lossy(&original).contains("title_source"));
+        assert_eq!(meeting.read_meta().unwrap().title_source, None);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        meeting
+            .update_meta(|meta| {
+                meta.title_source = Some(TitleSource::Placeholder {
+                    value: meta.title.clone(),
+                })
+            })
+            .unwrap();
+        #[derive(Deserialize)]
+        struct OldMeta {
+            title: String,
+        }
+        let old: OldMeta = serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(old.title, "Старая встреча");
+    }
+    #[test]
+    fn title_undo_is_revision_checked_and_marks_the_restored_name_as_user_chosen() {
+        let root = tempfile::tempdir().unwrap();
+        let library = crate::Library::open(root.path()).unwrap();
+        let mut meta = MeetingMeta::new("Новое название", Utc::now());
+        meta.title_source = Some(TitleSource::Generated);
+        let meeting = library.create_meeting(meta).unwrap();
+        let path = meeting.path().join("meta.yaml");
+        let original = std::fs::read(&path).unwrap();
+        assert!(meeting.rename_title("Прежнее", Some("Устаревшее")).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), original);
+        meeting.rename_title("", Some("Новое название")).unwrap();
+        let meta = meeting.read_meta().unwrap();
+        assert_eq!(meta.title, "");
+        assert_eq!(meta.title_source, Some(TitleSource::User));
+        assert!(!meta.needs_auto_title());
     }
 }
