@@ -1,10 +1,40 @@
-use std::{io::Read, time::Duration};
+use std::{
+    io::Read,
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Result, ensure};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, de::DeserializeOwned};
 
 const LIMIT: u64 = 16 * 1024 * 1024;
+pub(super) const MAX_TIME_MS: i64 = 86_400_000;
+pub(super) fn malformed() -> anyhow::Error {
+    anyhow::anyhow!("Некорректная структура ответа Толка: недопустимое время")
+}
+pub(super) fn valid_time(start: i64, end: i64) -> Result<()> {
+    ensure!(
+        start >= 0 && start <= end && end <= MAX_TIME_MS,
+        malformed()
+    );
+    Ok(())
+}
+
+#[cfg(not(test))]
+static LAST_REQUEST: Mutex<Option<Instant>> = Mutex::new(None);
+const REQUEST_GAP: Duration = Duration::from_millis(1501);
+fn pace_requests(
+    state: &Mutex<Option<Instant>>,
+    now: impl Fn() -> Instant,
+    sleep: impl Fn(Duration),
+) {
+    let mut last = state.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(previous) = *last {
+        sleep(REQUEST_GAP.saturating_sub(now().saturating_duration_since(previous)));
+    }
+    *last = Some(now());
+}
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct User {
@@ -78,7 +108,10 @@ pub struct Track {
     pub chunks: Vec<Chunk>,
 }
 #[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Chunk {
+    pub start_time_offset_in_millis: i64,
+    pub end_time_offset_in_millis: i64,
     pub words: Vec<Word>,
 }
 #[derive(Clone, Debug, Deserialize)]
@@ -87,6 +120,27 @@ pub struct Word {
     pub text: String,
     pub start_time_offset_in_millis: i64,
     pub end_time_offset_in_millis: i64,
+}
+
+impl Transcript {
+    pub(super) fn validate(&self) -> Result<()> {
+        for track in &self.tracks {
+            track.speaker.identity()?;
+            for chunk in &track.chunks {
+                valid_time(
+                    chunk.start_time_offset_in_millis,
+                    chunk.end_time_offset_in_millis,
+                )?;
+                for word in &chunk.words {
+                    valid_time(
+                        word.start_time_offset_in_millis,
+                        word.end_time_offset_in_millis,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 pub struct Client {
@@ -138,6 +192,8 @@ impl Client {
             url.query_pairs_mut()
                 .extend_pairs(query.iter().map(|(k, v)| (*k, v)));
         }
+        #[cfg(not(test))]
+        pace_requests(&LAST_REQUEST, Instant::now, std::thread::sleep);
         let response = self
             .http
             .get(url)
@@ -189,16 +245,7 @@ impl Client {
             transcript.status == "complete",
             "Транскрипция Толка ещё не готова"
         );
-        for track in &transcript.tracks {
-            track.speaker.identity()?;
-            for word in track.chunks.iter().flat_map(|c| &c.words) {
-                ensure!(
-                    word.start_time_offset_in_millis >= 0
-                        && word.end_time_offset_in_millis > word.start_time_offset_in_millis,
-                    "Некорректное время слова Толка"
-                );
-            }
-        }
+        transcript.validate()?;
         Ok(transcript)
     }
 }

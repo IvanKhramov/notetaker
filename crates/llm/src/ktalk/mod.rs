@@ -13,6 +13,8 @@ pub struct Settings {
     pub base_url: String,
     pub credential_id: String,
     pub api_key_env: Option<String>,
+    #[serde(flatten)]
+    pub extra: std::collections::BTreeMap<String, toml::Value>,
 }
 impl Settings {
     pub fn save_key(&self, key: &str, store: &dyn CredentialStore) -> Result<()> {
@@ -38,5 +40,21 @@ impl Settings {
             store.read(&format!("ktalk/{}", self.credential_id))?
         };
         Client::new(&self.base_url, &key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn cli_config_load_and_shared_settings_serialization_preserve_unknown_keys() {
+        let text = "[defaults]\nlocal='test'\nhybrid='test'\n[[providers]]\nid='test'\nkind='openai'\nbase_url='https://example.org/v1'\nmodel='test'\n[ktalk]\nbase_url='https://neutral.ktalk.ru'\ncredential_id='work'\nfuture_mode='strict'\nfuture_option={enabled=true, values=[1,2]}\n";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, text).unwrap();
+        let settings = crate::Config::from_path(&path).unwrap().ktalk.unwrap();
+        let before: toml::Value = toml::from_str(text).unwrap();
+        let after: toml::Value = toml::from_str(&toml::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(before.get("ktalk"), Some(&after));
+        assert_eq!(settings.extra.len(), 2);
     }
 }

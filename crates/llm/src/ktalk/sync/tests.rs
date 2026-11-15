@@ -49,7 +49,11 @@ fn fixture(offset: i64) -> (Local, Transcript) {
         tracks: (0..3)
             .map(|i| Track {
                 speaker: participant(i),
-                chunks: vec![Chunk { words: vec![] }],
+                chunks: vec![Chunk {
+                    start_time_offset_in_millis: 0,
+                    end_time_offset_in_millis: super::super::client::MAX_TIME_MS,
+                    words: vec![],
+                }],
             })
             .collect(),
     };
@@ -156,7 +160,7 @@ fn aligns_positive_and_negative_offsets_and_rejects_unrelated_text() {
             .err()
             .unwrap()
             .to_string(),
-            "не удалось надёжно сопоставить время"
+            "запись слишком короткая для надёжной сверки"
         );
     }
 }
@@ -249,23 +253,288 @@ fn old_file_read_no_rewrite_idempotent_revision_stale_summary_and_search() {
 }
 
 #[test]
-fn text_threshold_accepts_half_tokens_and_normalizes_case_punctuation() {
-    let (mut local, remote) = fixture(37_000);
-    for segment in &mut local.segments {
-        let first = segment
+fn realistic_asr_noise_and_word_forms_in_a_fifth_of_words_are_accepted() {
+    let (mut local, mut remote) = fixture(37_000);
+    let extra = [
+        "Индексация документов ускоряет поиск информации",
+        "Разработка интерфейса упрощает настройку приложения",
+        "Планирование ресурсов предотвращает перегрузку оборудования",
+    ];
+    for (i, text) in extra.iter().enumerate() {
+        let mut s = local.segments[0].clone();
+        s.id = Uuid::now_v7();
+        s.start_ms = 270_000 + i as u64 * 27_300;
+        s.end_ms = s.start_ms + 3000;
+        s.text = (*text).into();
+        local.segments.push(s);
+    }
+    for track in &mut remote.tracks {
+        track.chunks[0].words.clear();
+    }
+    let replacements = [
+        "проверок",
+        "задержки",
+        "журналов",
+        "подключений",
+        "работников",
+        "расчётов",
+        "файлам",
+        "информацией",
+        "приложением",
+        "обрудования",
+    ];
+    for (i, s) in local.segments.iter_mut().enumerate() {
+        // Five informative words, one changed form/ASR substitution per segment.
+        let words: Vec<_> = s
+            .text
+            .split_whitespace()
+            .take(5)
+            .map(str::to_owned)
+            .collect();
+        for (j, text) in words.iter().enumerate() {
+            remote.tracks[i % 2].chunks[0].words.push(Word {
+                text: text.clone(),
+                start_time_offset_in_millis: s.start_ms as i64 + 37_000 + j as i64 * 600 + 15,
+                end_time_offset_in_millis: s.start_ms as i64 + 37_000 + (j + 1) as i64 * 600 - 15,
+            });
+        }
+        s.text = format!(
+            "{}! {}",
+            words[..4].join(" ").to_uppercase(),
+            replacements[i]
+        );
+    }
+    let p = plan(&local, start(), recording("a", 0, 400), &remote, &owner()).unwrap();
+    assert!((p.validation_score - 0.8).abs() < 0.001);
+    assert_eq!(p.offset_ms, 37_000);
+}
+
+#[test]
+fn shared_vocabulary_with_only_a_minority_of_matching_segments_is_refused() {
+    let (mut local, remote) = fixture(0);
+    // Six of seven segments still share three topic words, but this is a
+    // different meeting. The seventh is an exact match; Dice alone exceeds .5.
+    for s in &mut local.segments[..6] {
+        let topic = s
             .text
             .split_whitespace()
             .take(3)
             .collect::<Vec<_>>()
             .join(" ");
-        segment.text = format!("{}! чужой иной пример", first.to_uppercase());
-    }
-    let p = plan(&local, start(), recording("a", 0, 400), &remote, &owner()).unwrap();
-    assert!((p.validation_score - 0.5).abs() < 0.001);
-    for segment in &mut local.segments {
-        segment.text = "Другой посторонний текст совершенно чужой теме".into();
+        s.text = format!("{topic} обсуждали другие изменения");
     }
     assert!(plan(&local, start(), recording("a", 0, 400), &remote, &owner()).is_err());
+}
+
+#[test]
+fn majority_gate_rejects_many_low_content_samples_despite_six_good_matches() {
+    let (mut local, mut remote) = fixture(0);
+    // Seven confirmations and 30+ distinct tokens are present across the interval,
+    // but partially matching segments dominate the sample.
+    let topic = local.segments[0]
+        .text
+        .split_whitespace()
+        .take(3)
+        .collect::<Vec<_>>()
+        .join(" ");
+    for time in [
+        123_500, 131_000, 145_000, 162_000, 183_000, 199_000, 225_000, 238_000,
+    ] {
+        let mut s = local.segments[0].clone();
+        s.id = Uuid::now_v7();
+        s.start_ms = time;
+        s.end_ms = time + 1000;
+        s.text = format!("{topic} различные новые вопросы");
+        remote.tracks[0].chunks[0].words.push(Word {
+            text: format!("{topic} отсутствующие чужие детали"),
+            start_time_offset_in_millis: s.start_ms as i64,
+            end_time_offset_in_millis: s.end_ms as i64,
+        });
+        local.segments.push(s);
+    }
+
+    assert_eq!(
+        plan(&local, start(), recording("a", 0, 400), &remote, &owner())
+            .err()
+            .unwrap()
+            .to_string(),
+        "не удалось надёжно сопоставить время"
+    );
+}
+
+#[test]
+fn three_similar_but_contradictory_pairs_are_too_short_to_verify() {
+    let (mut local, mut remote) = fixture(0);
+    local.segments.truncate(3);
+    let a = [
+        "Релиз проекта Атлас запланирован на пятницу",
+        "Задача миграции базы данных закрыта",
+        "Кластер продакшена проходит проверку резервирования",
+    ];
+    let b = [
+        "Релиз проекта Атлас запланирован на понедельник",
+        "Задача миграции базы данных открыта",
+        "Кластер продакшена провалил проверку резервирования",
+    ];
+    for track in &mut remote.tracks {
+        track.chunks[0].words.clear();
+    }
+    for (i, s) in local.segments.iter_mut().enumerate() {
+        s.start_ms = i as u64 * 30_000;
+        s.end_ms = s.start_ms + 5000;
+        s.text = a[i].into();
+        remote.tracks[0].chunks[0].words.push(Word {
+            text: b[i].into(),
+            start_time_offset_in_millis: s.start_ms as i64,
+            end_time_offset_in_millis: s.end_ms as i64,
+        });
+    }
+    assert_eq!(
+        plan(
+            &local,
+            start(),
+            recording("wrong", 0, 65),
+            &remote,
+            &owner()
+        )
+        .err()
+        .unwrap()
+        .to_string(),
+        "запись слишком короткая для надёжной сверки"
+    );
+}
+
+#[test]
+fn repeated_speech_block_is_ambiguous() {
+    let (local, mut remote) = fixture(0);
+    // Both identical readings independently match every local activity interval.
+    for track in &mut remote.tracks {
+        let repeated: Vec<_> = track.chunks[0]
+            .words
+            .iter()
+            .cloned()
+            .map(|mut w| {
+                w.start_time_offset_in_millis += 140_000;
+                w.end_time_offset_in_millis += 140_000;
+                w
+            })
+            .collect();
+        track.chunks[0].words.extend(repeated);
+    }
+    assert!(
+        plan(
+            &local,
+            start(),
+            recording("twice", 0, 500),
+            &remote,
+            &owner()
+        )
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("неоднозначное сопоставление времени")
+    );
+}
+
+#[test]
+fn explicit_recording_obeys_the_same_overlap_rule() {
+    let r = recording("explicit", 51, 100);
+    let error = select_from_recordings(&[r], start(), 100_000, Some("explicit"))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("меньше половины"));
+    let r = recording("explicit", 50, 100);
+    assert_eq!(
+        select_from_recordings(&[r], start(), 100_000, Some("explicit"))
+            .unwrap()
+            .id,
+        "explicit"
+    );
+}
+
+#[test]
+fn unsorted_page_does_not_hide_a_second_candidate_and_scan_cap_fails_closed() {
+    let cutoff = start() - chrono::Duration::days(1);
+    let mut first = vec![recording("A", 0, 100)];
+    first.extend((0..99).map(|n| {
+        let mut r = recording(&format!("old-{n}"), -172_800, 100);
+        r.status = "processing".into();
+        r
+    }));
+    let pages = [first, vec![recording("B", 0, 100)]];
+    let mut calls = 0;
+    let records = scan_recordings(
+        |skip| {
+            assert_eq!(skip, calls * 100);
+            let page = pages[calls].clone();
+            calls += 1;
+            Ok(page)
+        },
+        cutoff,
+    )
+    .unwrap();
+    assert_eq!(calls, 2);
+    assert!(
+        match_recording(&records, start(), 100_000)
+            .unwrap_err()
+            .to_string()
+            .contains("Неоднозначное")
+    );
+    let mut calls = 0;
+    let error = scan_recordings(
+        |skip| {
+            calls += 1;
+            Ok((skip..skip + 100)
+                .map(|n| recording(&n.to_string(), 0, 100))
+                .collect())
+        },
+        cutoff,
+    )
+    .unwrap_err()
+    .to_string();
+    assert_eq!(calls, PAGE_LIMIT);
+    assert!(error.contains("30 страниц"));
+    // Reaching the limit with a valid terminating page is allowed.
+    let mut calls = 0;
+    assert!(
+        scan_recordings(
+            |skip| {
+                calls += 1;
+                Ok((skip..skip + if calls == PAGE_LIMIT { 1 } else { 100 })
+                    .map(|n| recording(&n.to_string(), 0, 100))
+                    .collect())
+            },
+            cutoff
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn extreme_alignment_arithmetic_and_local_timings_fail_without_panics() {
+    for implied in [i64::MIN, i64::MAX] {
+        assert!(
+            estimate_offset(&[(0, 1000)], &[(0, 1000)], implied)
+                .unwrap_err()
+                .to_string()
+                .contains("недопустимое время")
+        );
+    }
+    assert!(
+        estimate_offset(&[(0, i64::MAX)], &[(0, 1000)], 0)
+            .unwrap_err()
+            .to_string()
+            .contains("недопустимое время")
+    );
+    let (mut local, remote) = fixture(0);
+    local.segments[0].end_ms = u64::MAX;
+    assert!(
+        plan(&local, start(), recording("a", 0, 400), &remote, &owner())
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("недопустимое время")
+    );
 }
 
 #[test]
@@ -421,10 +690,15 @@ fn voice_links_and_removed_speakers_do_not_leak_into_people_or_series() {
 fn three_hour_offset_search_has_fixed_cost() {
     let mut intervals = Vec::new();
     let mut time = 0;
-    // Around 50k fine word intervals, with non-periodic pauses.
+    // A long-period deterministic PRNG avoids activity aliases. Short words
+    // remain distinguishable on the 100 ms search grid even in a dense meeting.
+    let mut random = 0x1234_5678_9abc_def0u64;
     while time < 10_800_000 {
-        intervals.push((time, time + 120));
-        time += 170 + (time % 137);
+        intervals.push((time, time + 60));
+        random ^= random << 13;
+        random ^= random >> 7;
+        random ^= random << 17;
+        time += 170 + (random % 137) as i64;
     }
     let activity = union(intervals.clone());
     let speech = union(

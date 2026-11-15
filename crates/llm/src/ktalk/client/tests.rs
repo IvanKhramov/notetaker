@@ -83,7 +83,7 @@ fn caps_body_and_rejects_insecure_or_embedded_credentials() {
 }
 #[test]
 fn transcript_requires_word_shape_but_tolerates_optional_fields() {
-    let value = serde_json::json!({"status":"complete","tracks":[{"speaker":{"isAnonymous":true,"anonymousId":"guest","anonymousName":"Анна Петрова"},"chunks":[{"words":[{"text":"привет","startTimeOffsetInMillis":10,"endTimeOffsetInMillis":90}]}]}]});
+    let value = serde_json::json!({"status":"complete","tracks":[{"speaker":{"isAnonymous":true,"anonymousId":"guest","anonymousName":"Анна Петрова"},"chunks":[{"startTimeOffsetInMillis":0,"endTimeOffsetInMillis":100,"words":[{"text":"привет","startTimeOffsetInMillis":10,"endTimeOffsetInMillis":90}]}]}]});
     let (client, task) = server(200, serde_json::to_vec(&value).unwrap());
     assert_eq!(client.transcript("id").unwrap().tracks.len(), 1);
     task.join().unwrap();
@@ -104,10 +104,11 @@ fn paging_deduplicates_equal_timestamps_and_stops_without_new_ids() {
         .map(|n| recording(&format!("processing-{n}"), "processing"))
         .collect();
     first.push(recording("A", "complete"));
-    let second = vec![recording("A", "complete"), recording("extra", "processing")];
+    let mut second = vec![recording("A", "complete"), recording("extra", "processing")];
+    second.extend((0..98).map(|n| recording(&format!("processing-{n}"), "processing")));
     let pages = [first, second.clone(), second];
     let task = thread::spawn(move || {
-        for (page, skip) in pages.into_iter().zip([0, 100, 102]) {
+        for (page, skip) in pages.into_iter().zip([0, 100, 200]) {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = Vec::new();
             while !request.ends_with(b"\r\n\r\n") {
@@ -148,4 +149,55 @@ fn paging_deduplicates_equal_timestamps_and_stops_without_new_ids() {
         "A"
     );
     task.join().unwrap();
+}
+
+#[test]
+fn rejects_extreme_negative_reversed_and_over_day_word_and_chunk_timings() {
+    for (start, end) in [
+        (0, i64::MAX),
+        (i64::MIN, 1),
+        (-1, 10),
+        (10, 9),
+        (0, MAX_TIME_MS + 1),
+    ] {
+        for field in ["word", "chunk"] {
+            let mut chunk = serde_json::json!({"startTimeOffsetInMillis":0,"endTimeOffsetInMillis":100,"words":[{"text":"проверка","startTimeOffsetInMillis":0,"endTimeOffsetInMillis":100}]});
+            let target = if field == "word" {
+                &mut chunk["words"][0]
+            } else {
+                &mut chunk
+            };
+            target["startTimeOffsetInMillis"] = start.into();
+            target["endTimeOffsetInMillis"] = end.into();
+            let response = serde_json::json!({"status":"complete","tracks":[{"speaker":{"isAnonymous":true,"anonymousId":"guest","anonymousName":"Анна Петрова"},"chunks":[chunk]}]});
+            let (client, task) = server(200, serde_json::to_vec(&response).unwrap());
+            let error = client.transcript("test").unwrap_err().to_string();
+            assert!(
+                error.contains("Некорректная структура") && error.contains("недопустимое время"),
+                "{field}: {error}"
+            );
+            task.join().unwrap();
+        }
+    }
+    // Inclusive boundaries, including zero-length timing, are valid API values.
+    assert!(valid_time(0, 0).is_ok());
+    assert!(valid_time(0, MAX_TIME_MS).is_ok());
+}
+
+#[test]
+fn process_pacer_allows_at_most_forty_requests_in_a_rolling_minute() {
+    use std::cell::Cell;
+    let state = Mutex::new(None);
+    let now = Cell::new(Instant::now());
+    let mut sent = Vec::new();
+    for _ in 0..81 {
+        pace_requests(&state, || now.get(), |delay| now.set(now.get() + delay));
+        sent.push(now.get());
+    }
+    for window in sent.windows(41) {
+        assert!(window[40].duration_since(window[0]) > Duration::from_secs(60));
+    }
+    for pair in sent.windows(2) {
+        assert!(pair[1].duration_since(pair[0]) >= REQUEST_GAP);
+    }
 }

@@ -5,7 +5,21 @@ use notetaker_core::{Library, Meeting, Transcript as Local};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::client::{malformed, valid_time};
+
 type Interval = (i64, i64);
+fn add(a: i64, b: i64) -> Result<i64> {
+    a.checked_add(b).ok_or_else(malformed)
+}
+fn sub(a: i64, b: i64) -> Result<i64> {
+    a.checked_sub(b).ok_or_else(malformed)
+}
+fn shifted(interval: Interval, offset: i64) -> Result<Interval> {
+    Ok((add(interval.0, offset)?, add(interval.1, offset)?))
+}
+fn short_recording() -> anyhow::Error {
+    anyhow::anyhow!("запись слишком короткая для надёжной сверки")
+}
 fn union(mut intervals: Vec<Interval>) -> Vec<Interval> {
     intervals.sort_unstable();
     let mut out: Vec<Interval> = Vec::new();
@@ -20,18 +34,20 @@ fn union(mut intervals: Vec<Interval>) -> Vec<Interval> {
     }
     out
 }
-fn overlap(a: &[Interval], b: &[Interval], offset: i64) -> i64 {
+fn overlap(a: &[Interval], b: &[Interval]) -> Result<i64> {
     let (mut i, mut j, mut total) = (0, 0, 0);
-    while i < a.len() && j < b.len() {
-        let (start, end) = (a[i].0 + offset, a[i].1 + offset);
-        total += (end.min(b[j].1) - start.max(b[j].0)).max(0);
-        if end < b[j].1 {
+    while let (Some(&(start, end)), Some(&(other_start, other_end))) = (a.get(i), b.get(j)) {
+        total = add(
+            total,
+            sub(end.min(other_end), start.max(other_start))?.max(0),
+        )?;
+        if end < other_end {
             i += 1;
         } else {
             j += 1;
         }
     }
-    total
+    Ok(total)
 }
 // Deliberately small, language-independent evidence still needs diversity and coverage.
 const STOP_WORDS: &[&str] = &[
@@ -115,29 +131,33 @@ const MAX_BINS: usize = 131_072;
 fn estimate_offset(activity: &[Interval], speech: &[Interval], implied: i64) -> Result<i64> {
     let normalized: Vec<_> = speech
         .iter()
-        .map(|(a, b)| (a - implied, b - implied))
-        .collect();
+        .map(|(a, b)| Ok((sub(*a, implied)?, sub(*b, implied)?)))
+        .collect::<Result<_>>()?;
     let bounds = activity.iter().chain(&normalized);
-    let origin = bounds.clone().map(|(a, _)| *a).min().unwrap_or(0) - 180_000;
-    let end = bounds.map(|(_, b)| *b).max().unwrap_or(0) + 180_000;
-    let bins = ((end - origin + GRID_MS - 1) / GRID_MS) as usize;
+    let origin = sub(bounds.clone().map(|(a, _)| *a).min().unwrap_or(0), 180_000)?;
+    let end = add(bounds.map(|(_, b)| *b).max().unwrap_or(0), 180_000)?;
+    let bins =
+        usize::try_from(add(sub(end, origin)?, GRID_MS - 1)? / GRID_MS).map_err(|_| malformed())?;
     ensure!(
         bins <= MAX_BINS,
         "Слишком длинный интервал для поиска смещения Толка (лимит 131072 отсчёта по 100 мс)"
     );
-    let raster = |intervals: &[Interval]| {
+    let raster = |intervals: &[Interval]| -> Result<Vec<u64>> {
         let mut bits = vec![0u64; bins.div_ceil(64)];
         for &(a, b) in intervals {
-            for i in
-                ((a - origin) / GRID_MS) as usize..((b - origin + GRID_MS - 1) / GRID_MS) as usize
-            {
-                bits[i / 64] |= 1 << (i % 64);
+            ensure!(a <= b, malformed());
+            let first = usize::try_from(sub(a, origin)? / GRID_MS).map_err(|_| malformed())?;
+            let end = usize::try_from(add(sub(b, origin)?, GRID_MS - 1)? / GRID_MS)
+                .map_err(|_| malformed())?;
+            ensure!(end <= bins, malformed());
+            for i in first..end {
+                *bits.get_mut(i / 64).ok_or_else(malformed)? |= 1 << (i % 64);
             }
         }
-        bits
+        Ok(bits)
     };
-    let a = raster(activity);
-    let b = raster(&normalized);
+    let a = raster(activity)?;
+    let b = raster(&normalized)?;
     let score = |shift: i64| {
         let q = shift.div_euclid(64);
         let r = shift.rem_euclid(64) as u32;
@@ -156,11 +176,26 @@ fn estimate_offset(activity: &[Interval], speech: &[Interval], implied: i64) -> 
             })
             .sum::<u32>()
     };
-    let step = (-1800i64..=1800)
-        .max_by_key(|step| (score(*step), -step.abs()))
-        .unwrap();
-    Ok(implied + step * GRID_MS)
+    // Scores are bounded by MAX_BINS. Step/index arithmetic below depends only
+    // on this fixed search grid, never on an unvalidated network timestamp.
+    let scores: Vec<_> = (-1800i64..=1800).map(|step| (step, score(step))).collect();
+    let &(step, best) = scores
+        .iter()
+        .max_by_key(|(step, score)| (*score, -step.abs()))
+        .ok_or_else(malformed)?;
+    let second = scores
+        .iter()
+        .filter(|(other, _)| (other - step).abs() > 20)
+        .map(|(_, score)| *score)
+        .max()
+        .unwrap_or(0);
+    ensure!(
+        best > 0 && (best - second) * 100 >= best * 10,
+        "неоднозначное сопоставление времени: отрыв от другого смещения меньше 10%"
+    );
+    add(implied, step * GRID_MS)
 }
+
 fn tokens(text: &str) -> BTreeSet<String> {
     text.split(|c: char| !c.is_alphanumeric())
         .filter(|s| s.chars().count() >= 3 && s.chars().all(char::is_alphabetic))
@@ -170,20 +205,19 @@ fn tokens(text: &str) -> BTreeSet<String> {
 }
 fn duration(meeting: &Meeting, local: &Local) -> Result<i64> {
     let meta = meeting.read_meta()?;
-    let duration = meta
-        .ended_at
-        .map(|end| (end - meta.started_at).num_milliseconds())
-        .unwrap_or_else(|| {
-            local
-                .segments
-                .iter()
-                .map(|s| s.end_ms)
-                .max()
-                .unwrap_or(0)
-                .min(i64::MAX as u64) as i64
-        });
+    let duration = if let Some(end) = meta.ended_at {
+        (end - meta.started_at).num_milliseconds()
+    } else {
+        i64::try_from(local.segments.iter().map(|s| s.end_ms).max().unwrap_or(0))
+            .map_err(|_| malformed())?
+    };
     ensure!(duration > 0, "У встречи нет длительности");
     Ok(duration)
+}
+fn recording_overlap(r: &Recording, start: DateTime<Utc>, duration_ms: i64) -> Result<i64> {
+    let delta = (r.created_date - start).num_milliseconds();
+    let end = add(delta, i64::from(r.duration) * 1000)?;
+    Ok(sub(duration_ms.min(end), 0.max(delta))?.max(0))
 }
 pub fn match_recording(
     recordings: &[Recording],
@@ -196,9 +230,7 @@ pub fn match_recording(
         if !seen.insert(&r.id) {
             continue;
         }
-        let delta = (r.created_date - start).num_milliseconds();
-        let length = i64::from(r.duration) * 1000;
-        let amount = (duration_ms.min(delta + length) - 0.max(delta)).max(0);
+        let amount = recording_overlap(r, start, duration_ms)?;
         if r.status == "complete" && amount > 0 {
             candidates.push((amount, r));
         }
@@ -208,7 +240,7 @@ pub fn match_recording(
         anyhow::bail!("Подходящая запись Толка не найдена");
     };
     ensure!(
-        *best * 2 >= duration_ms.min(i64::from(r.duration) * 1000),
+        best.checked_mul(2).ok_or_else(malformed)? >= duration_ms.min(i64::from(r.duration) * 1000),
         "Пересечение с записью Толка меньше половины короткого интервала"
     );
     if candidates
@@ -233,31 +265,50 @@ pub fn select_recording(
     let local = meeting.load_transcript()?.value;
     let meta = meeting.read_meta()?;
     let duration = duration(meeting, &local)?;
-    let cutoff = meta.started_at - chrono::Duration::days(1);
+    let cutoff = meta
+        .started_at
+        .checked_sub_signed(chrono::Duration::days(1))
+        .ok_or_else(malformed)?;
+    let recordings = scan_recordings(|skip| client.recordings("", skip, 100), cutoff)?;
+    select_from_recordings(&recordings, meta.started_at, duration, explicit)
+}
+
+const PAGE_LIMIT: usize = 30;
+fn scan_recordings(
+    mut fetch: impl FnMut(usize) -> Result<Vec<Recording>>,
+    cutoff: DateTime<Utc>,
+) -> Result<Vec<Recording>> {
     let mut recordings = Vec::new();
-    let mut skip = 0;
     let mut seen = BTreeSet::new();
-    loop {
-        let page = client.recordings("", skip, 100)?;
-        if page.is_empty() {
-            break;
-        }
-        skip += page.len();
-        let done = page.last().is_some_and(|r| r.created_date < cutoff);
+    for page_index in 0..PAGE_LIMIT {
+        let page = fetch(page_index * 100)?;
+        ensure!(
+            page.len() <= 100,
+            "Некорректная структура ответа Толка: размер страницы больше 100"
+        );
+        let done = page.len() < 100 || page.iter().all(|r| r.created_date < cutoff);
         let before = recordings.len();
         recordings.extend(page.into_iter().filter(|r| seen.insert(r.id.clone())));
         if done || recordings.len() == before {
-            break;
+            return Ok(recordings);
         }
     }
+    anyhow::bail!("Достигнут лимит 30 страниц записей Толка; выбор по неполным данным запрещён")
+}
+fn select_from_recordings(
+    recordings: &[Recording],
+    start: DateTime<Utc>,
+    duration: i64,
+    explicit: Option<&str>,
+) -> Result<Recording> {
     if let Some(id) = explicit {
-        let r = recordings.into_iter().find(|r| r.id == id).ok_or_else(|| {
+        let r = recordings.iter().find(|r| r.id == id).ok_or_else(|| {
             anyhow::anyhow!("Указанная запись Толка не найдена в периоде встречи")
         })?;
         ensure!(r.status == "complete", "Запись Толка ещё не готова");
-        Ok(r)
+        match_recording(std::slice::from_ref(r), start, duration)
     } else {
-        match_recording(&recordings, meta.started_at, duration)
+        match_recording(recordings, start, duration)
     }
 }
 #[derive(Debug)]
@@ -287,6 +338,27 @@ pub fn plan(
         remote.status == "complete",
         "Транскрипция Толка ещё не готова"
     );
+    remote.validate()?;
+    for segment in &local.segments {
+        let start = i64::try_from(segment.start_ms).map_err(|_| malformed())?;
+        let end = i64::try_from(segment.end_ms).map_err(|_| malformed())?;
+        valid_time(start, end)?;
+    }
+    let source_tokens: BTreeSet<_> = local
+        .segments
+        .iter()
+        .flat_map(|s| tokens(&s.text))
+        .collect();
+    ensure!(
+        local
+            .segments
+            .iter()
+            .filter(|s| tokens(&s.text).len() >= 4)
+            .count()
+            >= 6
+            && source_tokens.len() >= 30,
+        short_recording()
+    );
     let words: Vec<_> = remote
         .tracks
         .iter()
@@ -309,56 +381,65 @@ pub fn plan(
     let offset = estimate_offset(&activity, &speech, implied)?;
     let recording_end = i64::from(recording.duration) * 1000;
     let interval = (
-        activity.first().map_or(0, |i| i.0).max(-offset),
+        activity.first().map_or(0, |i| i.0).max(sub(0, offset)?),
         activity
             .last()
             .map_or(0, |i| i.1)
-            .min(recording_end - offset),
+            .min(sub(recording_end, offset)?),
     );
     let eligible = |s: &&notetaker_core::Segment| {
         s.start_ms as i64 >= interval.0 && s.end_ms as i64 <= interval.1
     };
-    let segments: Vec<_> = local.segments.iter().filter(eligible).collect();
+    let mut segments: Vec<_> = local.segments.iter().filter(eligible).collect();
+    segments.sort_by_key(|s| s.start_ms);
     let mut score = 0.0;
     let mut count = 0;
     let mut matched = BTreeSet::new();
     let mut evidence = Vec::new();
+    let mut available = BTreeSet::new();
     let samples = segments.len().min(64);
     for i in 0..samples {
-        let segment = segments[i * (segments.len() - 1) / (samples - 1).max(1)];
+        let index = i
+            .checked_mul(segments.len().saturating_sub(1))
+            .ok_or_else(malformed)?
+            / (samples - 1).max(1);
+        let segment = segments.get(index).ok_or_else(malformed)?;
         let a = tokens(&segment.text);
-        if a.is_empty() {
+        if a.len() < 4 {
             continue;
         }
+        available.extend(a.iter().cloned());
+        let (start, end) = shifted((segment.start_ms as i64, segment.end_ms as i64), offset)?;
         let text = words
             .iter()
-            .filter(|w| {
-                w.start_time_offset_in_millis < segment.end_ms as i64 + offset
-                    && w.end_time_offset_in_millis > segment.start_ms as i64 + offset
-            })
+            .filter(|w| w.start_time_offset_in_millis < end && w.end_time_offset_in_millis > start)
             .map(|w| w.text.as_str())
             .collect::<Vec<_>>()
             .join(" ");
         let b = tokens(&text);
         let common: BTreeSet<_> = a.intersection(&b).cloned().collect();
         let dice = 2.0 * common.len() as f64 / (a.len() + b.len()) as f64;
-        if dice >= 0.5 && common.len() >= 2 {
+        if dice >= 0.8 && common.len() >= 4 {
             evidence.push((segment.start_ms as i64, segment.end_ms as i64));
             matched.extend(common);
         }
         score += dice;
         count += 1;
     }
+    ensure!(count >= 6 && available.len() >= 30, short_recording());
     let score = score / count.max(1) as f64;
-    let span = evidence.iter().map(|i| i.1).max().unwrap_or(0)
-        - evidence.iter().map(|i| i.0).min().unwrap_or(0);
-    let required_span = if interval.1 - interval.0 < 180_000 {
-        interval.1 - interval.0
-    } else {
-        (interval.1 - interval.0) / 3
-    };
+    let span = sub(
+        evidence.iter().map(|i| i.1).max().unwrap_or(0),
+        evidence.iter().map(|i| i.0).min().unwrap_or(0),
+    )?;
+    let length = sub(interval.1, interval.0)?;
+    let required_span = if length < 180_000 { length } else { length / 3 };
     ensure!(
-        score >= 0.5 && matched.len() >= 12 && evidence.len() >= 3 && span + 200 >= required_span,
+        score >= 0.5
+            && matched.len() >= 30
+            && evidence.len() >= 6
+            && evidence.len() as f64 / count as f64 >= 0.6
+            && add(span, 200)? >= required_span,
         "не удалось надёжно сопоставить время"
     );
     let mut after = local.clone();
@@ -408,29 +489,44 @@ pub fn plan(
                 .insert("me".into(), recording.id.clone());
             let row = rows.entry((original.clone(), owner.name())).or_default();
             row.0 += 1;
-            row.1 += segment.end_ms.saturating_sub(segment.start_ms);
+            row.1 = row
+                .1
+                .checked_add(segment.end_ms.saturating_sub(segment.start_ms))
+                .ok_or_else(malformed)?;
             continue;
         }
         if local.self_speaker.as_ref() == Some(original) {
             continue;
         }
-        let interval = [(segment.start_ms as i64, segment.end_ms as i64)];
+        let interval = [shifted(
+            (segment.start_ms as i64, segment.end_ms as i64),
+            offset,
+        )?];
         let shares: Vec<_> = tracks
             .iter()
             .map(|(id, (name, times))| {
-                let first = times.partition_point(|(_, end)| *end <= interval[0].0 + offset);
-                let end = times.partition_point(|(start, _)| *start < interval[0].1 + offset);
-                (overlap(&interval, &times[first..end], offset), id, name)
+                let first = times.partition_point(|(_, end)| *end <= interval[0].0);
+                let end = times.partition_point(|(start, _)| *start < interval[0].1);
+                Ok((
+                    overlap(&interval, times.get(first..end).ok_or_else(malformed)?)?,
+                    id,
+                    name,
+                ))
             })
-            .collect();
-        let total: i64 = shares.iter().map(|(n, _, _)| n).sum();
+            .collect::<Result<_>>()?;
+        let total = shares
+            .iter()
+            .try_fold(0i64, |total, (n, _, _)| add(total, *n))?;
         if let Some((amount, id, name)) = shares.iter().max_by_key(|(n, _, _)| n)
             && total > 0
             && *amount as f64 / total as f64 >= 0.6
         {
             let row = rows.entry((original.clone(), (*name).clone())).or_default();
             row.0 += 1;
-            row.1 += segment.end_ms.saturating_sub(segment.start_ms);
+            row.1 = row
+                .1
+                .checked_add(segment.end_ms.saturating_sub(segment.start_ms))
+                .ok_or_else(malformed)?;
             segment.speaker.0 = (*id).clone();
             // Existing confirmed names, including previous Tolk names, are immutable.
             after

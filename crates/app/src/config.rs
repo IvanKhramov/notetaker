@@ -535,7 +535,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let text = LlmSettings::default().validate().unwrap()
-            + "\n[ktalk]\nbase_url = 'https://neutral.ktalk.ru'\ncredential_id = 'work'\napi_key_env = 'NOTETAKER_KTALK_KEY'\n";
+            + "\n[ktalk]\nbase_url = 'https://neutral.ktalk.ru'\ncredential_id = 'work'\napi_key_env = 'NOTETAKER_KTALK_KEY'\nfuture_option = { enabled = true, values = [1, 2] }\n";
         fs::write(&path, &text).unwrap();
         let mut settings = LlmSettings::from_path(&path).unwrap();
         settings.providers[0].model = "changed-model".into();
