@@ -440,7 +440,10 @@ pub fn plan(
             && evidence.len() >= 6
             && evidence.len() as f64 / count as f64 >= 0.6
             && add(span, 200)? >= required_span,
-        "не удалось надёжно сопоставить время"
+        // The numbers let a refused real meeting be compared with the thresholds.
+        "не удалось надёжно сопоставить время (сходство текста {score:.2}, подтверждено реплик {} из {count}, общих слов {})",
+        evidence.len(),
+        matched.len()
     );
     let mut after = local.clone();
     let mut rows: BTreeMap<(String, String), (usize, u64)> = BTreeMap::new();

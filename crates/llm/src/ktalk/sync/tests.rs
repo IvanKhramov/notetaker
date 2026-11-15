@@ -358,7 +358,7 @@ fn majority_gate_rejects_many_low_content_samples_despite_six_good_matches() {
             .err()
             .unwrap()
             .to_string(),
-        "не удалось надёжно сопоставить время"
+        "не удалось надёжно сопоставить время (сходство текста 0.73, подтверждено реплик 7 из 15, общих слов 42)"
     );
 }
 
