@@ -9,6 +9,7 @@ mod cli;
 mod config;
 mod credentials;
 mod drafts;
+pub mod ktalk;
 pub mod live;
 mod people;
 pub mod search;
@@ -30,7 +31,7 @@ pub use enhance::{
 pub use provider::{CompletionRequest, HttpProvider, OutputLimit, Provider};
 pub use template::Template;
 
-pub use cli::{Cancellation, CliProvider, find_cli, install_cli, open_login};
+pub use cli::{Cancellation, CliProvider, find_cli, install_cli, login};
 pub use credentials::{CredentialStore, OsCredentialStore, resolve_key};
 
 pub fn create_provider(

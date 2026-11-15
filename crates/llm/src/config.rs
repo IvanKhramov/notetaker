@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    #[serde(default)]
+    pub ktalk: Option<crate::ktalk::Settings>,
     pub defaults: Defaults,
     pub providers: Vec<ProviderConfig>,
     #[serde(default)]

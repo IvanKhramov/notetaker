@@ -180,13 +180,15 @@ fn run(
     ensure!(!cancel.cancelled(), "Создание конспекта отменено");
     let input_path = dir.join("stdin.txt");
     let output_path = dir.join("stdout.txt");
+    let error_path = dir.join("stderr.txt");
     fs::write(&input_path, prompt)?;
     let working_dir = dir.join("work");
     fs::create_dir(&working_dir)?;
     command
         .current_dir(working_dir)
         .stdin(File::open(input_path)?)
-        .stdout(File::create(&output_path)?);
+        .stdout(File::create(&output_path)?)
+        .stderr(File::create(&error_path)?);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -212,15 +214,52 @@ fn run(
         }
         thread::sleep(Duration::from_millis(50));
     };
-    ensure!(
-        status.success(),
-        "CLI завершился с ошибкой. Проверьте вход, модель и лимиты подписки."
-    );
+    if !status.success() {
+        // The CLI's own words name the cause: no sign-in, a missing
+        // prerequisite, an unknown model. The answer goes to stdout when the
+        // CLI reports in JSON, so look there when stderr is empty.
+        let said = [&error_path, &output_path]
+            .into_iter()
+            .map(|path| failure_tail(&file_tail(path)))
+            .find(|text| !text.is_empty())
+            .unwrap_or_default();
+        anyhow::bail!(
+            "CLI завершился с ошибкой. Проверьте вход, модель и лимиты подписки.{}",
+            if said.is_empty() {
+                String::new()
+            } else {
+                format!(" Ответ CLI: {said}")
+            }
+        );
+    }
     ensure!(
         fs::metadata(&output_path)?.len() <= 16 * 1024 * 1024,
         "Слишком большой ответ CLI"
     );
     fs::read_to_string(output_path).context("Некорректный вывод CLI")
+}
+
+/// The end of a CLI log, read without loading a large file.
+fn file_tail(path: &Path) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut bytes = Vec::new();
+    if let Ok(mut file) = File::open(path) {
+        let length = file.metadata().map(|meta| meta.len()).unwrap_or(0);
+        let _ = file.seek(SeekFrom::Start(length.saturating_sub(8 * 1024)));
+        let _ = file.take(8 * 1024).read_to_end(&mut bytes);
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// The last lines of what a failed CLI printed, short enough for a settings card.
+fn failure_tail(output: &str) -> String {
+    let lines: Vec<&str> = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let tail = lines[lines.len().saturating_sub(3)..].join(" ");
+    tail.chars().take(300).collect()
 }
 
 fn terminate(child: &mut std::process::Child) {
@@ -369,18 +408,13 @@ impl Provider for CliProvider {
     }
 }
 
-#[cfg(any(windows, test))]
-fn login_command(binary: &Path, kind: ProviderKind) -> Command {
-    let mut command = Command::new(binary);
+/// The sign-in arguments of each CLI. Both open the browser themselves.
+fn login_args(kind: ProviderKind) -> &'static [&'static str] {
     if kind == ProviderKind::CodexCli {
-        command.arg("login");
+        &["login"]
+    } else {
+        &["auth", "login"]
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x00000010); // CREATE_NEW_CONSOLE
-    }
-    command
 }
 
 /// The vendor's own installer script. Both install into the user's profile and
@@ -479,38 +513,59 @@ pub fn install_cli(kind: ProviderKind) -> Result<()> {
     Ok(())
 }
 
-pub fn open_login(kind: ProviderKind) -> Result<()> {
+/// Signs in through the CLI's own command. No console window: the CLI opens
+/// the browser and waits for it, and the caller shows the wait and can cancel.
+pub fn login(kind: ProviderKind, cancel: &Cancellation) -> Result<()> {
     let binary = find_cli(kind).context("CLI не установлен")?;
-    #[cfg(windows)]
+    let mut command = background(&binary);
+    command.args(login_args(kind));
+    wait_login(command, Duration::from_secs(300), cancel)
+}
+
+fn wait_login(mut command: Command, timeout: Duration, cancel: &Cancellation) -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let output_path = dir.path().join("login.txt");
+    let output = File::create(&output_path)?;
+    command.stdout(output.try_clone()?).stderr(output);
+    #[cfg(unix)]
     {
-        login_command(&binary, kind)
-            .spawn()
-            .context("Не удалось открыть окно входа")?;
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
     }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = binary;
+    let mut child = command
+        .spawn()
+        .context("Не удалось запустить вход; проверьте установку CLI")?;
+    let started = Instant::now();
+    let status = loop {
+        if cancel.cancelled() {
+            terminate(&mut child);
+            anyhow::bail!("Вход отменён");
+        }
+        if started.elapsed() >= timeout {
+            terminate(&mut child);
+            anyhow::bail!("Вход не завершён за 5 минут. Повторите попытку");
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(error) => {
+                terminate(&mut child);
+                return Err(error).context("Не удалось дождаться входа");
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    };
+    if !status.success() {
+        let said = failure_tail(&file_tail(&output_path));
         anyhow::bail!(
-            "macOS: откройте Terminal и выполните {}. Затем повторите проверку подключения в notetaker.",
-            if kind == ProviderKind::ClaudeCli {
-                "claude, затем /login"
+            "Вход не выполнен.{}",
+            if said.is_empty() {
+                String::new()
             } else {
-                "codex login"
+                format!(" Ответ CLI: {said}")
             }
         );
     }
-    #[cfg(not(any(windows, target_os = "macos")))]
-    {
-        let mut command = Command::new("x-terminal-emulator");
-        command.arg("-e").arg(binary);
-        if kind == ProviderKind::CodexCli {
-            command.arg("login");
-        }
-        command
-            .spawn()
-            .context("Не удалось открыть терминал; выполните claude или codex login вручную")?;
-    }
-    #[cfg(not(target_os = "macos"))]
     Ok(())
 }
 
@@ -760,15 +815,47 @@ mod login_tests {
     }
 
     #[test]
-    fn login_launches_the_binary_directly_with_separate_arguments() {
-        let path = Path::new(r"C:\Users\A & B\cli\codex.exe");
-        for (kind, args) in [
-            (ProviderKind::CodexCli, vec!["login"]),
-            (ProviderKind::ClaudeCli, vec![]),
-        ] {
-            let command = login_command(path, kind);
-            assert_eq!(command.get_program(), path.as_os_str());
-            assert_eq!(command.get_args().collect::<Vec<_>>(), args);
-        }
+    fn failure_tail_keeps_the_last_lines_and_is_bounded() {
+        assert_eq!(failure_tail(""), "");
+        assert_eq!(
+            failure_tail("one\n\n two \nthree\nfour\n"),
+            "two three four"
+        );
+        assert_eq!(failure_tail(&"я".repeat(1000)).chars().count(), 300);
+    }
+    #[test]
+    fn login_arguments_are_the_sign_in_command_of_each_cli() {
+        assert_eq!(login_args(ProviderKind::CodexCli), ["login"]);
+        assert_eq!(login_args(ProviderKind::ClaudeCli), ["auth", "login"]);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn login_wait_reports_the_cli_error_and_stops_on_cancel_and_timeout() {
+        let shell = |script: &str| {
+            let mut command = background(Path::new("/bin/sh"));
+            command.args(["-c", script]);
+            command
+        };
+        let long = Duration::from_secs(30);
+        assert!(wait_login(shell("exit 0"), long, &Cancellation::default()).is_ok());
+        let error = wait_login(
+            shell("echo first; echo browser is missing >&2; exit 3"),
+            long,
+            &Cancellation::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("browser is missing"), "{error}");
+        let cancel = Cancellation::default();
+        cancel.cancel();
+        let error = wait_login(shell("sleep 30"), long, &cancel).unwrap_err();
+        assert_eq!(error.to_string(), "Вход отменён");
+        let error = wait_login(
+            shell("sleep 30"),
+            Duration::from_millis(200),
+            &Cancellation::default(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("5 минут"));
     }
 }
