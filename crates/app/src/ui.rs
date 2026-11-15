@@ -175,6 +175,7 @@ pub struct NotetakerApp {
     document_preview: DocumentPreview,
     notes_cache: NotesCache,
     meetings_cache: MeetingsCache,
+    calendar_rows: crate::calendar_ui::HomeRows,
     tasks_cache: TasksCache,
     meeting_layout: MeetingLayout,
     meeting_tasks: Option<(u64, std::path::PathBuf, Vec<usize>)>,
@@ -247,6 +248,7 @@ impl NotetakerApp {
             document_preview: Default::default(),
             notes_cache: Default::default(),
             meetings_cache: Default::default(),
+            calendar_rows: Default::default(),
             tasks_cache: Default::default(),
             meeting_layout: Default::default(),
             meeting_tasks: None,
@@ -508,6 +510,7 @@ impl NotetakerApp {
                     let action = crate::calendar_ui::home(
                         ui,
                         crate::calendar_ui::Home {
+                            revision: self.state.calendar_revision,
                             events: &self.state.calendar_events,
                             reports: &self.state.calendar_reports,
                             error: self.state.calendar_error.as_deref(),
@@ -517,6 +520,7 @@ impl NotetakerApp {
                             can_record,
                         },
                         &mut expanded,
+                        &mut self.calendar_rows,
                     );
                     ui.data_mut(|d| d.insert_temp(id, expanded));
                     match action {
@@ -3097,6 +3101,13 @@ fn open_url(url: String) {
     });
 }
 fn next_state_wake(state: &AppState, now: Instant) -> Option<Duration> {
+    next_state_wake_at(state, now, chrono::Utc::now())
+}
+fn next_state_wake_at(
+    state: &AppState,
+    now: Instant,
+    utc: chrono::DateTime<chrono::Utc>,
+) -> Option<Duration> {
     let mut deadlines = Vec::new();
     if state.recording.busy() || state.quickstart.probe_busy {
         deadlines.push(Duration::from_millis(100));
@@ -3131,7 +3142,12 @@ fn next_state_wake(state: &AppState, now: Instant) -> Option<Duration> {
                 .map(|at| (at + Duration::from_secs(600)).saturating_duration_since(now)),
         );
     }
-    let utc = chrono::Utc::now();
+    if !state.settings.calendars.is_empty()
+        && let Some(midnight) = crate::calendar_ui::next_local_midnight(utc)
+        && let Ok(delay) = (midnight - utc).to_std()
+    {
+        deadlines.push(delay);
+    }
     for event in &state.calendar_events {
         for time in [
             event.start - chrono::Duration::minutes(5),
@@ -6685,5 +6701,37 @@ mod direct_action_tests {
             .collect::<Vec<_>>();
         assert_eq!(sources, vec![(true, 2), (false, 1), (false, 2)]);
         assert_eq!(document_tasks(doc).get(&(false, 1)).unwrap().task.line, 1);
+    }
+}
+
+#[cfg(test)]
+mod calendar_midnight_tests {
+    use super::*;
+    use chrono::TimeZone;
+    #[test]
+    fn configured_calendar_schedules_a_local_midnight_wake() {
+        let (mut state, _, _) = crate::test_ui::state();
+        state.ready = true;
+        state
+            .settings
+            .calendars
+            .push(notetaker_llm::calendar::Subscription {
+                id: "calendar-test".into(),
+                name: "Команда".into(),
+            });
+        let monotonic = Instant::now();
+        state.calendar_checked = Some(monotonic);
+        let before = chrono::Local
+            .with_ymd_and_hms(2026, 11, 15, 23, 59, 0)
+            .earliest()
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let wake = next_state_wake_at(&state, monotonic, before).unwrap();
+        assert_eq!(wake, Duration::from_secs(60));
+        let after = before + chrono::Duration::minutes(2);
+        assert!(
+            next_state_wake_at(&state, monotonic + Duration::from_secs(120), after).unwrap()
+                > Duration::from_secs(60)
+        );
     }
 }

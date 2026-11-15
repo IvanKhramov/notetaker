@@ -193,6 +193,26 @@ pub fn skipped_text(skipped: &[notetaker_core::calendar::SkippedEvent]) -> Strin
             .join(", ")
     )
 }
+fn snapshot_label(at: DateTime<Utc>, now: DateTime<Utc>, failed: bool) -> String {
+    let local = at.with_timezone(&chrono::Local);
+    let when = if local.date_naive() == now.with_timezone(&chrono::Local).date_naive() {
+        format!("в {}", local.format("%H:%M"))
+    } else {
+        format!("{} в {}", local.format("%d.%m"), local.format("%H:%M"))
+    };
+    if failed {
+        format!(
+            "Данные от {}",
+            if local.date_naive() == now.with_timezone(&chrono::Local).date_naive() {
+                local.format("%H:%M").to_string()
+            } else {
+                format!("{} в {}", local.format("%d.%m"), local.format("%H:%M"))
+            }
+        )
+    } else {
+        format!("Обновлено {when}")
+    }
+}
 pub fn subscription_status(
     ui: &mut egui::Ui,
     report: Option<&notetaker_llm::calendar::SubscriptionStatus>,
@@ -207,8 +227,8 @@ pub fn subscription_status(
             ui,
             theme::icons::CHECK,
             &format!(
-                "Обновлено в {} · событий на ближайшие дни: {}",
-                at.with_timezone(&chrono::Local).format("%H:%M"),
+                "{} · событий на ближайшие дни: {}",
+                snapshot_label(at, Utc::now(), report.error.is_some() || error.is_some()),
                 report.events.iter().filter(|event| event.end > at).count()
             ),
             p.muted,
@@ -242,12 +262,55 @@ pub fn subscription_status(
         );
         theme::disclosure("Пропущенные события").show(ui, |ui| {
             for event in &report.skipped {
-                ui.add(egui::Label::new(&event.title).wrap());
+                ui.add(egui::Label::new(&event.title).truncate())
+                    .on_hover_text(&event.title);
             }
         });
     }
 }
+#[derive(Default)]
+pub struct HomeRows {
+    key: Option<(u64, chrono::NaiveDate)>,
+    rows: Vec<usize>,
+}
+impl HomeRows {
+    fn update(&mut self, events: &[CalendarEvent], revision: u64, now: DateTime<Utc>) {
+        let today = now.with_timezone(&chrono::Local).date_naive();
+        if self.key == Some((revision, today)) {
+            return;
+        }
+        let tomorrow = today.succ_opt().unwrap_or(today);
+        self.rows.clear();
+        self.rows.extend(
+            events
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| {
+                    e.end.with_timezone(&chrono::Local).date_naive() >= today
+                        && e.start.with_timezone(&chrono::Local).date_naive() <= tomorrow
+                })
+                .map(|(i, _)| i),
+        );
+        self.key = Some((revision, today));
+    }
+}
+/// First representable instant of the next local day, including midnight DST gaps.
+pub fn next_local_midnight(now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    use chrono::TimeZone;
+    let day = now.with_timezone(&chrono::Local).date_naive().succ_opt()?;
+    let midnight = day.and_hms_opt(0, 0, 0)?;
+    for minute in 0..=2880 {
+        let wall = midnight.checked_add_signed(chrono::Duration::minutes(minute))?;
+        if let Some(at) = chrono::Local.from_local_datetime(&wall).earliest()
+            && at.with_timezone(&Utc) > now
+        {
+            return Some(at.with_timezone(&Utc));
+        }
+    }
+    None
+}
 pub struct Home<'a> {
+    pub revision: u64,
     pub events: &'a [CalendarEvent],
     pub reports: &'a [notetaker_llm::calendar::SubscriptionStatus],
     pub error: Option<&'a str>,
@@ -262,7 +325,13 @@ pub enum HomeAction {
     Settings,
     Start(CalendarEvent),
 }
-pub fn home(ui: &mut egui::Ui, model: Home<'_>, expanded: &mut bool) -> HomeAction {
+pub fn home(
+    ui: &mut egui::Ui,
+    model: Home<'_>,
+    expanded: &mut bool,
+    cache: &mut HomeRows,
+) -> HomeAction {
+    cache.update(model.events, model.revision, model.now);
     let mut action = HomeAction::None;
     let p = theme::Palette::of(ui);
     theme::card(p, false).show(ui, |ui| {
@@ -277,16 +346,12 @@ pub fn home(ui: &mut egui::Ui, model: Home<'_>, expanded: &mut bool) -> HomeActi
             );
         });
         let today = model.now.with_timezone(&chrono::Local).date_naive();
-        let tomorrow = today.succ_opt().unwrap_or(today);
-        let mut events: Vec<_> = model
-            .events
+        let events = cache
+            .rows
             .iter()
-            .filter(|event| {
-                event.end > model.now
-                    && event.start.with_timezone(&chrono::Local).date_naive() <= tomorrow
-            })
-            .collect();
-        events.sort_by_key(|event| event.start);
+            .filter_map(|i| model.events.get(*i))
+            .filter(|event| event.end > model.now);
+        let count = events.clone().count();
         let issue = model
             .error
             .or_else(|| model.reports.iter().find_map(|r| r.error.as_deref()));
@@ -309,7 +374,7 @@ pub fn home(ui: &mut egui::Ui, model: Home<'_>, expanded: &mut bool) -> HomeActi
                 ui.spinner();
                 ui.label("Загружаем календарь…");
             });
-        } else if events.is_empty() {
+        } else if count == 0 {
             ui.label(if issue.is_some() {
                 "Календарь пока недоступен"
             } else {
@@ -317,7 +382,7 @@ pub fn home(ui: &mut egui::Ui, model: Home<'_>, expanded: &mut bool) -> HomeActi
             });
         }
         let mut day = None;
-        for event in events.iter().take(if *expanded { events.len() } else { 6 }) {
+        for event in events.take(if *expanded { count } else { 6 }) {
             let date = event
                 .start
                 .with_timezone(&chrono::Local)
@@ -367,17 +432,17 @@ pub fn home(ui: &mut egui::Ui, model: Home<'_>, expanded: &mut bool) -> HomeActi
                         )
                         .clicked()
                 {
-                    action = HomeAction::Start((*event).clone());
+                    action = HomeAction::Start(event.clone());
                 }
             });
         }
-        if events.len() > 6
+        if count > 6
             && theme::button(
                 ui,
                 &if *expanded {
                     "Свернуть".into()
                 } else {
-                    format!("ещё {}", events.len() - 6)
+                    format!("ещё {}", count - 6)
                 },
                 ButtonStyle::Ghost,
             )

@@ -41,6 +41,7 @@ fn texts(shapes: &[egui::epaint::ClippedShape]) -> Vec<String> {
 }
 fn model(events: &[CalendarEvent]) -> Home<'_> {
     Home {
+        revision: events.as_ptr() as usize as u64,
         events,
         reports: &[],
         error: None,
@@ -54,6 +55,7 @@ fn home_loading_empty_today_tomorrow_in_progress_and_record_action() {
     let ctx = egui::Context::default();
     theme::install(&ctx);
     let mut expanded = false;
+    let mut cache = HomeRows::default();
     let mut out = crate::test_ui::frame(&ctx, vec![], &mut |ui| {
         home(
             ui,
@@ -62,12 +64,13 @@ fn home_loading_empty_today_tomorrow_in_progress_and_record_action() {
                 ..model(&[])
             },
             &mut expanded,
+            &mut cache,
         );
     });
     out.textures_delta.clear();
     assert!(texts(&out.shapes).contains(&"Загружаем календарь…".into()));
     let mut out = crate::test_ui::frame(&ctx, vec![], &mut |ui| {
-        home(ui, model(&[]), &mut expanded);
+        home(ui, model(&[]), &mut expanded, &mut cache);
     });
     out.textures_delta.clear();
     assert!(texts(&out.shapes).contains(&"Сегодня и завтра встреч нет".into()));
@@ -78,7 +81,7 @@ fn home_loading_empty_today_tomorrow_in_progress_and_record_action() {
         event("Завтрашняя", now() + chrono::Duration::days(1)),
     ];
     let mut out = crate::test_ui::frame(&ctx, vec![], &mut |ui| {
-        home(ui, model(&events), &mut expanded);
+        home(ui, model(&events), &mut expanded, &mut cache);
     });
     out.textures_delta.clear();
     let text = texts(&out.shapes);
@@ -106,6 +109,7 @@ fn home_error_settings_link_and_more_expand() {
     let ctx = egui::Context::default();
     theme::install(&ctx);
     let mut expanded = false;
+    let mut cache = HomeRows::default();
     let mut settings = false;
     crate::test_ui::click(
         &ctx,
@@ -117,7 +121,8 @@ fn home_error_settings_link_and_more_expand() {
                         error: Some("Не удалось загрузить календарь"),
                         ..model(&[])
                     },
-                    &mut expanded
+                    &mut expanded,
+                    &mut cache
                 ),
                 HomeAction::Settings
             ) {
@@ -136,7 +141,7 @@ fn home_error_settings_link_and_more_expand() {
         })
         .collect();
     let mut out = crate::test_ui::frame(&ctx, vec![], &mut |ui| {
-        home(ui, model(&events), &mut expanded);
+        home(ui, model(&events), &mut expanded, &mut cache);
     });
     out.textures_delta.clear();
     assert!(texts(&out.shapes).contains(&"ещё 2".into()));
@@ -144,13 +149,13 @@ fn home_error_settings_link_and_more_expand() {
     crate::test_ui::click(
         &ctx,
         &mut |ui| {
-            home(ui, model(&events), &mut expanded);
+            home(ui, model(&events), &mut expanded, &mut cache);
         },
         "ещё 2",
     );
     assert!(expanded);
     let mut out = crate::test_ui::frame(&ctx, vec![], &mut |ui| {
-        home(ui, model(&events), &mut expanded);
+        home(ui, model(&events), &mut expanded, &mut cache);
     });
     out.textures_delta.clear();
     assert!(texts(&out.shapes).contains(&"Событие 7".into()));
@@ -185,7 +190,10 @@ fn settings_success_skips_titles_and_failure_keep_refresh_available() {
     });
     out.textures_delta.clear();
     let text = texts(&out.shapes);
-    assert!(text.iter().any(|s| s.starts_with("Обновлено в 12:00")));
+    assert!(
+        text.iter()
+            .any(|s| s.contains("12:00") && s.starts_with("Обновлено"))
+    );
     assert!(text.contains(
         &"Пропущено событий: 3 (неподдерживаемое повторение: 2, часовой пояс: 1)".into()
     ));
@@ -230,4 +238,66 @@ fn settings_success_skips_titles_and_failure_keep_refresh_available() {
             .try_iter()
             .any(|c| matches!(c, crate::worker::Command::Calendar { .. }))
     );
+}
+
+#[test]
+fn midnight_rebuilds_day_rows_and_repeated_frames_keep_the_cache() {
+    let ctx = egui::Context::default();
+    theme::install(&ctx);
+    let before = now() + chrono::Duration::hours(11) + chrono::Duration::minutes(59);
+    let after = before + chrono::Duration::minutes(2);
+    let events = vec![event("Завтрашний обзор", now() + chrono::Duration::days(1))];
+    let mut expanded = false;
+    let mut cache = HomeRows::default();
+    let mut out = crate::test_ui::frame(&ctx, vec![], &mut |ui| {
+        home(
+            ui,
+            Home {
+                now: before,
+                ..model(&events)
+            },
+            &mut expanded,
+            &mut cache,
+        );
+    });
+    out.textures_delta.clear();
+    assert!(texts(&out.shapes).contains(&"Завтра".into()));
+    let previous = cache.key;
+    let rows = cache.rows.as_ptr();
+    cache.update(&events, events.as_ptr() as usize as u64, before);
+    assert_eq!(cache.key, previous);
+    assert_eq!(cache.rows.as_ptr(), rows);
+    let mut out = crate::test_ui::frame(&ctx, vec![], &mut |ui| {
+        home(
+            ui,
+            Home {
+                now: after,
+                ..model(&events)
+            },
+            &mut expanded,
+            &mut cache,
+        );
+    });
+    out.textures_delta.clear();
+    let text = texts(&out.shapes);
+    assert!(text.contains(&"Сегодня".into()));
+    assert!(!text.contains(&"Завтра".into()));
+    assert_ne!(cache.key, previous);
+    assert_eq!(
+        (next_local_midnight(before).unwrap() - before).num_seconds(),
+        60
+    );
+}
+#[test]
+fn previous_day_snapshot_and_failed_refresh_are_explicit() {
+    let yesterday = now() - chrono::Duration::days(1);
+    assert_eq!(
+        snapshot_label(yesterday, now(), false),
+        "Обновлено 14.11 в 12:00"
+    );
+    assert_eq!(
+        snapshot_label(yesterday, now(), true),
+        "Данные от 14.11 в 12:00"
+    );
+    assert_eq!(snapshot_label(now(), now(), true), "Данные от 12:00");
 }

@@ -219,3 +219,145 @@ fn rdate_utc_keeps_the_second_berlin_fold_instant() {
     assert_eq!(report.events.len(), 2);
     assert_eq!(report.events[1].start, utc("2026-10-25T01:30:00Z"));
 }
+
+#[test]
+fn old_series_jump_to_window_without_spending_other_events_budget() {
+    let mut text = "BEGIN:VCALENDAR\n".to_owned();
+    for i in 0..131 {
+        text.push_str(&format!("BEGIN:VEVENT\nUID:yearly-{i}\nSUMMARY:Ежегодный обзор\nDTSTART:20051115T100000Z\nRRULE:FREQ=YEARLY\nEND:VEVENT\n"));
+    }
+    text.push_str("BEGIN:VEVENT\nUID:daily\nDTSTART:20261116T100000Z\nRRULE:FREQ=DAILY;COUNT=1\nEND:VEVENT\nEND:VCALENDAR");
+    let started = std::time::Instant::now();
+    let report = parse_ics_report(
+        &text,
+        utc("2026-11-13T12:00:00Z"),
+        utc("2026-11-17T12:00:00Z"),
+        chrono_tz::UTC,
+    )
+    .unwrap();
+    assert!(report.skipped.is_empty());
+    assert_eq!(report.events.len(), 132);
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    let old = event("DTSTART:19900115T100000Z\r\nRRULE:FREQ=MONTHLY;BYDAY=3MO");
+    let report = parse_ics_report(
+        &old,
+        utc("2026-11-13T12:00:00Z"),
+        utc("2026-11-17T12:00:00Z"),
+        chrono_tz::UTC,
+    )
+    .unwrap();
+    assert!(report.skipped.is_empty());
+    assert_eq!(days(&report.events), ["2026-11-16"]);
+    let ended = old.replace("BYDAY=3MO", "BYDAY=3MO;COUNT=5");
+    let report = parse_ics_report(
+        &ended,
+        utc("2026-11-13T12:00:00Z"),
+        utc("2026-11-17T12:00:00Z"),
+        chrono_tz::UTC,
+    )
+    .unwrap();
+    assert!(report.skipped.is_empty());
+    assert!(report.events.is_empty());
+}
+#[test]
+fn one_complex_count_exhausting_its_limit_does_not_skip_another_event() {
+    let text=event("DTSTART:16000101T100000Z\r\nRRULE:FREQ=DAILY;BYMONTH=1;COUNT=200000")
+        .replace("END:VCALENDAR","BEGIN:VEVENT\nUID:ordinary\nDTSTART:20261116T100000Z\nRRULE:FREQ=DAILY;COUNT=1\nEND:VEVENT\nEND:VCALENDAR");
+    let report = parse_ics_report(
+        &text,
+        utc("2026-11-13T12:00:00Z"),
+        utc("2026-11-17T12:00:00Z"),
+        chrono_tz::UTC,
+    )
+    .unwrap();
+    assert_eq!(report.events.len(), 1);
+    assert_eq!(report.events[0].link.uid, "ordinary");
+    assert_eq!(report.skipped.len(), 1);
+    assert_eq!(report.skipped[0].reason, SkipReason::Limit);
+}
+#[test]
+fn repeated_rdates_with_a_megabyte_title_materialize_one_small_event() {
+    let title = format!("Нейтральный\\n\tплан{}", "a".repeat(1024 * 1024));
+    let text = event(&format!(
+        "DTSTART:20261115T100000Z\r\nSUMMARY:{title}\r\n{}",
+        "RDATE:20261115T100000Z\r\n".repeat(11_000)
+    ))
+    .replacen("SUMMARY:Планирование проекта\r\n", "", 1);
+    let started = std::time::Instant::now();
+    let report = parse_ics_report(
+        &text,
+        utc("2026-11-15T00:00:00Z"),
+        utc("2026-11-16T00:00:00Z"),
+        chrono_tz::UTC,
+    )
+    .unwrap();
+    assert!(report.skipped.is_empty());
+    assert_eq!(report.events.len(), 1);
+    assert_eq!(report.events[0].link.title.chars().count(), 500);
+    assert!(!report.events[0].link.title.chars().any(char::is_control));
+    assert!(event_bytes(&report.events[0]) < 4096);
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+}
+fn rdates(count: usize) -> String {
+    (0..count)
+        .map(|i| {
+            format!(
+                "RDATE:{}\r\n",
+                (utc("2026-11-15T10:00:00Z") + Duration::seconds(i as i64))
+                    .format("%Y%m%dT%H%M%SZ")
+            )
+        })
+        .collect()
+}
+#[test]
+fn per_event_limit_skips_only_that_event_and_total_limit_fails_the_feed() {
+    let text = event(&format!(
+        "DTSTART:20261115T100000Z\r\n{}",
+        rdates(EVENT_LIMIT + 1)
+    ))
+    .replace(
+        "END:VCALENDAR",
+        "BEGIN:VEVENT\r\nUID:small\r\nDTSTART:20261115T120000Z\r\nEND:VEVENT\r\nEND:VCALENDAR",
+    );
+    let report = parse_ics_report(
+        &text,
+        utc("2026-11-15T00:00:00Z"),
+        utc("2026-11-16T00:00:00Z"),
+        chrono_tz::UTC,
+    )
+    .unwrap();
+    assert_eq!(report.events.len(), 1);
+    assert_eq!(report.events[0].link.uid, "small");
+    assert_eq!(report.skipped.len(), 1);
+    assert_eq!(report.skipped[0].reason, SkipReason::Limit);
+    let first = format!("DTSTART:20261115T100000Z\r\n{}", rdates(6000));
+    let text = event(&first).replace(
+        "END:VCALENDAR",
+        &format!("BEGIN:VEVENT\r\nUID:second\r\n{first}\r\nEND:VEVENT\r\nEND:VCALENDAR"),
+    );
+    assert_eq!(
+        parse_ics_report(
+            &text,
+            utc("2026-11-15T00:00:00Z"),
+            utc("2026-11-16T00:00:00Z"),
+            chrono_tz::UTC
+        )
+        .unwrap_err()
+        .0,
+        FEED_LIMIT_ERROR
+    );
+}
+
+#[test]
+fn configured_utc_alias_counts_daily_history_without_scanning_it() {
+    let text = event("DTSTART:16000101T100000\r\nRRULE:FREQ=DAILY;COUNT=200000");
+    let report = parse_ics_report(
+        &text,
+        utc("2026-11-13T12:00:00Z"),
+        utc("2026-11-17T12:00:00Z"),
+        timezone("UTC").unwrap(),
+    )
+    .unwrap();
+    assert!(report.skipped.is_empty());
+    assert_eq!(report.events.len(), 4);
+}

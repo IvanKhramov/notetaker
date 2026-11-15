@@ -1,5 +1,5 @@
 //! Bounded ICS subscription subset. Occurrences retain wall-clock time across DST.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 mod recurrence;
 
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, TimeZone, Utc};
@@ -192,14 +192,59 @@ fn date(value: &str, params: &BTreeMap<String, String>, fallback: Tz) -> Result<
         all_day,
     })
 }
+const EVENT_LIMIT: usize = 10_000;
+const FEED_LIMIT: usize = 10_000;
+const EVENT_BYTES: usize = 8 * 1024 * 1024;
+const FEED_BYTES: usize = 32 * 1024 * 1024;
+const FEED_LIMIT_ERROR: &str = "превышен общий лимит 10000 вхождений календаря";
+const FEED_BYTES_ERROR: &str = "превышен общий лимит памяти календаря (32 МиБ)";
+#[derive(Clone, Copy, Default)]
+struct FeedUsage {
+    count: usize,
+    bytes: usize,
+}
+fn clean_text(text: &str, cap: usize) -> String {
+    text.chars()
+        .filter(|ch| !ch.is_control())
+        .take(cap)
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+fn bounded_id(value: &str) -> Result<String> {
+    let id = clean_text(value, 1025);
+    if id.chars().count() > 1024 {
+        return Err(CalendarError("лимит длины UID"));
+    }
+    Ok(id)
+}
+fn event_bytes(event: &CalendarEvent) -> usize {
+    let attendee_bytes = |a: &Attendee| a.name.len() + a.email.len();
+    std::mem::size_of::<CalendarEvent>()
+        + event.link.uid.len()
+        + event.link.title.len()
+        + event.link.call_url.as_ref().map_or(0, String::len)
+        + event
+            .link
+            .attendees
+            .iter()
+            .map(|a| std::mem::size_of::<Attendee>() + attendee_bytes(a))
+            .sum::<usize>()
+        + event.organizer.as_ref().map_or(0, attendee_bytes)
+}
 fn attendee(p: &Property) -> Attendee {
     Attendee {
-        name: unescape(p.params.get("CN").map(String::as_str).unwrap_or_default()),
-        email: p
-            .value
-            .get(..7)
-            .filter(|prefix| prefix.eq_ignore_ascii_case("mailto:"))
-            .map_or_else(|| p.value.clone(), |_| p.value[7..].to_owned()),
+        name: clean_text(
+            &unescape(p.params.get("CN").map(String::as_str).unwrap_or_default()),
+            200,
+        ),
+        email: clean_text(
+            &p.value
+                .get(..7)
+                .filter(|prefix| prefix.eq_ignore_ascii_case("mailto:"))
+                .map_or_else(|| p.value.clone(), |_| p.value[7..].to_owned()),
+            320,
+        ),
     }
 }
 
@@ -385,7 +430,7 @@ pub fn parse_ics_report(
                 event_error = Some(CalendarError("структура VEVENT"));
             }
             if components.len() >= 10_000 {
-                event_error = Some(CalendarError("слишком много VEVENT"));
+                return Err(CalendarError("превышен общий лимит 10000 VEVENT"));
             }
             components.push((std::mem::take(&mut props), event_error.take()));
             depth = 0;
@@ -413,7 +458,7 @@ pub fn parse_ics_report(
     if depth != 0 {
         components.push((props, Some(CalendarError("незавершённый VEVENT"))));
     }
-    let mut budget = 1_000_000usize;
+    let mut usage = FeedUsage::default();
     // Each component is transactional: failed expansion never leaves partial events.
     for detached in [false, true] {
         for (props, error) in &components {
@@ -421,7 +466,7 @@ pub fn parse_ics_report(
             if recurrence.is_some() != detached {
                 continue;
             }
-            let mut attempt = || -> Result<Expansion> {
+            let attempt = || -> Result<Expansion> {
                 if let Some(error) = error {
                     return Err(CalendarError(error.0));
                 }
@@ -454,26 +499,45 @@ pub fn parse_ics_report(
                     None
                 };
                 let mut events = Vec::new();
-                expand(props, from, to, zone, &mut events, &mut budget)?;
-                if result.events.len() + events.len() > 10_000 {
-                    return Err(CalendarError("слишком много событий"));
+                let mut available = usage;
+                if let Some((uid, start)) = &original {
+                    for event in result
+                        .events
+                        .iter()
+                        .filter(|e| &e.link.uid == uid && e.start == *start)
+                    {
+                        available.count -= 1;
+                        available.bytes -= event_bytes(event);
+                    }
                 }
+                expand(props, from, to, zone, &mut events, available)?;
                 Ok((events, original))
             };
             match attempt() {
                 Ok((events, original)) => {
                     if let Some((uid, start)) = original {
-                        result
-                            .events
-                            .retain(|e| e.link.uid != uid || e.start != start);
+                        result.events.retain(|event| {
+                            let keep = event.link.uid != uid || event.start != start;
+                            if !keep {
+                                usage.count -= 1;
+                                usage.bytes -= event_bytes(event);
+                            }
+                            keep
+                        });
                     }
+                    usage.count += events.len();
+                    usage.bytes += events.iter().map(event_bytes).sum::<usize>();
                     result.events.extend(events);
+                }
+                Err(error) if [FEED_LIMIT_ERROR, FEED_BYTES_ERROR].contains(&error.0) => {
+                    return Err(error);
                 }
                 Err(error) => result.skipped.push(SkippedEvent {
                     title: props
                         .iter()
                         .find(|p| p.name == "SUMMARY")
-                        .map(|p| unescape(&p.value))
+                        .map(|p| clean_text(&unescape(&p.value), 500))
+                        .filter(|title| !title.is_empty())
                         .unwrap_or_else(|| "Без названия".into()),
                     reason: error.reason(),
                 }),
@@ -493,8 +557,9 @@ fn expand(
     to: DateTime<Utc>,
     fallback: Tz,
     out: &mut Vec<CalendarEvent>,
-    budget: &mut usize,
+    usage: FeedUsage,
 ) -> Result<()> {
+    let mut budget = 100_000usize;
     let get = |name: &str| props.iter().find(|p| p.name == name);
     if get("STATUS").is_some_and(|p| p.value == "CANCELLED") {
         return Ok(());
@@ -516,32 +581,48 @@ fn expand(
         return Err(CalendarError("DTEND раньше DTSTART"));
     }
     let title = get("SUMMARY")
-        .map(|p| unescape(&p.value))
+        .map(|p| clean_text(&unescape(&p.value), 500))
         .filter(|t| !t.is_empty())
         .unwrap_or_else(|| "Встреча".into());
-    let uid = get("UID").ok_or(CalendarError("нет UID"))?.value.clone();
-    let attendees = props
+    let uid = bounded_id(&get("UID").ok_or(CalendarError("нет UID"))?.value)?;
+    let attendees: Vec<_> = props
         .iter()
         .filter(|p| p.name == "ATTENDEE")
+        .take(257)
         .map(attendee)
         .collect();
+    if attendees.len() > 256 {
+        return Err(CalendarError("лимит участников события"));
+    }
     let organizer = get("ORGANIZER").map(attendee);
     let url = ["URL", "LOCATION", "DESCRIPTION"]
         .into_iter()
         .filter_map(get)
-        .find_map(|p| call_url(&unescape(&p.value)));
+        .find_map(|p| call_url(&unescape(&p.value).chars().take(16_384).collect::<String>()));
+    if url.as_ref().is_some_and(|url| url.len() > 2048) {
+        return Err(CalendarError("лимит длины ссылки звонка"));
+    }
     let link = EventLink {
         uid,
         title,
         attendees,
         call_url: url,
     };
-    let mut excluded = Vec::new();
+    let mut excluded = BTreeSet::new();
     for p in props.iter().filter(|p| p.name == "EXDATE") {
         for value in p.value.split(',') {
-            excluded.push(date(value, &p.params, start.zone)?.utc()?);
+            excluded.insert(date(value, &p.params, start.zone)?.utc()?);
         }
     }
+    let template = CalendarEvent {
+        link,
+        start: start.utc()?,
+        end: start.utc()? + duration,
+        all_day: start.all_day,
+        organizer,
+    };
+    let entry_bytes = event_bytes(&template);
+    let mut seen = BTreeSet::new();
     let mut add = |begin: DateTime<Utc>, wall: NaiveDateTime| -> Result<()> {
         let finish = if start.all_day {
             wall_utc(
@@ -554,13 +635,25 @@ fn expand(
             begin + duration
         };
         if begin <= to && finish >= from && !excluded.contains(&begin) {
-            out.push(CalendarEvent {
-                link: link.clone(),
-                start: begin,
-                end: finish,
-                all_day: start.all_day,
-                organizer: organizer.clone(),
-            });
+            if !seen.insert(begin) {
+                return Ok(());
+            }
+            let bytes = entry_bytes
+                .checked_mul(out.len() + 1)
+                .ok_or(CalendarError("лимит памяти события"))?;
+            if out.len() >= EVENT_LIMIT || bytes > EVENT_BYTES {
+                return Err(CalendarError("превышен лимит вхождений или памяти события"));
+            }
+            if usage.count + out.len() >= FEED_LIMIT {
+                return Err(CalendarError(FEED_LIMIT_ERROR));
+            }
+            if usage.bytes + bytes > FEED_BYTES {
+                return Err(CalendarError(FEED_BYTES_ERROR));
+            }
+            let mut event = template.clone();
+            event.start = begin;
+            event.end = finish;
+            out.push(event);
         }
         Ok(())
     };
@@ -569,7 +662,7 @@ fn expand(
             return Err(CalendarError("RDATE PERIOD не поддержан"));
         }
         for value in p.value.split(',') {
-            *budget = budget
+            budget = budget
                 .checked_sub(1)
                 .ok_or(CalendarError("превышен лимит RDATE"))?;
             let extra = date(value, &p.params, start.zone)?.utc()?;
@@ -582,7 +675,19 @@ fn expand(
         Err(_) => Ok(()),
     };
     if let Some(rule) = get("RRULE") {
-        recurrence::expand(&rule.value, &start, to, budget, emit)
+        recurrence::expand(
+            &rule.value,
+            &start,
+            from - duration
+                - if start.all_day {
+                    Duration::days(1)
+                } else {
+                    Duration::zero()
+                },
+            to,
+            &mut budget,
+            emit,
+        )
     } else {
         emit(start.wall)
     }

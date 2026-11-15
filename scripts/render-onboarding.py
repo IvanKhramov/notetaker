@@ -245,12 +245,12 @@ impl NotetakerApp {
                 };
                 notetaker_core::calendar::CalendarEvent {link:notetaker_core::calendar::EventLink {uid:format!("visible-{i}"),title:["Планирование команды","Обзор прототипа","Проверка результатов","Обсуждение задач","Рабочая встреча","Итоги проекта","План следующего этапа","Обзор документации"][i as usize].into(),attendees:vec![],call_url:(i%2==0).then(||"https://zoom.us/neutral".into())},start,end:start+chrono::Duration::minutes(30),all_day:false,organizer:None}
             }).collect();
-            let skipped=vec![notetaker_core::calendar::SkippedEvent {title:"Почасовой обзор".into(),reason:notetaker_core::calendar::SkipReason::Recurrence},notetaker_core::calendar::SkippedEvent {title:"Повтор по номеру недели".into(),reason:notetaker_core::calendar::SkipReason::Recurrence},notetaker_core::calendar::SkippedEvent {title:"Событие в неизвестной зоне".into(),reason:notetaker_core::calendar::SkipReason::Timezone}];
+            let skipped=vec![notetaker_core::calendar::SkippedEvent {title:"Почасовой обзор".into(),reason:notetaker_core::calendar::SkipReason::Recurrence},notetaker_core::calendar::SkippedEvent {title:"Повтор по номеру недели".into(),reason:notetaker_core::calendar::SkipReason::Recurrence},notetaker_core::calendar::SkippedEvent {title:"Событие в неизвестной зоне с длинным названием для проверки усечения строки без изменения ширины карточки подписки".repeat(3),reason:notetaker_core::calendar::SkipReason::Timezone}];
             let error=(scene==70 || scene==72).then(||"Не удалось загрузить календарь. Проверьте сеть и сохранённую подписку.".into());
             app.state.calendar_reminder=Some((events[0].link.uid.clone(),events[0].start));
             app.state.dismiss_calendar_reminder();
             app.state.calendar_events=if scene==69 {vec![]} else {events.clone()};
-            app.state.calendar_reports=vec![notetaker_llm::calendar::SubscriptionStatus {id:"calendar-visible".into(),events:app.state.calendar_events.clone(),skipped:if scene==71 {skipped} else {vec![]},updated_at:Some(now),error}];
+            app.state.calendar_reports=vec![notetaker_llm::calendar::SubscriptionStatus {id:"calendar-visible".into(),events:app.state.calendar_events.clone(),skipped:if scene==71 {skipped} else {vec![]},updated_at:Some(if scene==70 || scene==72 {now-chrono::Duration::days(1)} else {now}),error}];
             app.state.calendar_busy=false;
             app.state.calendar_checked=Some(Instant::now());
             if scene==71 || scene==72 {app.show_settings=true;app.settings_panel.section=crate::settings::Section::Calendars;}
