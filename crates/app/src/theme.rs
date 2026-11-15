@@ -45,6 +45,7 @@ pub struct Palette {
     pub accent_hover: Color32,
     pub on_accent: Color32,
     pub red: Color32,
+    pub warning: Color32,
 }
 impl Palette {
     pub fn for_dark(dark: bool) -> Self {
@@ -66,6 +67,7 @@ impl Palette {
                 accent_hover: rgb(81, 158, 94),
                 on_accent: rgb(15, 36, 19),
                 red: rgb(224, 103, 91),
+                warning: rgb(218, 170, 72),
             }
         } else {
             Self {
@@ -84,6 +86,7 @@ impl Palette {
                 accent_hover: rgb(40, 106, 53),
                 on_accent: Color32::WHITE,
                 red: rgb(196, 69, 58),
+                warning: rgb(153, 103, 18),
             }
         }
     }
@@ -2560,4 +2563,55 @@ pub fn recipe_row(
         egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, name)
     });
     response
+}
+
+pub fn recording_status(
+    ui: &mut egui::Ui,
+    text: &str,
+    warning: bool,
+    progress: Option<(usize, usize)>,
+) {
+    let p = Palette::of(ui);
+    let ink = if warning { p.warning } else { p.muted };
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(16.0, 20.0), egui::Sense::hover());
+        paint_icon(
+            ui,
+            rect.center(),
+            if warning {
+                icons::CIRCLE_ALERT
+            } else {
+                icons::INFO
+            },
+            14.0,
+            ink,
+        );
+        // The text sits next to its icon; the progress bar keeps the right edge.
+        let bar = if progress.is_some() { 80.0 } else { 0.0 };
+        let width = (ui.available_width() - bar).max(0.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(width, 20.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_min_width(width);
+                ui.add(
+                    egui::Label::new(egui::RichText::new(text).font(medium(SMALL)).color(ink))
+                        .truncate(),
+                )
+                .on_hover_text(text);
+            },
+        );
+        if let Some((done, total)) = progress {
+            let fraction = if total == 0 {
+                0.0
+            } else {
+                done as f32 / total as f32
+            };
+            ui.add(
+                egui::ProgressBar::new(fraction)
+                    .desired_width(72.0)
+                    .desired_height(3.0),
+            );
+        }
+    });
 }

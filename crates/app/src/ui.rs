@@ -627,6 +627,9 @@ impl NotetakerApp {
         }
         let mut stop = false;
         let bar = theme::bar(p).show(ui, |ui| {
+            if let Some(status) = self.state.recording.status() {
+                theme::recording_status(ui, &status.text, status.warning, status.progress);
+            }
             ui.horizontal(|ui| {
                 let phase = self.state.recording.phase;
                 let busy = self.state.recording.busy();
@@ -640,9 +643,6 @@ impl NotetakerApp {
                         ui.spinner();
                     }
                     let elapsed = timestamp(self.state.recording.elapsed().as_millis() as u64);
-                    if phase == Phase::Recording {
-                        ui.label(RichText::new("Запись").size(14.0).color(p.muted));
-                    }
                     ui.add_sized(
                         [48.0, 28.0],
                         egui::Label::new(
@@ -703,17 +703,7 @@ impl NotetakerApp {
                             .id(egui::Id::unique("chat-input"))
                             .frame(egui::Frame::NONE)
                             .align(egui::Align2::LEFT_CENTER)
-                            .hint_text(if phase == Phase::Finalizing {
-                                // The final pass takes minutes after a long meeting.
-                                match self.state.recording.progress {
-                                    Some((completed, total)) => {
-                                        format!("Распознаю запись: {completed} из {total}…")
-                                    }
-                                    None => "Завершаю запись…".to_owned(),
-                                }
-                            } else if let Some(notice) = self.state.recording.silence_notice() {
-                                notice.to_owned()
-                            } else if busy {
+                            .hint_text(if busy {
                                 "Спросить по текущей записи…".to_owned()
                             } else if note || (self.chat_page && self.state.chat.scope.is_some()) {
                                 "Спросить про эту встречу…".to_owned()
@@ -1106,6 +1096,8 @@ impl NotetakerApp {
             self.home = true;
             return;
         };
+        let skipped_summary = self.state.skipped_summary_notice(&path);
+        let mut open_ai = false;
         let can_enhance = self.state.enhancing.is_none()
             && !self.state.recording.busy()
             && !self.state.unsaved()
@@ -1584,6 +1576,14 @@ impl NotetakerApp {
                 }
             }
         }
+        if self.state.tab == Tab::Enhanced
+            && !locked
+            && let Some(notice) = &skipped_summary
+        {
+            let (settings, create) = summary_skip_callout(ui, notice, can_enhance);
+            open_ai |= settings;
+            enhance |= create;
+        }
         let mut images = Vec::new();
         let mut speaker_edit = None;
         let mut rediarize = None;
@@ -1637,7 +1637,11 @@ impl NotetakerApp {
                 self.state.tab = Tab::Enhanced;
                 self.enhanced_preview = true;
             }
-            if document.data.enhanced.is_empty() && document.generation.is_none() && !locked {
+            if document.data.enhanced.is_empty()
+                && document.generation.is_none()
+                && !locked
+                && skipped_summary.is_none()
+            {
                 enhance |= ui
                     .add_enabled(
                         can_enhance,
@@ -1741,6 +1745,10 @@ impl NotetakerApp {
             }
         }
         self.state.attach(images);
+        if open_ai {
+            self.show_settings = true;
+            self.settings_panel.section = crate::settings::Section::Ai;
+        }
         if enhance {
             let edited = self
                 .state
@@ -2008,11 +2016,18 @@ impl NotetakerApp {
         let mut open = self.show_record;
         let mut cancel = false;
         let mut start_record = false;
+        let mut open_ai = false;
         let can_start = cfg!(any(windows, target_os = "macos")) && self.can_record();
         theme::modal(ctx,"Новая запись").open(&mut open).show_footer(ctx,|ui| {
             theme::form_field(ui,"Название",None,|ui|ui.add(theme::text_field(&mut self.state.title).desired_width(f32::INFINITY)));
             let mode_description=mode_label(self.state.record_mode);
             theme::form_field(ui,"Режим",Some(mode_description),|ui| {self.state.record_mode_edited |= mode_selector(ui,&mut self.state.record_mode);});
+            let readiness = self.state.summary_readiness();
+            ui.horizontal_wrapped(|ui| {
+                let text = match &readiness { Ok(()) => "Конспект создастся автоматически после Стоп".to_owned(), Err(reason) => format!("Без автоконспекта: {reason}") };
+                ui.label(RichText::new(text).size(theme::SMALL).color(Palette::of(ui).muted));
+                if readiness.is_err() { open_ai |= ui.link("Настройки AI").clicked(); }
+            });
             theme::form_field(ui,"Источник звука",None,|ui| {
                 ui.horizontal(|ui| {
                     crate::theme::select("audio_session").width((ui.available_width()-36.0).max(32.0)).selected_text(self.state.inventory.sessions.iter().find(|s|Some(s.pid)==self.state.process_id).map_or_else(||"Весь системный звук".to_owned(),|s|format!("{} (PID {})",s.exe.as_deref().unwrap_or(&s.name),s.pid))).show_ui(ui,|ui| {
@@ -2038,6 +2053,11 @@ impl NotetakerApp {
                 cancel=theme::button(ui,"Отмена",ButtonStyle::Ghost).clicked();
             });
         });
+        if open_ai {
+            self.show_settings = true;
+            self.settings_panel.section = crate::settings::Section::Ai;
+            open = false;
+        }
         if start_record {
             self.state.toggle_recording();
             self.show_record = false;
@@ -4736,4 +4756,31 @@ mod chat_shortcut_tests {
         .drop_without_applying_deltas();
         assert!(!ctx.memory(|m| m.has_focus(egui::Id::unique("chat-input"))));
     }
+}
+
+pub(crate) fn summary_skip_callout(
+    ui: &mut egui::Ui,
+    notice: &(String, bool),
+    can_create: bool,
+) -> (bool, bool) {
+    let mut settings = false;
+    let mut create = false;
+    theme::callout(ui, theme::icons::INFO, |ui| {
+        ui.label(&notice.0);
+        if notice.1 {
+            create = ui
+                .add_enabled(
+                    can_create,
+                    theme::styled_button(
+                        Palette::of(ui),
+                        "Создать конспект",
+                        ButtonStyle::Secondary,
+                    ),
+                )
+                .clicked();
+        } else {
+            settings = theme::button(ui, "Открыть настройки AI", ButtonStyle::Secondary).clicked();
+        }
+    });
+    (settings, create)
 }

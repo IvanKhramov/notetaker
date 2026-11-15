@@ -1234,6 +1234,28 @@ pub(crate) fn background_process(binary: &Path) -> Process {
     }
     command
 }
+pub fn recording_metadata(
+    library: &Library,
+    settings: &Settings,
+    title: &str,
+    event: Option<&notetaker_core::calendar::CalendarEvent>,
+    brief: Option<&notetaker_llm::Brief>,
+) -> Result<(MeetingMeta, Option<notetaker_core::folders::FolderSettings>)> {
+    let mut meta = MeetingMeta::new(title, Utc::now());
+    meta.mode = settings.mode;
+    if let Some(event) = event {
+        notetaker_core::calendar::link_meeting(&mut meta, event, true);
+    }
+    let defaults = library.inherit_folder(&mut meta, settings.folder.as_deref())?;
+    if let Some(mode) = settings.folder_mode_override {
+        meta.mode = mode;
+    }
+    if brief.is_some_and(|brief| brief.mode == notetaker_core::Mode::Local) {
+        meta.mode = notetaker_core::Mode::Local;
+    }
+    Ok((meta, defaults))
+}
+
 fn record(
     request: RecordRequest,
     import_file: Option<PathBuf>,
@@ -1244,16 +1266,13 @@ fn record(
     let mut meeting_for_reload = None;
     let result: Result<()> = (|| {
         let library = Library::open(&request.settings.library)?;
-        let mut initial_meta = MeetingMeta::new(&request.title, Utc::now());
-        initial_meta.mode = request.settings.mode;
-        if let Some(event) = &request.event {
-            notetaker_core::calendar::link_meeting(&mut initial_meta, event, true);
-        }
-        let folder_defaults =
-            library.inherit_folder(&mut initial_meta, request.settings.folder.as_deref())?;
-        if let Some(mode) = request.settings.folder_mode_override {
-            initial_meta.mode = mode;
-        }
+        let (initial_meta, folder_defaults) = recording_metadata(
+            &library,
+            &request.settings,
+            &request.title,
+            request.event.as_ref(),
+            request.brief.as_deref(),
+        )?;
         let binary = asr_binary()?;
         let mut config = AsrConfig::new(&request.settings.model)?;
         config.binary = binary;
@@ -1325,15 +1344,6 @@ fn record(
             let sources: [Box<dyn AudioSource + Send>; 2] = [Box::new(mic), Box::new(system)];
             let mut meta = initial_meta;
             meta.started_at = Utc::now();
-            meta.mode = if request
-                .brief
-                .as_ref()
-                .is_some_and(|brief| brief.mode == notetaker_core::Mode::Local)
-            {
-                notetaker_core::Mode::Local
-            } else {
-                meta.mode
-            };
             meta.app = request.app;
             if let Some(event) = &request.event {
                 notetaker_core::calendar::link_meeting(&mut meta, event, true);
