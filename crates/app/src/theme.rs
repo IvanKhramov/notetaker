@@ -514,8 +514,8 @@ pub fn update_prompt(
     install_label: &str,
     can_install: bool,
     can_dismiss: bool,
-    show_notes: bool,
-    highlights: &[String],
+    // `Some` shows the "Что нового" button; its items go to the tooltip.
+    notes: Option<&[String]>,
 ) -> UpdateAction {
     let mut action = UpdateAction::None;
     let close = modal(ctx, title)
@@ -537,7 +537,7 @@ pub fn update_prompt(
                 {
                     action = UpdateAction::Install;
                 }
-                if show_notes {
+                if let Some(highlights) = notes {
                     let mut notes = button(ui, "Что нового", ButtonStyle::Ghost);
                     if !highlights.is_empty() {
                         notes = notes.on_hover_ui(|ui| {

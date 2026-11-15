@@ -203,8 +203,7 @@ impl Updates {
                 "Обновить",
                 !busy && !preparing && !self.exit,
                 !preparing,
-                true,
-                &release.highlights(),
+                Some(&release.highlights()),
             );
             match action {
                 crate::theme::UpdateAction::Install => {

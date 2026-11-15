@@ -133,8 +133,7 @@ impl Updates {
             "Открыть релиз / скачать DMG",
             true,
             true,
-            false,
-            &[],
+            None,
         ) {
             crate::theme::UpdateAction::Install => {
                 let _ = notetaker_runtime::unix::open_url(&release.notes_url());
