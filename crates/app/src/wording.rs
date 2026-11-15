@@ -27,7 +27,7 @@ pub use notetaker_core::plain_excerpt as excerpt;
 
 pub fn audio_status(available: bool, expires: Option<chrono::DateTime<chrono::Utc>>) -> String {
     if !available {
-        "Аудио удалено".into()
+        "Аудио не хранится".into()
     } else if let Some(expires) = expires {
         format!(
             "Аудио хранится до {}",
@@ -89,7 +89,7 @@ mod tests {
     fn excerpts_remove_only_markdown_prefixes() {
         assert_eq!(
             excerpt("-\t[\t]\tПроверить\n1)\tДальше"),
-            "Проверить\nДальше"
+            "Проверить\n1)\tДальше"
         );
         assert_eq!(
             short_excerpt("## Решения\n- Первый пункт\n## Дальше\n- Второй пункт"),
@@ -97,7 +97,7 @@ mod tests {
         );
         assert_eq!(
             excerpt("## Итоги\n- Решение\n  1. Дальше\n> - [x] Сделано\r\n+ Ещё"),
-            "Итоги\nРешение\nДальше\nСделано\nЕщё"
+            "Итоги\nРешение\n1. Дальше\nСделано\nЕщё"
         );
         assert_eq!(
             excerpt("C#\n#тег\n1.5 версия\n-22 градуса\nhttps://example.invalid"),
@@ -109,7 +109,7 @@ mod tests {
         let expiry = "2026-11-22T12:00:00Z".parse().unwrap();
         assert_eq!(audio_status(true, None), "Аудио хранится бессрочно");
         assert_eq!(audio_status(true, Some(expiry)), "Аудио хранится до 22.11");
-        assert_eq!(audio_status(false, Some(expiry)), "Аудио удалено");
-        assert_eq!(audio_status(false, None), "Аудио удалено");
+        assert_eq!(audio_status(false, Some(expiry)), "Аудио не хранится");
+        assert_eq!(audio_status(false, None), "Аудио не хранится");
     }
 }

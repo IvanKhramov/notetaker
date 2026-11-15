@@ -1312,7 +1312,9 @@ impl NotetakerApp {
                             .max_height(menu_height)
                             .auto_shrink([false, true])
                             .show(ui, |ui| {
-                                if compact_header && !metadata_visible {
+                                // Always in the compact menu: the row beside the tabs
+                                // can run out of width before it reaches the folder.
+                                if compact_header {
                                     ui.add_enabled_ui(false, |ui| {
                                         theme::menu_item(
                                             ui,
@@ -5913,7 +5915,7 @@ mod direct_action_tests {
         assert!(!meeting.mic_audio_path().is_file());
         assert!(app.state.recording.busy());
         let after = compact_frame(&ctx, &mut app, size);
-        crate::test_ui::text_rect(&after.shapes, "Аудио удалено");
+        crate::test_ui::text_rect(&after.shapes, "Аудио не хранится");
         after.drop_without_applying_deltas();
     }
     #[test]

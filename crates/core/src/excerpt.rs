@@ -18,7 +18,8 @@ pub fn plain_excerpt(source: &str) -> String {
                 let std::collections::btree_map::Entry::Vacant(item) = items.entry(line) else {
                     continue;
                 };
-                let marker = if tail.starts_with(['-', '*', '+']) {
+                let bullet = tail.starts_with(['-', '*', '+']);
+                let marker = if bullet {
                     1
                 } else {
                     tail.bytes().take_while(u8::is_ascii_digit).count() + 1
@@ -30,7 +31,11 @@ pub fn plain_excerpt(source: &str) -> String {
                         .take_while(|byte| matches!(byte, b' ' | b'\t'))
                         .count();
                 item.insert(end);
-                spans.push(start..end);
+                // A number stays: `2026. год запуска` is a list item to the
+                // parser and a sentence to the reader.
+                if bullet {
+                    spans.push(start..end);
+                }
             }
             Event::TaskListMarker(_) => {
                 let line = source[..start].rfind('\n').map_or(0, |index| index + 1);
@@ -38,7 +43,13 @@ pub fn plain_excerpt(source: &str) -> String {
                     .get(&line)
                     .is_some_and(|&end| source[end..start].trim().is_empty())
                 {
-                    spans.push(range);
+                    // The gap after the box goes with it, or a numbered item
+                    // keeps two spaces.
+                    let gap = source[range.end..]
+                        .bytes()
+                        .take_while(|byte| matches!(byte, b' ' | b'\t'))
+                        .count();
+                    spans.push(range.start..range.end + gap);
                 }
             }
             Event::Start(Tag::Heading { .. }) => {
@@ -95,15 +106,18 @@ mod tests {
         for (source, expected) in [
             (
                 "## Итоги\n- Решение\n  1. Дальше\n> - [x] Сделано",
-                "Итоги\nРешение\nДальше\nСделано",
+                "Итоги\nРешение\n1. Дальше\nСделано",
             ),
-            ("1. 2026. год запуска", "2026. год запуска"),
+            ("1. 2026. год запуска", "1. 2026. год запуска"),
+            ("2026. год запуска", "2026. год запуска"),
+            ("Итог\n\n2026. год запуска\n", "Итог\n\n2026. год запуска"),
+            ("1. [ ] Задача", "1. Задача"),
             ("План\n2026. год запуска", "План\n2026. год запуска"),
             (
                 "#123\n#тег\n-5 градусов\nC#\n1.5 версия",
                 "#123\n#тег\n-5 градусов\nC#\n1.5 версия",
             ),
-            ("1. Первый\n2. Второй", "Первый\nВторой"),
+            ("1. Первый\n2. Второй", "1. Первый\n2. Второй"),
             ("* Первый\n+ Второй\n- [ ] Третий", "Первый\nВторой\nТретий"),
             ("[x] Обычный текст", "[x] Обычный текст"),
             ("####### Не заголовок", "####### Не заголовок"),
