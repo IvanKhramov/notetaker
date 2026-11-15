@@ -592,9 +592,9 @@ impl NotetakerApp {
         } else {
             target.as_ref().map(|(m, _)| m.path().to_path_buf())
         };
-        let fresh = !self.chat_page
-            && (self.state.chat.scope.as_ref().map(|m| m.path()) != scope_path.as_deref()
-                || self.state.chat.folder != self.state.folder_filter);
+        let fresh = self.state.chat.folder != self.state.folder_filter
+            || (!self.chat_page
+                && self.state.chat.scope.as_ref().map(|m| m.path()) != scope_path.as_deref());
         let live = self.state.recording.phase == Phase::Recording
             && scope_path.is_some()
             && scope_path.as_deref() == self.state.recording.path.as_deref();
@@ -741,11 +741,12 @@ impl NotetakerApp {
             self.state.toggle_recording();
         }
         if ask && !self.ask_text.trim().is_empty() && can_ask {
+            // A dialog belongs to one folder, also when asked from the chat page.
+            if self.state.chat.folder != self.state.folder_filter {
+                self.state.chat.messages.clear();
+                self.state.chat.folder = self.state.folder_filter.clone();
+            }
             if !self.chat_page {
-                if self.state.chat.folder != self.state.folder_filter {
-                    self.state.chat.messages.clear();
-                    self.state.chat.folder = self.state.folder_filter.clone();
-                }
                 let (scope, title) = target.unzip();
                 self.state.chat.open(scope, title.unwrap_or_default());
             }
