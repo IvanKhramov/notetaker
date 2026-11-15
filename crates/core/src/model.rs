@@ -99,6 +99,9 @@ pub struct Bookmark {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Transcript {
+    /// Speaker ID to source recording ID; no remote transcript text.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub ktalk_sources: std::collections::BTreeMap<String, String>,
     pub version: u32,
     pub segments: Vec<Segment>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -117,6 +120,7 @@ impl Default for Transcript {
     fn default() -> Self {
         Self {
             version: SCHEMA_VERSION,
+            ktalk_sources: Default::default(),
             segments: Vec::new(),
             bookmarks: Vec::new(),
             speaker_names: Default::default(),

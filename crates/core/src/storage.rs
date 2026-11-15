@@ -446,7 +446,11 @@ impl Meeting {
                 let _file_guard = lock_meeting_files(&self.path)?;
                 self.load_transcript()?
             };
+            let before = loaded.value.clone();
             update(&mut loaded.value);
+            if loaded.value == before {
+                return Ok(());
+            }
             attempts += 1;
             match self.save_transcript(&loaded.value, loaded.revision) {
                 Err(crate::Error::Conflict { local, .. }) if attempts < 3 => {

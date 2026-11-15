@@ -9,6 +9,7 @@ mod cli;
 mod config;
 mod credentials;
 mod drafts;
+pub mod ktalk;
 pub mod live;
 mod people;
 pub mod search;
