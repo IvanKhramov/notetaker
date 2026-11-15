@@ -34,6 +34,7 @@ for path in sorted((root / "crates/app/src").glob("*.rs")):
     if path.stem == "state":
         text = text.replace("    fn with_channels(", "    pub(crate) fn with_channels(")
         text = text.replace("    fn new(data: DocumentData)", "    pub(crate) fn new(data: DocumentData)")
+        text += "impl Recording {pub fn fixture_silence(&mut self) {self.silent_since[0]=Some(std::time::Instant::now()-std::time::Duration::from_secs(25));}}"
     if path.stem == "quickstart":
         text = text.replace("    step: usize,", "    pub(crate) step: usize,\n    pub(crate) expanded: bool,")
         text = text.replace('crate::theme::disclosure("Календарь")', 'crate::theme::disclosure("Календарь").default_open(self.expanded)')
@@ -112,6 +113,27 @@ impl NotetakerApp {
             app.home=screen==43 || screen==44;
             if screen==44 {app.ask_text="/".into();}
             if screen==45 {app.state.recording.path=app.state.selected.clone();app.state.recording.phase=Phase::Recording;app.state.recording.started=Some(Instant::now()-Duration::from_secs(123));}
+        }
+        if (46..=50).contains(&screen) {
+            app.home=false;
+            let path=app.state.selected.clone().unwrap();
+            if screen==46 || screen==47 {
+                app.state.recording.path=Some(path.clone());
+                app.state.recording.phase=Phase::Recording;
+                app.state.recording.started=Some(Instant::now()-Duration::from_secs(123));
+            }
+            if screen==46 {
+                app.state.recording.fixture_silence();
+            }
+            if screen==47 {
+                app.state.recording.apply(&notetaker_pipeline::PipelineEvent::FinalPassProgress {completed:3,total:8});
+            }
+            if screen==48 || screen==49 {app.show_record=true;app.state.llm_configured=screen==48;app.state.record_mode=notetaker_core::Mode::Local;}
+            if screen==50 {
+                app.state.documents.get_mut(&path).unwrap().data.enhanced.clear();
+                app.state.skipped_summaries.insert(path);app.state.settings.auto_summary=true;
+                app.state.llm_configured=false;app.state.tab=Tab::Enhanced;
+            }
         }
         if screen == 20 { app.chat_page=true; app.state.chat.open(None,String::new()); }
         if screen == 21 { app.state.tasks_open=true; }
@@ -288,7 +310,7 @@ if shutil.disk_usage(root).free < 2 * 1024**3:
 # Resolve the derived harness root against the copied workspace lock before its locked build.
 subprocess.run(["cargo", "metadata", "--offline", "--format-version", "1", "--manifest-path", str(harness / "Cargo.toml")], cwd=root, env=env, check=True, stdout=subprocess.DEVNULL)
 subprocess.run(["cargo", "build", "--locked", "--manifest-path", str(harness / "Cargo.toml")], cwd=root, env=env, check=True)
-names = ["welcome", "name", "connections", "home", "note", "transcript", "general", "recording", "calendars", "ai", "search", "storage", "recording-pill", "connections-expanded", "delete-confirm", "meeting-menu", "toast", "empty-library", "narrow-settings", "recording-bar", "chat", "tasks", "people", "person", "series", "digest", "folders", "diagnostics", "tracker-preview", "new-recording", "rename", "regenerate", "capture-warning", "widgets", "update-card", "folder-delete", "merge-people", "folders-advanced", "ai-expanded", "performance-transcript", "performance-meetings", "performance-live", "chat-meeting-empty", "chat-library-empty", "chat-recipes", "chat-recording"]
+names = ["welcome", "name", "connections", "home", "note", "transcript", "general", "recording", "calendars", "ai", "search", "storage", "recording-pill", "connections-expanded", "delete-confirm", "meeting-menu", "toast", "empty-library", "narrow-settings", "recording-bar", "chat", "tasks", "people", "person", "series", "digest", "folders", "diagnostics", "tracker-preview", "new-recording", "rename", "regenerate", "capture-warning", "widgets", "update-card", "folder-delete", "merge-people", "folders-advanced", "ai-expanded", "performance-transcript", "performance-meetings", "performance-live", "chat-meeting-empty", "chat-library-empty", "chat-recipes", "chat-recording", "recording-silence", "recording-final-pass", "recording-ready", "recording-not-ready", "summary-skipped"]
 def render(spec):
     index, name, theme, width, height, zoom = spec
     actual_width = 760 if name == "narrow-settings" and zoom == 1.0 else width

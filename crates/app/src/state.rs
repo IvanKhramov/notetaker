@@ -32,6 +32,11 @@ pub enum Phase {
     Recording,
     Finalizing,
 }
+pub struct RecordingStatus {
+    pub text: String,
+    pub warning: bool,
+    pub progress: Option<(usize, usize)>,
+}
 #[derive(Default)]
 pub struct Recording {
     pub phase: Phase,
@@ -51,6 +56,7 @@ pub struct Recording {
     pub messages: VecDeque<String>,
     /// Latest peak of the microphone and of the system audio, 0..1.
     pub levels: [f32; 2],
+    recovering: [bool; 2],
     /// Since when each channel has delivered digital silence.
     silent_since: [Option<Instant>; 2],
     audio_warnings: AudioWarnings,
@@ -67,22 +73,54 @@ impl Recording {
     pub fn level(&self) -> f32 {
         self.levels[0].max(self.levels[1])
     }
+    fn silent_channels(&self) -> [bool; 2] {
+        [0, 1].map(|i| {
+            self.silent_since[i].is_some_and(|since| {
+                since.elapsed() >= Duration::from_secs(if i == 0 { 20 } else { 120 })
+            })
+        })
+    }
     /// What to tell the user when a channel stays silent during a recording.
     pub fn silence_notice(&self) -> Option<&'static str> {
         if self.phase != Phase::Recording {
             return None;
         }
-        let silent = |channel: usize, seconds: u64| {
-            self.silent_since[channel]
-                .is_some_and(|since| since.elapsed() >= Duration::from_secs(seconds))
-        };
-        // A live microphone always carries room noise; other people may be quiet for a while.
-        match (silent(0, 20), silent(1, 120)) {
-            (true, true) => Some("Звука нет. Проверьте микрофон и звук компьютера."),
-            (true, false) => Some("Микрофон не даёт звука. Проверьте его в системе."),
-            (false, true) => Some("Давно не слышно собеседников."),
-            (false, false) => None,
+        match self.silent_channels() {
+            [true, true] => Some("Микрофон молчит · Нет звука собеседников"),
+            [true, false] => Some("Микрофон молчит"),
+            [false, true] => Some("Нет звука собеседников"),
+            _ => None,
         }
+    }
+    pub fn status(&self) -> Option<RecordingStatus> {
+        let text = match self.phase {
+            Phase::Idle => return None,
+            Phase::Starting if self.importing => "Открываю аудиофайл".into(),
+            Phase::Starting => "Начинаю запись".into(),
+            Phase::Recording if self.recovering[0] => {
+                "Запись · Микрофон потерян, переподключаю".into()
+            }
+            Phase::Recording if self.recovering[1] => {
+                "Запись · Звук собеседников потерян, переподключаю".into()
+            }
+            Phase::Recording => self.silence_notice().map_or_else(
+                || "Идёт запись".into(),
+                |notice| format!("Запись · {notice}"),
+            ),
+            Phase::Finalizing => match self.progress {
+                Some((done, total)) => format!("Распознаю запись: {done} из {total}"),
+                None if self.importing => "Распознаю аудиофайл".into(),
+                None => "Завершаю запись".into(),
+            },
+        };
+        Some(RecordingStatus {
+            text,
+            warning: self.phase == Phase::Recording
+                && (self.recovering.iter().any(|v| *v) || self.silence_notice().is_some()),
+            progress: (self.phase == Phase::Finalizing)
+                .then_some(self.progress)
+                .flatten(),
+        })
     }
     pub fn message(&mut self, text: String) {
         if self.messages.len() == 8 {
@@ -126,6 +164,17 @@ impl Recording {
                 self.fallback = true;
                 self.message("Переключение на весь системный звук".into());
             }
+            PipelineEvent::CaptureEvent(CaptureEvent::Recovery { channel, restored }) => {
+                let index = if *channel == notetaker_capture::Channel::Mic {
+                    0
+                } else {
+                    1
+                };
+                self.recovering[index] = !restored;
+                if *restored {
+                    self.silent_since[index] = None;
+                }
+            }
             PipelineEvent::CaptureEvent(CaptureEvent::Error { .. }) | PipelineEvent::Error(_) => {}
             PipelineEvent::CaptureEvent(
                 CaptureEvent::Discontinuity { .. } | CaptureEvent::TimestampError { .. },
@@ -141,7 +190,6 @@ impl Recording {
             // the final reload. Keep editing locked until that reload arrives.
             PipelineEvent::Finished { .. }
             | PipelineEvent::LiveSegments(_)
-            | PipelineEvent::CaptureEvent(CaptureEvent::Recovery { .. })
             | PipelineEvent::CaptureEvent(CaptureEvent::Stopped { .. }) => {}
         }
     }
@@ -294,6 +342,7 @@ pub struct AppState {
     pub generation_cancel: notetaker_llm::Cancellation,
     generation_is_cli: bool,
     pending_summary: Option<PathBuf>,
+    pub skipped_summaries: HashSet<PathBuf>,
     pub ready: bool,
     pub settings_pending: bool,
     pub settings_autosave: crate::autosave::Autosave,
@@ -391,6 +440,7 @@ impl AppState {
             generation_cancel: notetaker_llm::Cancellation::default(),
             generation_is_cli: false,
             pending_summary: None,
+            skipped_summaries: HashSet::new(),
             ready: false,
             settings_pending: false,
             settings_autosave: Default::default(),
@@ -1035,6 +1085,33 @@ impl AppState {
             self.start_recording();
         }
     }
+    pub fn summary_readiness(&self, mode: notetaker_core::Mode) -> Result<(), String> {
+        if !self.settings.auto_summary {
+            return Err("Автоконспект выключен в настройках записи".into());
+        }
+        summary_provider(self.llm_configured, &self.llm, mode)
+            .map(|_| ())
+            .map_err(|e| format!("{e:#}"))
+    }
+    pub fn skipped_summary_notice(&self, path: &PathBuf) -> Option<(String, bool)> {
+        let doc = self.documents.get(path)?;
+        if !self.settings.auto_summary
+            || !self.skipped_summaries.contains(path)
+            || !doc.data.enhanced.trim().is_empty()
+            || doc.generation.is_some()
+        {
+            return None;
+        }
+        Some(
+            match summary_provider(self.llm_configured, &self.llm, doc.data.meta.mode) {
+                Ok(_) => (
+                    "Автоконспект был пропущен. AI готов, можно создать конспект.".into(),
+                    true,
+                ),
+                Err(error) => (format!("Автоконспект пропущен: {error:#}"), false),
+            },
+        )
+    }
     pub fn enhance(&mut self) {
         if self.enhancing.is_some()
             || self.recording.busy()
@@ -1047,15 +1124,6 @@ impl AppState {
         let Some(path) = self.selected.clone() else {
             return;
         };
-        if !self.llm_configured {
-            // Without this the request goes to a default local endpoint and fails with a
-            // connection error that says nothing about setup.
-            self.error = Some(
-                "AI не подключён. Откройте «Настройки → AI» и подключите Claude, ChatGPT или свой шлюз."
-                    .into(),
-            );
-            return;
-        }
         self.start_summary(path, false);
     }
     fn start_summary(&mut self, path: PathBuf, automatic: bool) {
@@ -1063,14 +1131,7 @@ impl AppState {
         let Some(document) = self.documents.get_mut(&path) else {
             return;
         };
-        let provider = (|| -> anyhow::Result<_> {
-            let config = notetaker_llm::Config::parse(&self.llm.validate()?)?;
-            config.select_scenario(
-                document.data.meta.mode,
-                notetaker_llm::Scenario::Summary,
-                None,
-            )
-        })();
+        let provider = summary_provider(self.llm_configured, &self.llm, document.data.meta.mode);
         let provider = match provider {
             Ok(provider) => provider,
             Err(error) => {
@@ -1078,6 +1139,7 @@ impl AppState {
                 return;
             }
         };
+        self.skipped_summaries.remove(&path);
         self.generation_is_cli = provider.kind.is_cli();
         self.generation_cancel = notetaker_llm::Cancellation::default();
         document.generation = Some(String::new());
@@ -1327,10 +1389,14 @@ impl AppState {
             let path = self.pending_summary.take().expect("pending summary");
             if !self.exit_requested
                 && let Some(document) = self.documents.get(&path)
-                && self.llm_configured
-                && auto_summary_ready(self.settings.auto_summary, &document.data, &self.llm)
+                && self.settings.auto_summary
+                && worker::summary_can_overwrite(&document.data)
             {
-                self.start_summary(path, true);
+                if self.llm_configured && auto_summary_ready(true, &document.data, &self.llm) {
+                    self.start_summary(path, true);
+                } else {
+                    self.skipped_summaries.insert(path);
+                }
             }
         }
         for action in self.connections.autosaves() {
@@ -2117,18 +2183,28 @@ impl AppState {
     }
 }
 
+pub fn summary_provider(
+    configured: bool,
+    llm: &LlmSettings,
+    mode: notetaker_core::Mode,
+) -> anyhow::Result<notetaker_llm::ProviderConfig> {
+    anyhow::ensure!(configured, "AI не подключён (Настройки → AI)");
+    let config = notetaker_llm::Config::parse(&llm.validate()?)?;
+    config
+        .select_scenario(mode, notetaker_llm::Scenario::Summary, None)
+        .map_err(|error| {
+            if mode == notetaker_core::Mode::Local {
+                anyhow::anyhow!("Для конспекта Local нужен loopback-провайдер.")
+            } else {
+                error
+            }
+        })
+}
+
 fn auto_summary_ready(enabled: bool, data: &DocumentData, llm: &LlmSettings) -> bool {
     enabled
         && worker::summary_can_overwrite(data)
-        && llm
-            .validate()
-            .ok()
-            .and_then(|text| notetaker_llm::Config::parse(&text).ok())
-            .is_some_and(|config| {
-                config
-                    .select_scenario(data.meta.mode, notetaker_llm::Scenario::Summary, None)
-                    .is_ok()
-            })
+        && summary_provider(true, llm, data.meta.mode).is_ok()
 }
 
 pub fn timestamp(ms: u64) -> String {
@@ -3224,6 +3300,131 @@ mod tests {
         assert!(!auto_summary_ready(true, &data, &llm));
         llm.defaults.hybrid = "missing".into();
         assert!(!auto_summary_ready(true, &data, &llm));
+    }
+    #[test]
+    fn recording_status_covers_phases_silence_recovery_and_import() {
+        let mut recording = Recording::default();
+        assert!(recording.status().is_none());
+        for (phase, importing, progress, expected) in [
+            (Phase::Starting, false, None, "Начинаю запись"),
+            (Phase::Starting, true, None, "Открываю аудиофайл"),
+            (Phase::Recording, false, None, "Идёт запись"),
+            (
+                Phase::Finalizing,
+                false,
+                Some((2, 7)),
+                "Распознаю запись: 2 из 7",
+            ),
+            (Phase::Finalizing, false, None, "Завершаю запись"),
+            (Phase::Finalizing, true, None, "Распознаю аудиофайл"),
+            (
+                Phase::Finalizing,
+                true,
+                Some((1, 4)),
+                "Распознаю запись: 1 из 4",
+            ),
+        ] {
+            recording.phase = phase;
+            recording.importing = importing;
+            recording.progress = progress;
+            let status = recording.status().unwrap();
+            assert_eq!(status.text, expected);
+            assert!(!status.warning);
+            assert_eq!(status.progress, progress);
+            let ctx = eframe::egui::Context::default();
+            crate::theme::install(&ctx);
+            let output = crate::test_ui::frame(&ctx, vec![], &mut |ui| {
+                crate::theme::recording_status(ui, &status.text, status.warning, status.progress);
+            });
+            crate::test_ui::text_rect(&output.shapes, expected);
+            output.drop_without_applying_deltas();
+        }
+        recording.phase = Phase::Recording;
+        for (index, expected) in [(0, "Микрофон молчит"), (1, "Нет звука собеседников")]
+        {
+            recording.silent_since = [None, None];
+            recording.silent_since[index] = Some(Instant::now() - Duration::from_secs(121));
+            let status = recording.status().unwrap();
+            assert!(status.warning);
+            assert!(status.text.contains(expected));
+        }
+        recording.apply(&PipelineEvent::CaptureEvent(CaptureEvent::Recovery {
+            channel: notetaker_capture::Channel::Mic,
+            restored: false,
+        }));
+        assert!(recording.status().unwrap().warning);
+        assert!(
+            recording
+                .status()
+                .unwrap()
+                .text
+                .contains("Микрофон потерян, переподключаю")
+        );
+        recording.silent_since = [None, None];
+        recording.apply(&PipelineEvent::CaptureEvent(CaptureEvent::Recovery {
+            channel: notetaker_capture::Channel::Mic,
+            restored: true,
+        }));
+        assert!(!recording.status().unwrap().warning);
+    }
+    #[test]
+    fn skipped_summary_uses_manual_check_and_updates_after_ai_setup() {
+        let (mut state, commands, _root, path) = fixture();
+        state.ready = true;
+        state.settings.auto_summary = true;
+        state.llm_configured = false;
+        state.pending_summary = Some(path.clone());
+        state.poll();
+        assert!(state.skipped_summaries.contains(&path));
+        let notice = state.skipped_summary_notice(&path).unwrap();
+        assert!(notice.0.contains("AI не подключён"));
+        assert!(!notice.1);
+        let ctx = eframe::egui::Context::default();
+        crate::theme::install(&ctx);
+        let output = crate::test_ui::frame(&ctx, vec![], &mut |ui| {
+            crate::ui::summary_skip_callout(ui, &notice, true);
+        });
+        crate::test_ui::text_rect(&output.shapes, &notice.0);
+        crate::test_ui::text_rect(&output.shapes, "Открыть настройки AI");
+        output.drop_without_applying_deltas();
+        state.selected = Some(path.clone());
+        state.enhance();
+        assert!(state.error.as_ref().unwrap().contains("AI не подключён"));
+        state.llm_configured = true;
+        state.llm.providers[0].base_url = "https://example.invalid/v1".into();
+        let notice = state.skipped_summary_notice(&path).unwrap();
+        assert!(notice.0.contains("loopback"));
+        assert!(!notice.0.contains("Hybrid"));
+        assert!(!notice.1);
+        state.enhance();
+        assert!(state.error.as_ref().unwrap().contains("loopback"));
+        let ctx = eframe::egui::Context::default();
+        crate::theme::install(&ctx);
+        let output = crate::test_ui::frame(&ctx, vec![], &mut |ui| {
+            crate::ui::summary_skip_callout(ui, &notice, true);
+        });
+        crate::test_ui::text_rect(&output.shapes, "Открыть настройки AI");
+        output.drop_without_applying_deltas();
+        state.llm.providers[0].base_url = "http://localhost:11434/v1".into();
+        let ready_notice = state.skipped_summary_notice(&path).unwrap();
+        assert!(ready_notice.1);
+        let output = crate::test_ui::frame(&ctx, vec![], &mut |ui| {
+            crate::ui::summary_skip_callout(ui, &ready_notice, true);
+        });
+        crate::test_ui::text_rect(&output.shapes, "Создать конспект");
+        output.drop_without_applying_deltas();
+        state.documents.get_mut(&path).unwrap().data.enhanced = "Готовый конспект".into();
+        assert!(state.skipped_summary_notice(&path).is_none());
+        state
+            .documents
+            .get_mut(&path)
+            .unwrap()
+            .data
+            .enhanced
+            .clear();
+        state.settings.auto_summary = false;
+        assert!(state.skipped_summary_notice(&path).is_none());
+        drop(commands);
     }
     #[test]
     fn final_pass_queues_auto_summary_but_failure_does_not() {
