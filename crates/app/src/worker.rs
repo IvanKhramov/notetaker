@@ -427,6 +427,7 @@ pub enum Event {
     },
     Voices(Result<notetaker_core::VoiceLibrary, String>),
     Models(crate::quickstart::Models),
+    ModelStatus(String, crate::quickstart::Status),
     DownloadProgress(String),
     Downloaded(Result<(), String>, crate::quickstart::Models),
     SettingsSaved(Result<(Settings, LlmSettings), String>, bool),
@@ -490,7 +491,6 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
         notetaker_core::embedding::set_models_dir(settings.models_path());
         let models = crate::quickstart::check_models();
         let mut voice_library_enabled = settings.voice_library;
-        let mut download_speech_model = settings.model.clone();
         let _ = events.send(Event::Voices(
             Library::open(&settings.library)
                 .and_then(|l| l.read_voices())
@@ -1040,11 +1040,9 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                     download_cancel =
                         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                     let cancel = download_cancel.clone();
-                    let speech = download_speech_model.clone();
                     let events = events.clone();
                     thread::spawn(move || {
-                        let result =
-                            download(&model, &events, &cancel, &speech).map_err(error_text);
+                        let result = download(&model, &events, &cancel).map_err(error_text);
                         let _ = events
                             .send(Event::Downloaded(result, crate::quickstart::check_models()));
                     });
@@ -1093,7 +1091,6 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                             let _ = events.send(Event::Models(crate::quickstart::check_models()));
                         }
                         voice_library_enabled = settings.voice_library;
-                        download_speech_model = settings.model.clone();
                         let _ = events.send(Event::Voices(
                             Library::open(&settings.library)
                                 .and_then(|l| l.read_voices())
@@ -1613,15 +1610,35 @@ pub fn asr_binary() -> Result<PathBuf> {
     );
     Ok(path)
 }
-fn ensure_embed_worker(events: &Events) -> Result<()> {
-    if background_process(&notetaker_core::embedding::worker_path())
-        .arg("--help")
+fn embed_probe(binary: &Path, argument: &str) -> Result<bool> {
+    let mut child = background_process(binary)
+        .arg(argument)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
-    {
+        .spawn()?;
+    let start = std::time::Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status.success());
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!(
+                "Воркер поиска не ответил за 5 с. Переустановите полный пакет приложения."
+            );
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+fn ensure_embed_worker(events: &Events) -> Result<()> {
+    let binary = notetaker_core::embedding::worker_path();
+    if binary.is_file() {
+        ensure!(
+            embed_probe(&binary, "--help")?,
+            "Воркер поиска не запускается. Переустановите полный пакет приложения."
+        );
         return Ok(());
     }
     #[cfg(not(windows))]
@@ -1682,66 +1699,41 @@ fn ensure_embed_worker(events: &Events) -> Result<()> {
     }
 }
 
-fn download(
-    model: &str,
-    events: &Events,
-    cancel: &std::sync::atomic::AtomicBool,
-    speech: &str,
-) -> Result<()> {
+fn download(model: &str, events: &Events, cancel: &std::sync::atomic::AtomicBool) -> Result<()> {
     let binary = if model == "semantic" {
         ensure_embed_worker(events)?;
         notetaker_core::embedding::worker_path()
     } else {
         asr_binary()?
     };
-    if model == "semantic"
-        && background_process(&binary)
-            .arg("check-model")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
-    {
+    if model == "semantic" && embed_probe(&binary, "check-model")? {
         return Ok(());
     }
-    let asr = asr_binary()?;
-    let embed = notetaker_core::embedding::worker_path();
-    for (worker, group) in [
-        (&asr, Some(speech)),
-        (&asr, Some("diarization")),
-        (&embed, None),
-    ] {
-        if !worker.is_file() {
-            continue;
-        } // The optional worker is installed by its existing download step.
-        let mut plan = background_process(worker);
-        plan.arg("download-plan");
-        if let Some(group) = group {
-            plan.arg(group);
-        }
-        let output = plan.output()?;
-        ensure!(
-            output.status.success(),
-            "Не удалось получить размеры моделей: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let plan = String::from_utf8(output.stdout)?;
-        ensure!(
-            !plan.trim().is_empty()
-                && plan
-                    .lines()
-                    .all(|line| line.starts_with("NOTETAKER_DOWNLOAD_PLAN ")),
-            "Воркер не поддерживает план загрузки. Обновите полный пакет приложения."
-        );
-        for line in plan.lines() {
-            let _ = events.send(Event::DownloadProgress(line.into()));
-        }
+    let mut plan = background_process(&binary);
+    plan.arg("download-plan");
+    if model != "semantic" {
+        plan.arg(model);
     }
-    let _ = events.send(Event::DownloadProgress(format!(
-        "NOTETAKER_DOWNLOAD_PLAN_END {}",
-        u8::from(embed.is_file())
-    )));
+    let output = plan.output()?;
+    ensure!(
+        output.status.success(),
+        "Не удалось получить размеры моделей: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let plan = String::from_utf8(output.stdout)?;
+    ensure!(
+        !plan.trim().is_empty()
+            && plan
+                .lines()
+                .all(|line| line.starts_with("NOTETAKER_DOWNLOAD_PLAN ")),
+        "Воркер не поддерживает план загрузки. Обновите полный пакет приложения."
+    );
+    for line in plan.lines() {
+        let _ = events.send(Event::DownloadProgress(line.into()));
+    }
+    let _ = events.send(Event::DownloadProgress(
+        "NOTETAKER_DOWNLOAD_PLAN_END 1".into(),
+    ));
     let mut command = background_process(&binary);
     command.arg("download");
     if model != "semantic" {
@@ -1768,6 +1760,14 @@ fn download(
         }
         match lines.recv_timeout(Duration::from_millis(100)) {
             Ok(Ok(line)) => {
+                if line.starts_with("NOTETAKER_MODEL_INSTALLED ")
+                    && !crate::quickstart::optional(model)
+                {
+                    let _ = events.send(Event::ModelStatus(
+                        model.into(),
+                        crate::quickstart::check_speech(model),
+                    ));
+                }
                 if !line.starts_with("NOTETAKER_DOWNLOAD ") {
                     notetaker_runtime::diagnostics::worker_stderr(&line);
                     last_message = line.clone();

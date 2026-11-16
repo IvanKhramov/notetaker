@@ -515,7 +515,7 @@ impl AppState {
             pending_ai: Default::default(),
             rows: Vec::new(),
             query: String::new(),
-            semantic_enabled: true,
+            semantic_enabled: false,
             semantic_ready: false,
             semantic_running: false,
             semantic_dirty: false,
@@ -619,6 +619,9 @@ impl AppState {
         }
     }
     pub fn start_semantic_index(&mut self) {
+        if !self.settings.semantic_search && self.llm.embeddings.provider.is_empty() {
+            return;
+        }
         if self.semantic_running {
             self.semantic_dirty = true;
             return;
@@ -1051,6 +1054,12 @@ impl AppState {
                 .map(|s| s.exe.clone().unwrap_or_else(|| s.name.clone()))
         });
         let settings = self.recording_settings();
+        if self.settings.diarize && !settings.diarize {
+            self.notices.push((
+                crate::theme::ToastLevel::Info,
+                "Запись без разделения собеседников: модель ещё не готова.".into(),
+            ));
+        }
         let event = self.recording_event();
         self.selected_event = None;
         let brief = self.recording_brief(event.as_ref());
@@ -1172,7 +1181,6 @@ impl AppState {
                 .any(|doc| doc.speaker_ui.recalculating)
             || self.recording.busy()
             || self.recording.assist.bookmarks_pending > 0
-            || self.downloading
             || self.quickstart.probe_busy
             || self.settings_pending
             || self.exit_requested
@@ -1483,6 +1491,10 @@ impl AppState {
     fn recording_settings(&self) -> Settings {
         let mut settings = self.settings.clone();
         settings.model = self.record_model.clone();
+        if self.quickstart.models.diarization != crate::quickstart::Status::Ready {
+            settings.diarize = false;
+            settings.voice_library = false;
+        }
         settings.mode = self.record_mode;
         settings.folder_mode_override = self.record_mode_edited.then_some(self.record_mode);
         settings.folder = self.folder_filter.clone().filter(|s| !s.is_empty());
@@ -2172,6 +2184,8 @@ impl AppState {
             } => {
                 self.llm_configured = llm_configured;
                 self.quickstart.models = models;
+                self.semantic_enabled =
+                    settings.semantic_search || !llm.embeddings.provider.is_empty();
                 self.settings = settings.clone();
                 self.settings_draft = settings.clone();
                 self.connections.load(&llm);
@@ -2693,6 +2707,9 @@ impl AppState {
                 Ok(voices) => self.voices = voices,
                 Err(error) => self.error = Some(error),
             },
+            Event::ModelStatus(model, status) => {
+                self.quickstart.models.set(&model, status);
+            }
             Event::Models(models) => {
                 self.quickstart.models = models;
             }
@@ -2706,7 +2723,25 @@ impl AppState {
                 self.download_messages.push_back(message);
             }
             Event::Downloaded(result, models) => {
-                self.quickstart.download_error = result.as_ref().err().cloned();
+                let optional = self
+                    .quickstart
+                    .download_model
+                    .as_deref()
+                    .is_some_and(crate::quickstart::optional);
+                if optional
+                    && !self.quickstart.retry_requested
+                    && let Some(error) = result.as_ref().err()
+                    && let Some(model) = &self.quickstart.download_model
+                {
+                    self.quickstart
+                        .optional_errors
+                        .insert(model.clone(), error.clone());
+                }
+                self.quickstart.download_error = if optional {
+                    None
+                } else {
+                    result.as_ref().err().cloned()
+                };
                 self.quickstart.retry_at = result
                     .as_ref()
                     .err()
@@ -2784,6 +2819,8 @@ impl AppState {
                         self.settings_draft.last_recording = settings.last_recording.clone();
                         self.record_model = settings.model.clone();
                         self.record_mode = settings.mode;
+                        self.semantic_enabled =
+                            settings.semantic_search || !llm.embeddings.provider.is_empty();
                         self.settings = settings;
                         self.connections.load(&llm);
                         self.llm = llm;
@@ -3582,6 +3619,9 @@ mod tests {
         state.downloading = false;
         state.quickstart.models.diarization = crate::quickstart::Status::Ready;
         crate::quickstart::auto_download(&mut state);
+        assert!(commands.try_recv().is_err());
+        state.settings.semantic_search = true;
+        crate::quickstart::auto_download(&mut state);
         assert!(matches!(commands.try_recv().unwrap(), Command::Download(id) if id == "semantic"));
     }
     #[test]
@@ -3814,6 +3854,8 @@ mod tests {
     #[test]
     fn semantic_hit_selects_anchor_and_ready_results_refresh_without_reindex_loop() {
         let (mut state, commands, _root, path) = fixture();
+        state.settings.semantic_search = true;
+        state.semantic_enabled = true;
         state.settings.library = path.parent().unwrap().to_owned();
         let meeting = state.documents[&path].data.meeting.clone();
         state.select_anchor(meeting, Some(notetaker_core::Anchor::Notes { line: 3 }));

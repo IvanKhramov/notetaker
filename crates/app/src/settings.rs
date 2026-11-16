@@ -689,10 +689,11 @@ impl Panel {
                         ui,
                         "Поиск по словам и по смыслу",
                         Some(
-                            "Локальная модель загружается автоматически. До её загрузки работает поиск по словам. Тексты остаются на компьютере.",
+                            "Необязательная загрузка только после включения. До готовности работает поиск по словам. Запись ждать не нужно. Тексты остаются на компьютере.",
                         ),
-                        |ui| crate::quickstart::model_status(ui, state),
+                        |ui| crate::quickstart::optional_switch(ui, state),
                     );
+                    crate::quickstart::optional_download_status(ui, state);
                 });
                 theme::settings_group(ui, "Библиотека", |ui| {
                     organization

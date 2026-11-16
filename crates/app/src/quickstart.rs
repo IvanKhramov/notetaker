@@ -38,13 +38,21 @@ impl Models {
             _ => &self.diarization,
         }
     }
+    pub fn set(&mut self, model: &str, status: Status) {
+        match model {
+            "gigaam-v3" => self.gigaam = status,
+            "parakeet-v3" => self.parakeet = status,
+            "auto" => self.auto = status,
+            "diarization" => self.diarization = status,
+            "semantic" => self.semantic = status,
+            _ => {}
+        }
+    }
     pub fn speech_ready(&self, model: &str) -> bool {
         self.get(model) == &Status::Ready
     }
     pub fn missing<'a>(&self, model: &'a str) -> Option<&'a str> {
-        [model, "diarization", "semantic"]
-            .into_iter()
-            .find(|id| self.get(id) != &Status::Ready)
+        (!self.speech_ready(model)).then_some(model)
     }
 }
 #[derive(Clone, Debug)]
@@ -57,6 +65,7 @@ pub struct Transfer {
     plan_complete: bool,
     started: Instant,
     network_bytes: u64,
+    installed: std::collections::BTreeSet<String>,
 }
 impl Transfer {
     pub fn waiting(now: Instant) -> Self {
@@ -69,9 +78,14 @@ impl Transfer {
             plan_complete: false,
             started: now,
             network_bytes: 0,
+            installed: Default::default(),
         }
     }
     pub fn update(&mut self, line: &str, now: Instant) {
+        if let Some(file) = line.strip_prefix("NOTETAKER_MODEL_INSTALLED ") {
+            self.installed.insert(file.into());
+            return;
+        }
         if let Some(known) = line.strip_prefix("NOTETAKER_DOWNLOAD_PLAN_END ") {
             self.plan_complete = known == "1";
             return;
@@ -81,6 +95,9 @@ impl Transfer {
             if let [file, total, installed] = fields.as_slice()
                 && let Ok(total) = total.parse::<u64>()
             {
+                if *installed == "1" {
+                    self.installed.insert((*file).into());
+                }
                 self.files.insert(
                     (*file).into(),
                     (if *installed == "1" { total } else { 0 }, total),
@@ -138,7 +155,7 @@ impl Transfer {
         (self.total == 0 || self.received < self.total)
             && now.saturating_duration_since(self.last_byte) >= Duration::from_secs(30)
     }
-    pub fn text(&self, model: &str, phase: usize) -> String {
+    pub fn text(&self, model: &str, _phase: usize) -> String {
         let label = match self.file.as_str() {
             "gigaam-v3" => "модель русской речи",
             "parakeet-v3" => "модель многоязычной речи",
@@ -168,7 +185,21 @@ impl Transfer {
             .map_or(String::new(), |minutes| {
                 format!(" · осталось около {minutes} мин")
             });
-        format!("Подготовка к записи: {label}, этап {phase} из 3 · {progress}{eta}")
+        let prefix = if optional(model) {
+            "Дополнительно"
+        } else {
+            "Подготовка к записи"
+        };
+        let count = if self.plan_complete && !optional(model) {
+            format!(
+                " · готово файлов {} из {}",
+                self.installed.len(),
+                self.files.len()
+            )
+        } else {
+            String::new()
+        };
+        format!("{prefix}: {label} · {progress}{count}{eta}")
     }
 }
 #[derive(Default)]
@@ -178,17 +209,38 @@ pub struct Runtime {
     pub transfer: Option<Transfer>,
     pub retry_requested: bool,
     pub download_error: Option<String>,
+    pub optional_errors: std::collections::BTreeMap<String, String>,
     pub calendar_error: Option<String>,
     pub probe_busy: bool,
     pub retry_at: Option<Instant>,
     checked_at: Option<Instant>,
 }
 
-/// Download in priority order, retry with a delay, and periodically detect removed
-/// files. Never overlap downloads with recording or a folder preference change.
+pub fn optional(model: &str) -> bool {
+    matches!(model, "diarization" | "semantic")
+}
+fn next_download(state: &AppState) -> Option<String> {
+    let models = &state.quickstart.models;
+    if !models.speech_ready(&state.settings.model) {
+        return Some(state.settings.model.clone());
+    }
+    if (state.settings.diarize || state.settings.voice_library)
+        && models.diarization != Status::Ready
+        && !state.quickstart.optional_errors.contains_key("diarization")
+    {
+        return Some("diarization".into());
+    }
+    if state.settings.semantic_search
+        && state.llm.embeddings.provider.is_empty()
+        && models.semantic != Status::Ready
+        && !state.quickstart.optional_errors.contains_key("semantic")
+    {
+        return Some("semantic".into());
+    }
+    None
+}
 pub fn auto_download(state: &mut AppState) {
     if !state.ready
-        || state.downloading
         || state.recording.busy()
         || state.settings_pending
         || state.settings_autosave.pending
@@ -196,19 +248,30 @@ pub fn auto_download(state: &mut AppState) {
     {
         return;
     }
-    if state
-        .quickstart
-        .retry_at
-        .is_some_and(|at| Instant::now() < at)
-    {
+    if state.downloading {
+        if state
+            .quickstart
+            .download_model
+            .as_deref()
+            .is_some_and(optional)
+            && (!state.quickstart.models.speech_ready(&state.settings.model)
+                || state.quickstart.download_model.as_deref() == Some("semantic")
+                    && !state.settings.semantic_search)
+            && !state.quickstart.retry_requested
+        {
+            state.retry_download();
+        }
         return;
     }
-    if let Some(model) = state
-        .quickstart
-        .models
-        .missing(&state.settings.model)
-        .map(str::to_owned)
-    {
+    if let Some(model) = next_download(state) {
+        if state.quickstart.download_model.as_ref() == Some(&model)
+            && state
+                .quickstart
+                .retry_at
+                .is_some_and(|at| Instant::now() < at)
+        {
+            return;
+        }
         state.quickstart.retry_at = None;
         state.download(model);
     } else if state
@@ -245,33 +308,28 @@ pub fn wake_after(state: &AppState, now: Instant) -> Option<Duration> {
     Some(due.saturating_duration_since(now))
 }
 
+pub fn check_speech(model: &str) -> Status {
+    let result = worker::asr_binary().and_then(|binary| {
+        Ok(worker::background_process(&binary)
+            .args(["check-model", model])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?)
+    });
+    match result {
+        Ok(status) if status.success() => Status::Ready,
+        Ok(_) => Status::Missing,
+        Err(error) => Status::Error(format!("{error:#}")),
+    }
+}
 pub fn check_models() -> Models {
-    let check = |model| -> Status {
-        let result = worker::asr_binary().and_then(|binary| {
-            Ok(worker::background_process(&binary)
-                .args(["check-model", model])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()?)
-        });
-        match result {
-            Ok(status) if status.success() => Status::Ready,
-            Ok(_) => Status::Missing,
-            Err(error) => Status::Error(format!("{error:#}")),
-        }
-    };
     Models {
-        gigaam: check("gigaam-v3"),
-        parakeet: check("parakeet-v3"),
-        auto: check("auto"),
-        diarization: check("diarization"),
+        gigaam: check_speech("gigaam-v3"),
+        parakeet: check_speech("parakeet-v3"),
+        auto: check_speech("auto"),
+        diarization: check_speech("diarization"),
         semantic: if notetaker_core::embedding::installed()
-            && worker::background_process(&notetaker_core::embedding::worker_path())
-                .arg("check-model")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .is_ok_and(|s| s.success())
+            && notetaker_core::embedding::worker_path().is_file()
         {
             Status::Ready
         } else {
@@ -279,75 +337,127 @@ pub fn check_models() -> Models {
         },
     }
 }
-
 /// Shared phase and per-file byte progress for welcome, library and storage.
 pub fn model_status(ui: &mut egui::Ui, state: &mut AppState) {
-    if state.downloading {
-        let ready = [&*state.settings.model, "diarization", "semantic"]
-            .into_iter()
-            .filter(|id| state.quickstart.models.get(id) == &Status::Ready)
-            .count();
-        ui.horizontal_wrapped(|ui| {
-            crate::theme::spinner(ui);
-            let text = state
-                .quickstart
-                .transfer
-                .as_ref()
-                .map(|transfer| {
-                    transfer.text(
-                        state.quickstart.download_model.as_deref().unwrap_or("auto"),
-                        ready + 1,
-                    )
-                })
-                .unwrap_or_else(|| {
-                    format!("Подготовка к записи: подключение, {} из 3…", ready + 1)
-                });
-            ui.add(egui::Label::new(egui::RichText::new(text).color(Palette::of(ui).muted)).wrap());
-        });
-        let fraction = state
+    let required_ready = state.quickstart.models.speech_ready(&state.settings.model);
+    let required_download = !required_ready
+        && state.downloading
+        && state
             .quickstart
-            .transfer
-            .as_ref()
-            .and_then(Transfer::fraction);
-        theme::progress(ui, fraction, ui.available_width());
-        if let Some(transfer) = &state.quickstart.transfer {
-            let (done, total) = transfer.overall();
-            if fraction.is_some() {
-                ui.weak(format!(
-                    "Всего: {:.1} из {:.1} МБ",
-                    done as f64 / 1_000_000.0,
-                    total as f64 / 1_000_000.0
-                ));
+            .download_model
+            .as_deref()
+            .is_some_and(|id| !optional(id));
+    if required_download {
+        transfer_status(ui, state);
+    } else if !required_ready {
+        if let Some(error) = state.quickstart.download_error.clone() {
+            ui.add(egui::Label::new(egui::RichText::new(error).color(Palette::of(ui).red)).wrap());
+            if theme::button(ui, "Повторить", theme::ButtonStyle::Ghost).clicked() {
+                state.retry_download();
             }
+        } else {
+            ui.weak("Подготовка к записи: нужна модель распознавания речи и определение пауз.");
         }
-        if state
+    } else {
+        ui.weak("Распознавание готово. Запись доступна.");
+    }
+    if required_ready
+        && state.downloading
+        && state
+            .quickstart
+            .download_model
+            .as_deref()
+            .is_some_and(optional)
+    {
+        transfer_status(ui, state);
+    }
+}
+fn transfer_status(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.horizontal_wrapped(|ui| {
+        theme::spinner(ui);
+        let text = state
             .quickstart
             .transfer
             .as_ref()
-            .is_some_and(|transfer| transfer.stalled(Instant::now()))
-        {
+            .map(|t| {
+                t.text(
+                    state.quickstart.download_model.as_deref().unwrap_or("auto"),
+                    0,
+                )
+            })
+            .unwrap_or_else(|| "Подготовка к записи: подключение…".into());
+        ui.add(egui::Label::new(egui::RichText::new(text).color(Palette::of(ui).muted)).wrap());
+    });
+    let fraction = state
+        .quickstart
+        .transfer
+        .as_ref()
+        .and_then(Transfer::fraction);
+    theme::progress(ui, fraction, ui.available_width());
+    if let Some(transfer) = &state.quickstart.transfer {
+        let (done, total) = transfer.overall();
+        if fraction.is_some() {
+            ui.weak(format!(
+                "Всего: {:.1} из {:.1} МБ",
+                done as f64 / 1_000_000.0,
+                total as f64 / 1_000_000.0
+            ));
+        }
+        if transfer.stalled(Instant::now()) {
             ui.weak("Загрузка не идёт. Проверьте сеть.");
             if theme::button(ui, "Повторить", theme::ButtonStyle::Ghost).clicked() {
                 state.retry_download();
             }
         }
-    } else if let Some(error) = state.quickstart.download_error.clone() {
-        ui.horizontal_wrapped(|ui| {
-            ui.colored_label(Palette::of(ui).red, error);
-            if theme::button(ui, "Повторить", crate::theme::ButtonStyle::Ghost).clicked() {
-                state.retry_download();
-            }
-        });
-        ui.small("Повторю автоматически через минуту.");
-    } else if state
-        .quickstart
-        .models
-        .missing(&state.settings.model)
-        .is_none()
+    }
+}
+pub fn optional_status(ui: &mut egui::Ui, state: &mut AppState) {
+    optional_switch(ui, state);
+    optional_download_status(ui, state);
+}
+pub fn optional_switch(ui: &mut egui::Ui, state: &mut AppState) {
+    let mut enabled = state.settings_draft.semantic_search;
+    if theme::switch(ui, &mut enabled, "Локальный поиск по смыслу").changed()
     {
-        ui.weak("Все модели на месте");
-    } else {
-        ui.weak("Подготовка к записи…");
+        state.settings_draft.semantic_search = enabled;
+        state.save_preferences();
+    }
+}
+pub fn optional_download_status(ui: &mut egui::Ui, state: &mut AppState) {
+    if state.downloading
+        && state
+            .quickstart
+            .download_model
+            .as_deref()
+            .is_some_and(optional)
+    {
+        transfer_status(ui, state);
+    }
+    for model in ["diarization", "semantic"] {
+        if let Some(error) = state.quickstart.optional_errors.get(model).cloned() {
+            ui.horizontal(|ui| {
+                if theme::button(ui, "Повторить", theme::ButtonStyle::Ghost).clicked() {
+                    state.quickstart.optional_errors.remove(model);
+                    state.quickstart.retry_at = None;
+                }
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!(
+                            "{}: {error}",
+                            if model == "semantic" {
+                                "Поиск по смыслу"
+                            } else {
+                                "Разделение собеседников"
+                            }
+                        ))
+                        .small()
+                        .color(Palette::of(ui).muted),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(error);
+            });
+        }
     }
 }
 
@@ -548,6 +658,7 @@ impl Panel {
                         _ => {
                             ui.heading("Подключить помощников?");
                             ui.label("Необязательно. Всё можно настроить позже.");
+                            crate::theme::disclosure("Поиск по смыслу").show(ui,|ui| optional_status(ui,state));
                             crate::theme::disclosure("Календарь").show(ui, |ui| {
                                 ui.label("Встречи из календаря появятся на главном экране.");
                                 if state.settings.calendars.is_empty() {
@@ -908,5 +1019,98 @@ mod aggregate_progress_tests {
             Transfer::waiting(at).remaining_minutes(at + Duration::from_secs(5)),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod required_models_tests {
+    use super::*;
+    #[test]
+    fn recording_starts_while_optional_models_are_absent_or_downloading() {
+        let (mut state, commands, _events) = crate::test_ui::state();
+        state.ready = true;
+        state.settings.diarize = true;
+        state.settings.voice_library = true;
+        state
+            .quickstart
+            .models
+            .set(&state.record_model.clone(), Status::Ready);
+        state.downloading = true;
+        state.quickstart.download_model = Some("diarization".into());
+        state.start_recording();
+        let Command::Record(request) = commands.try_recv().unwrap() else {
+            panic!("recording was not requested");
+        };
+        assert!(!request.settings.diarize);
+        assert!(!request.settings.voice_library);
+        assert!(state.settings.diarize);
+        assert!(state.settings.voice_library);
+        assert!(
+            state
+                .notices
+                .iter()
+                .any(|(_, text)| text.contains("без разделения"))
+        );
+    }
+    #[test]
+    fn only_speech_and_vad_readiness_gate_recording_not_optional_downloads() {
+        let (mut state, commands, _events) = crate::test_ui::state();
+        state.ready = true;
+        state
+            .quickstart
+            .models
+            .set(&state.settings.model.clone(), Status::Ready);
+        assert!(state.can_prepare_recording());
+        state.downloading = true;
+        state.quickstart.download_model = Some("semantic".into());
+        assert!(state.can_prepare_recording());
+        state.settings.diarize = false;
+        state.settings.voice_library = false;
+        state.downloading = false;
+        auto_download(&mut state);
+        assert!(commands.try_recv().is_err());
+        assert!(!state.settings.semantic_search);
+        state.settings.semantic_search = true;
+        auto_download(&mut state);
+        assert!(matches!(commands.try_recv().unwrap(),Command::Download(id) if id=="semantic"));
+        state.apply(worker::Event::Downloaded(
+            Err("network unavailable".into()),
+            state.quickstart.models.clone(),
+        ));
+        assert!(state.can_prepare_recording());
+        assert!(state.quickstart.download_error.is_none());
+        assert!(state.quickstart.optional_errors.contains_key("semantic"));
+    }
+    #[test]
+    fn installed_file_markers_update_only_the_required_counter() {
+        let at = Instant::now();
+        let mut transfer = Transfer::waiting(at);
+        for line in [
+            "NOTETAKER_DOWNLOAD_PLAN gigaam-v3 100 0",
+            "NOTETAKER_DOWNLOAD_PLAN silero-vad 10 0",
+            "NOTETAKER_DOWNLOAD_PLAN_END 1",
+            "NOTETAKER_MODEL_INSTALLED gigaam-v3",
+        ] {
+            transfer.update(line, at);
+        }
+        let text = transfer.text("gigaam-v3", 0);
+        assert!(text.contains("готово файлов 1 из 2"));
+        assert!(!text.contains("из 3"));
+        assert!(transfer.text("semantic", 0).starts_with("Дополнительно:"));
+    }
+    #[test]
+    fn mandatory_speech_preempts_an_optional_transfer() {
+        let (mut state, commands, _events) = crate::test_ui::state();
+        state.ready = true;
+        state.settings.semantic_search = true;
+        state.downloading = true;
+        state.quickstart.download_model = Some("semantic".into());
+        auto_download(&mut state);
+        assert!(matches!(
+            commands.try_recv().unwrap(),
+            Command::CancelDownload
+        ));
+        auto_download(&mut state);
+        assert!(commands.try_recv().is_err());
     }
 }

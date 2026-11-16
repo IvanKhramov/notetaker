@@ -1,10 +1,8 @@
+#[path = "../../model_download.rs"]
+mod model_download;
 use anyhow::{Context, Result, ensure};
 use sha2::{Digest, Sha256};
-use std::{
-    fs,
-    io::{Read, Write},
-    time::Duration,
-};
+use std::{fs, io::Read, time::Duration};
 
 const ROOT: &str = "https://huggingface.co/Xenova/multilingual-e5-small/resolve/761b726dd34fb83930e26aab4e9ac3899aa1fa78";
 const FILES: &[(&str, &str, u64, &str)] = &[
@@ -42,45 +40,37 @@ pub fn download() -> Result<()> {
     let root = notetaker_core::embedding::models_dir()?;
     fs::create_dir_all(&root)?;
     let staging = tempfile::tempdir_in(&root)?;
-    let client = reqwest::blocking::ClientBuilder::from(
-        reqwest::Client::builder().read_timeout(Duration::from_secs(30)),
-    )
-    .connect_timeout(Duration::from_secs(30))
-    .timeout(Duration::from_secs(1800))
-    .build()?;
     for (source, name, size, sha) in FILES {
-        eprintln!("Скачивание {name}: {size} байт");
-        eprintln!("NOTETAKER_DOWNLOAD {name} 0 {size}");
-        let mut response = client
-            .get(format!("{ROOT}/{source}"))
-            .send()?
-            .error_for_status()?;
-        let mut file = fs::File::create(staging.path().join(name))?;
+        let partial = root.join(format!(".e5-{name}.part"));
+        model_download::download(
+            &format!("{ROOT}/{source}"),
+            &partial,
+            *size,
+            name,
+            Duration::from_secs(60),
+        )?;
+        let mut file = fs::File::open(&partial)?;
         let mut hash = Sha256::new();
-        let mut total = 0;
+        let mut bytes = 0u64;
         let mut buffer = [0u8; 65536];
-        let mut last = std::time::Instant::now();
-
         loop {
-            let n = response.read(&mut buffer)?;
+            let n = file.read(&mut buffer)?;
             if n == 0 {
                 break;
             }
-            total += n as u64;
-            ensure!(total <= *size, "Размер загрузки превышает манифест");
+            bytes += n as u64;
             hash.update(&buffer[..n]);
-            file.write_all(&buffer[..n])?;
-            if last.elapsed() >= Duration::from_millis(250) || total == *size {
-                eprintln!("NOTETAKER_DOWNLOAD {name} {total} {size}");
-                last = std::time::Instant::now();
-            }
         }
-        ensure!(
-            total == *size && format!("{:x}", hash.finalize()) == *sha,
-            "Не совпал SHA-256 или размер {name}"
-        );
-        file.sync_all()?;
-        eprintln!("Проверен SHA-256: {name}");
+        if bytes != *size || format!("{:x}", hash.finalize()) != *sha {
+            model_download::discard_corrupt(&partial)?;
+            anyhow::bail!("Не совпал SHA-256 или размер {name}");
+        }
+        fs::copy(&partial, staging.path().join(name))?;
+        fs::OpenOptions::new()
+            .write(true)
+            .open(staging.path().join(name))?
+            .sync_all()?;
+        eprintln!("NOTETAKER_MODEL_INSTALLED {name}");
     }
     let dest = notetaker_core::embedding::model_dir()?;
     if dest.exists() {
@@ -96,6 +86,9 @@ pub fn download() -> Result<()> {
         }
     } else {
         fs::rename(staging.path(), &dest)?;
+    }
+    for (_, name, _, _) in FILES {
+        fs::remove_file(root.join(format!(".e5-{name}.part")))?;
     }
     eprintln!("Поиск по смыслу: модель установлена");
     Ok(())

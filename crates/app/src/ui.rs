@@ -507,12 +507,13 @@ impl NotetakerApp {
             self.state.permissions.check_requested = true;
         }
         if !self.quickstart.open
-            && self
+            && (self
                 .state
                 .quickstart
                 .models
                 .missing(&self.state.settings.model)
                 .is_some()
+                || self.state.downloading)
         {
             crate::quickstart::model_status(ui, &mut self.state);
             if !self

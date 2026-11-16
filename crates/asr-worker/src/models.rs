@@ -1,10 +1,12 @@
+#[path = "../../model_download.rs"]
+mod model_download;
 use anyhow::{Context, Result, bail, ensure};
 use bzip2::read::BzDecoder;
 use directories::ProjectDirs;
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File},
-    io::{Read, Write},
+    io::Read,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -201,38 +203,18 @@ fn download_one(root: &Path, model: &ModelManifest) -> Result<()> {
         root.join(model.id).display()
     );
     let staging = tempfile::tempdir_in(root)?;
-    let archive = staging.path().join("download");
-    eprintln!("Downloading {} ({} bytes)", model.id, model.size);
-    eprintln!("NOTETAKER_DOWNLOAD {} 0 {}", model.id, model.size);
-    let client = reqwest::blocking::ClientBuilder::from(
-        reqwest::Client::builder().read_timeout(Duration::from_secs(30)),
-    )
-    .connect_timeout(Duration::from_secs(30))
-    .timeout(Duration::from_secs(1800))
-    .build()?;
-    let mut response = client.get(model.url).send()?.error_for_status()?;
-    let mut file = File::create(&archive)?;
-    // Bound the download even if a server returns an unexpectedly large body.
-    let mut reader = response.by_ref().take(model.size + 1);
-    let mut bytes = 0u64;
-    let mut buffer = [0u8; 65536];
-    let mut last = std::time::Instant::now();
-
-    loop {
-        let n = reader.read(&mut buffer)?;
-        if n == 0 {
-            break;
-        }
-        file.write_all(&buffer[..n])?;
-        bytes += n as u64;
-        if last.elapsed() >= Duration::from_millis(250) || bytes >= model.size {
-            eprintln!("NOTETAKER_DOWNLOAD {} {} {}", model.id, bytes, model.size);
-            last = std::time::Instant::now();
-        }
+    let archive = root.join(format!(".{}.part", model.id));
+    model_download::download(
+        model.url,
+        &archive,
+        model.size,
+        model.id,
+        Duration::from_secs(60),
+    )?;
+    if let Err(error) = verify(File::open(&archive)?, model) {
+        model_download::discard_corrupt(&archive)?;
+        return Err(error);
     }
-    file.flush()?;
-    drop(file);
-    verify(File::open(&archive)?, model)?;
     let extracted = staging.path().join("extracted");
     fs::create_dir(&extracted)?;
     if model.directory.is_empty() {
@@ -246,6 +228,10 @@ fn download_one(root: &Path, model: &ModelManifest) -> Result<()> {
     }
     fs::write(source.join("SHA256"), model.sha256)?;
     fs::rename(source, root.join(model.id))?;
+    if archive.exists() {
+        fs::remove_file(&archive)?;
+    }
+    eprintln!("NOTETAKER_MODEL_INSTALLED {}", model.id);
     eprintln!(
         "Installed {} in {}",
         model.id,
