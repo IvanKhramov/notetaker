@@ -338,6 +338,7 @@ pub fn start_card(
                         theme::button(ui, "Записать", ButtonStyle::Primary)
                     })
                     .inner
+                    .on_disabled_hover_text(reason.unwrap_or_default())
                     .clicked();
                 dismiss = theme::button(ui, "Не сейчас", ButtonStyle::Secondary).clicked();
             });

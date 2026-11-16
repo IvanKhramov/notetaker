@@ -306,6 +306,8 @@ impl NotetakerApp {
             Some("Дождитесь проверки звука")
         } else if !self.state.can_prepare_recording() {
             Some("Дождитесь завершения текущей операции")
+        } else if !cfg!(any(windows, target_os = "macos", test)) {
+            Some("Запись доступна на macOS и Windows")
         } else {
             None
         }
@@ -509,7 +511,7 @@ impl NotetakerApp {
         let mut select = None;
         let mut start_event = None;
         let mut calendar_settings = false;
-        let can_record = self.can_record() && cfg!(any(windows, target_os = "macos"));
+        let recording_reason = self.recording_reason();
         self.meetings_cache.sync(&self.state, &self.organization);
         let count = self.meetings_cache.count;
         egui::ScrollArea::vertical()
@@ -529,7 +531,7 @@ impl NotetakerApp {
                             loading: self.state.calendar_reports.is_empty()
                                 && self.state.calendar_error.is_none(),
                             now: chrono::Utc::now(),
-                            can_record,
+                            reason: recording_reason,
                         },
                         &mut expanded,
                         &mut self.calendar_rows,
@@ -760,10 +762,7 @@ impl NotetakerApp {
                                 )
                                 .min_size(egui::vec2(0.0, theme::CTA_HEIGHT)),
                             )
-                            .on_disabled_hover_text(
-                                self.recording_reason()
-                                    .unwrap_or("Дождитесь завершения текущей операции"),
-                            )
+                            .on_disabled_hover_text(self.recording_reason().unwrap_or_default())
                             .clicked()
                     {
                         self.state.toggle_recording();
@@ -2589,11 +2588,7 @@ impl NotetakerApp {
                 if let Some(remaining) = ending {
                     ending_action = crate::detection::stop_card(ui, remaining);
                 } else if let Some(event) = &event {
-                    action = crate::calendar_ui::reminder(
-                        ui,
-                        event,
-                        cfg!(any(windows, target_os = "macos")) && self.can_record(),
-                    );
+                    action = crate::calendar_ui::reminder(ui, event, self.recording_reason());
                 }
             });
         self.calendar_action(ctx, action);
@@ -2686,11 +2681,7 @@ impl NotetakerApp {
                 if let Some(CallPrompt::Stop { countdown, .. }) = &prompt {
                     ending_action = crate::detection::stop_card(ui, countdown.remaining);
                 } else if let Some(event) = &calendar {
-                    match crate::calendar_ui::reminder(
-                        ui,
-                        event,
-                        cfg!(any(windows, target_os = "macos")) && self.can_record(),
-                    ) {
+                    match crate::calendar_ui::reminder(ui, event, self.recording_reason()) {
                         crate::calendar_ui::Action::Start => accept = true,
                         crate::calendar_ui::Action::Dismiss => dismiss = true,
                         crate::calendar_ui::Action::None => {}

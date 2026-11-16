@@ -203,13 +203,33 @@ fn download_one(root: &Path, model: &ModelManifest) -> Result<()> {
     let staging = tempfile::tempdir_in(root)?;
     let archive = staging.path().join("download");
     eprintln!("Downloading {} ({} bytes)", model.id, model.size);
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(1800))
-        .build()?;
+    eprintln!("NOTETAKER_DOWNLOAD {} 0 {}", model.id, model.size);
+    let client = reqwest::blocking::ClientBuilder::from(
+        reqwest::Client::builder().read_timeout(Duration::from_secs(30)),
+    )
+    .connect_timeout(Duration::from_secs(30))
+    .timeout(Duration::from_secs(1800))
+    .build()?;
     let mut response = client.get(model.url).send()?.error_for_status()?;
     let mut file = File::create(&archive)?;
     // Bound the download even if a server returns an unexpectedly large body.
-    std::io::copy(&mut response.by_ref().take(model.size + 1), &mut file)?;
+    let mut reader = response.by_ref().take(model.size + 1);
+    let mut bytes = 0u64;
+    let mut buffer = [0u8; 65536];
+    let mut last = std::time::Instant::now();
+
+    loop {
+        let n = reader.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        file.write_all(&buffer[..n])?;
+        bytes += n as u64;
+        if last.elapsed() >= Duration::from_millis(250) || bytes >= model.size {
+            eprintln!("NOTETAKER_DOWNLOAD {} {} {}", model.id, bytes, model.size);
+            last = std::time::Instant::now();
+        }
+    }
     file.flush()?;
     drop(file);
     verify(File::open(&archive)?, model)?;

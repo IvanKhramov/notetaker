@@ -295,6 +295,7 @@ pub enum Command {
     },
     CheckModels,
     Download(String),
+    CancelDownload,
     Voices {
         root: PathBuf,
         delete: Option<VoiceDelete>,
@@ -506,6 +507,7 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
         });
         let mut ktalk_thread: Option<std::thread::JoinHandle<()>> = None;
         let mut ktalk_control: Option<crate::ktalk::Control> = None;
+        let mut download_cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         for command in rx {
             match command {
                 Command::Ktalk(job, control) => {
@@ -1030,10 +1032,16 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                 Command::CheckModels => {
                     let _ = events.send(Event::Models(crate::quickstart::check_models()));
                 }
+                Command::CancelDownload => {
+                    download_cancel.store(true, std::sync::atomic::Ordering::Relaxed)
+                }
                 Command::Download(model) => {
+                    download_cancel =
+                        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let cancel = download_cancel.clone();
                     let events = events.clone();
                     thread::spawn(move || {
-                        let result = download(&model, &events).map_err(error_text);
+                        let result = download(&model, &events, &cancel).map_err(error_text);
                         let _ = events
                             .send(Event::Downloaded(result, crate::quickstart::check_models()));
                     });
@@ -1670,7 +1678,7 @@ fn ensure_embed_worker(events: &Events) -> Result<()> {
     }
 }
 
-fn download(model: &str, events: &Events) -> Result<()> {
+fn download(model: &str, events: &Events, cancel: &std::sync::atomic::AtomicBool) -> Result<()> {
     let binary = if model == "semantic" {
         ensure_embed_worker(events)?;
         notetaker_core::embedding::worker_path()
@@ -1699,19 +1707,42 @@ fn download(model: &str, events: &Events) -> Result<()> {
         .stderr(Stdio::piped())
         .spawn()?;
     let stderr = process.stderr.take().context("Нет stderr загрузчика")?;
-    let read_result = (|| -> Result<()> {
+    let (tx, lines) = mpsc::channel();
+    let reader = thread::spawn(move || {
         for line in BufReader::new(stderr).lines() {
-            let line = line?;
-            notetaker_runtime::diagnostics::worker_stderr(&line);
-            let _ = events.send(Event::DownloadProgress(line));
+            if tx.send(line).is_err() {
+                break;
+            }
         }
-        Ok(())
-    })();
+    });
+    let mut last_message = String::new();
+    let read_result = loop {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            break Err(anyhow::anyhow!("Загрузка отменена для повтора"));
+        }
+        match lines.recv_timeout(Duration::from_millis(100)) {
+            Ok(Ok(line)) => {
+                if !line.starts_with("NOTETAKER_DOWNLOAD ") {
+                    notetaker_runtime::diagnostics::worker_stderr(&line);
+                    last_message = line.clone();
+                }
+                let _ = events.send(Event::DownloadProgress(line));
+            }
+            Ok(Err(error)) => break Err(error.into()),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break Ok(()),
+        }
+    };
+    if read_result.is_err() {
+        let _ = process.kill();
+    }
     let status = process.wait()?;
+    drop(lines);
+    let _ = reader.join();
     read_result?;
     ensure!(
         status.success(),
-        "Загрузка завершилась с ошибкой ({status}); подробности выше"
+        "Загрузка завершилась с ошибкой ({status}): {last_message}"
     );
     Ok(())
 }

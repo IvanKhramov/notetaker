@@ -1593,11 +1593,20 @@ impl AppState {
     pub fn generation_cancellable(&self) -> bool {
         self.enhancing.is_some() && self.generation_is_cli
     }
+    pub fn retry_download(&mut self) {
+        if self.downloading {
+            self.quickstart.retry_requested = true;
+            self.send(Command::CancelDownload);
+        } else {
+            self.quickstart.retry_at = None;
+        }
+    }
     pub fn download(&mut self, model: String) {
         if self.downloading || self.recording.busy() {
             return;
         }
         self.downloading = true;
+        self.quickstart.transfer = Some(crate::quickstart::Transfer::waiting(Instant::now()));
         self.quickstart.download_model = Some(model.clone());
         self.quickstart.download_error = None;
         self.download_messages.clear();
@@ -2593,6 +2602,9 @@ impl AppState {
                 self.quickstart.models = models;
             }
             Event::DownloadProgress(message) => {
+                if let Some(transfer) = &mut self.quickstart.transfer {
+                    transfer.update(&message, Instant::now());
+                }
                 if self.download_messages.len() == 8 {
                     self.download_messages.pop_front();
                 }
@@ -2605,6 +2617,11 @@ impl AppState {
                     .err()
                     .map(|_| Instant::now() + Duration::from_secs(60));
                 self.downloading = false;
+                if self.quickstart.retry_requested {
+                    self.quickstart.retry_requested = false;
+                    self.quickstart.retry_at = None;
+                    self.quickstart.download_error = None;
+                }
                 self.quickstart.models = models;
                 match result {
                     Ok(()) => {
@@ -4960,7 +4977,7 @@ mod calendar_tests {
         crate::test_ui::click(
             &ctx,
             &mut |ui| {
-                if crate::calendar_ui::reminder(ui, &event, true)
+                if crate::calendar_ui::reminder(ui, &event, None)
                     == crate::calendar_ui::Action::Start
                 {
                     state.start_event(event.clone());

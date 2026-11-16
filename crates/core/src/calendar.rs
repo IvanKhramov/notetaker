@@ -303,6 +303,7 @@ pub fn is_allowed_call_link(value: &str) -> bool {
         host,
         "ktalk.ru" | "telemost.yandex.ru" | "meet.google.com" | "zoom.us"
     ) || host.ends_with(".zoom.us")
+        || host.ends_with(".ktalk.ru")
 }
 
 /// Extract a known HTTPS call link from calendar URL, LOCATION or DESCRIPTION text.
@@ -777,6 +778,12 @@ mod tests {
             ("https://zoom.us/j/ 1", false),
             ("https://zoom.us/j/1\u{7f}", false),
             ("https://telemost.yandex.ru/j/1", true),
+            ("https://space.ktalk.ru/room123", true),
+            ("https://one.space.ktalk.ru/room123", true),
+            ("https://ktalk.ru.evil.example/", false),
+            ("https://evil-ktalk.ru/", false),
+            ("https://space.ktalk.ru@evil.example/", false),
+            ("http://space.ktalk.ru/x", false),
             ("https://ktalk.ru/j/1", true),
             ("https://meet.google.com/example", true),
         ] {

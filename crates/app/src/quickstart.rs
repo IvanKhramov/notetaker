@@ -46,10 +46,67 @@ impl Models {
             .find(|id| self.get(id) != &Status::Ready)
     }
 }
+#[derive(Clone, Debug)]
+pub struct Transfer {
+    pub file: String,
+    pub received: u64,
+    pub total: u64,
+    pub last_byte: Instant,
+}
+impl Transfer {
+    pub fn waiting(now: Instant) -> Self {
+        Self {
+            file: String::new(),
+            received: 0,
+            total: 0,
+            last_byte: now,
+        }
+    }
+    pub fn update(&mut self, line: &str, now: Instant) {
+        let Some(line) = line.strip_prefix("NOTETAKER_DOWNLOAD ") else {
+            return;
+        };
+        let fields: Vec<_> = line.split_whitespace().collect();
+        if let [file, received, total] = fields.as_slice()
+            && let (Ok(received), Ok(total)) = (received.parse::<u64>(), total.parse::<u64>())
+        {
+            if *file != self.file || received > self.received {
+                self.last_byte = now;
+            }
+            self.file = (*file).into();
+            self.received = received;
+            self.total = total;
+        }
+    }
+    pub fn stalled(&self, now: Instant) -> bool {
+        (self.total == 0 || self.received < self.total)
+            && now.saturating_duration_since(self.last_byte) >= Duration::from_secs(30)
+    }
+    pub fn text(&self, model: &str, phase: usize) -> String {
+        let label = match model {
+            "diarization" => "голоса",
+            "semantic" => "поиск по смыслу",
+            _ => "модель распознавания",
+        };
+        let progress = if self.total == 0 {
+            "подключение…".into()
+        } else {
+            format!(
+                "{} из {} МБ · {}",
+                self.received / 1_000_000,
+                self.total.div_ceil(1_000_000),
+                self.file
+            )
+        };
+        format!("Подготовка к записи: {label}, {phase} из 3 · {progress}")
+    }
+}
 #[derive(Default)]
 pub struct Runtime {
     pub models: Models,
     pub download_model: Option<String>,
+    pub transfer: Option<Transfer>,
+    pub retry_requested: bool,
     pub download_error: Option<String>,
     pub calendar_error: Option<String>,
     pub probe_busy: bool,
@@ -153,8 +210,7 @@ pub fn check_models() -> Models {
     }
 }
 
-/// One quiet status line shared by welcome and storage. Progress is in phases,
-/// so byte totals or percentages would be misleading.
+/// Shared phase and per-file byte progress for welcome, library and storage.
 pub fn model_status(ui: &mut egui::Ui, state: &mut AppState) {
     if state.downloading {
         let ready = [&*state.settings.model, "diarization", "semantic"]
@@ -163,13 +219,37 @@ pub fn model_status(ui: &mut egui::Ui, state: &mut AppState) {
             .count();
         ui.horizontal_wrapped(|ui| {
             crate::theme::spinner(ui);
-            ui.weak(format!("Подготовка к записи: скачиваю {} из 3…", ready + 1));
+            let text = state
+                .quickstart
+                .transfer
+                .as_ref()
+                .map(|transfer| {
+                    transfer.text(
+                        state.quickstart.download_model.as_deref().unwrap_or("auto"),
+                        ready + 1,
+                    )
+                })
+                .unwrap_or_else(|| {
+                    format!("Подготовка к записи: подключение, {} из 3…", ready + 1)
+                });
+            ui.add(egui::Label::new(egui::RichText::new(text).color(Palette::of(ui).muted)).wrap());
         });
+        if state
+            .quickstart
+            .transfer
+            .as_ref()
+            .is_some_and(|transfer| transfer.stalled(Instant::now()))
+        {
+            ui.weak("Загрузка не идёт. Проверьте сеть.");
+            if theme::button(ui, "Повторить", theme::ButtonStyle::Ghost).clicked() {
+                state.retry_download();
+            }
+        }
     } else if let Some(error) = state.quickstart.download_error.clone() {
         ui.horizontal_wrapped(|ui| {
             ui.colored_label(Palette::of(ui).red, error);
             if theme::button(ui, "Повторить", crate::theme::ButtonStyle::Ghost).clicked() {
-                state.quickstart.retry_at = None;
+                state.retry_download();
             }
         });
         ui.small("Повторю автоматически через минуту.");
@@ -571,5 +651,55 @@ mod sound_regression_tests {
             );
         }
         assert_eq!(super::sound_status(100, false, true), super::Status::Ready);
+    }
+}
+
+#[cfg(test)]
+mod transfer_tests {
+    use super::*;
+    #[test]
+    fn byte_progress_stalls_only_after_thirty_seconds_without_new_bytes() {
+        let start = Instant::now();
+        let mut transfer = Transfer::waiting(start);
+        transfer.update("NOTETAKER_DOWNLOAD neutral 184000000 620000000", start);
+        assert!(transfer.text("auto", 1).contains("184 из 620 МБ"));
+        assert!(!transfer.stalled(start + Duration::from_secs(29)));
+        assert!(transfer.stalled(start + Duration::from_secs(30)));
+        transfer.update(
+            "NOTETAKER_DOWNLOAD neutral 184000000 620000000",
+            start + Duration::from_secs(31),
+        );
+        assert!(transfer.stalled(start + Duration::from_secs(31)));
+        transfer.update(
+            "NOTETAKER_DOWNLOAD neutral 185000000 620000000",
+            start + Duration::from_secs(32),
+        );
+        assert!(!transfer.stalled(start + Duration::from_secs(32)));
+        transfer.update(
+            "NOTETAKER_DOWNLOAD neutral 620000000 620000000",
+            start + Duration::from_secs(33),
+        );
+        assert!(!transfer.stalled(start + Duration::from_secs(100)));
+    }
+    #[test]
+    fn retry_cancels_the_active_worker_before_starting_a_second_download() {
+        let (mut state, commands, _events) = crate::test_ui::state();
+        state.ready = true;
+        state.download("auto".into());
+        assert!(matches!(commands.try_recv().unwrap(), Command::Download(_)));
+        state.retry_download();
+        assert!(matches!(
+            commands.try_recv().unwrap(),
+            Command::CancelDownload
+        ));
+        auto_download(&mut state);
+        assert!(commands.try_recv().is_err());
+        state.apply(worker::Event::Downloaded(
+            Err("Отменено".into()),
+            Models::default(),
+        ));
+        assert!(state.quickstart.retry_at.is_none());
+        auto_download(&mut state);
+        assert!(matches!(commands.try_recv().unwrap(), Command::Download(_)));
     }
 }

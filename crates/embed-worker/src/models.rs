@@ -35,12 +35,15 @@ pub fn download() -> Result<()> {
     let root = notetaker_core::embedding::models_dir()?;
     fs::create_dir_all(&root)?;
     let staging = tempfile::tempdir_in(&root)?;
-    let client = reqwest::blocking::Client::builder()
-        .connect_timeout(Duration::from_secs(30))
-        .timeout(Duration::from_secs(1800))
-        .build()?;
+    let client = reqwest::blocking::ClientBuilder::from(
+        reqwest::Client::builder().read_timeout(Duration::from_secs(30)),
+    )
+    .connect_timeout(Duration::from_secs(30))
+    .timeout(Duration::from_secs(1800))
+    .build()?;
     for (source, name, size, sha) in FILES {
         eprintln!("Скачивание {name}: {size} байт");
+        eprintln!("NOTETAKER_DOWNLOAD {name} 0 {size}");
         let mut response = client
             .get(format!("{ROOT}/{source}"))
             .send()?
@@ -49,6 +52,8 @@ pub fn download() -> Result<()> {
         let mut hash = Sha256::new();
         let mut total = 0;
         let mut buffer = [0u8; 65536];
+        let mut last = std::time::Instant::now();
+
         loop {
             let n = response.read(&mut buffer)?;
             if n == 0 {
@@ -58,6 +63,10 @@ pub fn download() -> Result<()> {
             ensure!(total <= *size, "Размер загрузки превышает манифест");
             hash.update(&buffer[..n]);
             file.write_all(&buffer[..n])?;
+            if last.elapsed() >= Duration::from_millis(250) || total == *size {
+                eprintln!("NOTETAKER_DOWNLOAD {name} {total} {size}");
+                last = std::time::Instant::now();
+            }
         }
         ensure!(
             total == *size && format!("{:x}", hash.finalize()) == *sha,

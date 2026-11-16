@@ -111,9 +111,22 @@ impl Panel { pub fn fixture(&mut self,state:&AppState) {
 impl NotetakerApp {
     pub fn fixture(state: AppState, screen: usize) -> Self {
         let scene=screen;
+        let screen=match screen {83=>51,84|85|86=>3,_=>screen};
         let screen = if (78..=80).contains(&screen) {0} else {screen};
         let screen = match screen {59=>5,60=>4,61=>11,62=>23,63=>24,64=>4,65=>5,66=>7,67=>3,68=>7,69=>7,70=>5,71=>5,72=>5,_=>screen};
         let mut app = Self::with_state(state);
+        if (83..=85).contains(&scene) {
+            app.state.downloading=true; app.state.quickstart.models=Default::default();app.state.quickstart.download_model=Some("auto".into());
+            let at=Instant::now()-std::time::Duration::from_secs(if scene==85 {31} else {0});
+            let mut transfer=crate::quickstart::Transfer::waiting(at);transfer.update("NOTETAKER_DOWNLOAD gigaam-v3 84000000 170197019",at);app.state.quickstart.transfer=Some(transfer);
+        }
+        if scene==86 {
+            app.state.settings.calendars=vec![notetaker_llm::calendar::Subscription {id:"partial-fixture".into(),name:"Тестовый календарь".into()}];
+            let now=chrono::Utc::now();
+            app.state.calendar_events=vec![notetaker_core::calendar::CalendarEvent {link:notetaker_core::calendar::EventLink {uid:"partial-preview".into(),title:"Синтетическая встреча".into(),attendees:vec![],call_url:Some("https://space.ktalk.ru/room123".into())},start:now-chrono::Duration::minutes(2),end:now+chrono::Duration::minutes(30),all_day:false,organizer:None}];
+            app.state.calendar_reports=vec![notetaker_llm::calendar::SubscriptionStatus {skipped:vec![notetaker_core::calendar::SkippedEvent {title:"Неизвестный формат".into(),reason:notetaker_core::calendar::SkipReason::Format}],..Default::default()}];
+        }
+
         app.home = ![4,5,12,14,15].contains(&screen);
         if screen < 3 { app.quickstart.open = true; app.quickstart.step = screen; }
         if (78..=80).contains(&scene) {app.quickstart.fixture_sound(scene);app.state.downloading=true;app.state.quickstart.models=Default::default();}
@@ -434,7 +447,7 @@ if shutil.disk_usage(root).free < 2 * 1024**3:
 # Resolve the derived harness root against the copied workspace lock before its locked build.
 subprocess.run(["cargo", "metadata", "--offline", "--format-version", "1", "--manifest-path", str(harness / "Cargo.toml")], cwd=root, env=env, check=True, stdout=subprocess.DEVNULL)
 subprocess.run(["cargo", "build", "--locked", "--manifest-path", str(harness / "Cargo.toml")], cwd=root, env=env, check=True)
-names = ["welcome", "name", "connections", "home", "note", "transcript", "general", "recording", "calendars", "ai", "search", "storage", "recording-pill", "connections-expanded", "delete-confirm", "meeting-menu", "toast", "empty-library", "narrow-settings", "recording-bar", "chat", "tasks", "people", "person", "series", "digest", "folders", "diagnostics", "tracker-preview", "new-recording", "rename", "regenerate", "capture-warning", "widgets", "update-card", "folder-delete", "merge-people", "folders-advanced", "ai-expanded", "performance-transcript", "performance-meetings", "performance-live", "chat-meeting-empty", "chat-library-empty", "chat-recipes", "chat-recording", "recording-silence", "recording-final-pass", "recording-ready", "recording-not-ready", "summary-skipped", "calendar-reminder-link", "calendar-reminder-no-link", "calendar-upcoming", "calendar-help", "direct-task-checkboxes", "direct-template-bar", "direct-template-picker", "direct-speaker-menu", "compact-transcript", "compact-summary", "compact-storage", "compact-person", "compact-series", "one-step-bar", "one-step-countdown", "one-step-settings", "one-step-auto-title", "ktalk-settings-empty", "ktalk-settings-connected", "ktalk-preview", "ktalk-transcript", "ktalk-success", "calendar-home-events", "calendar-home-empty", "calendar-home-error", "calendar-settings-status", "calendar-settings-error", "mac-sound-no-access", "mac-sound-silent", "mac-sound-ready", "spinner-retina", "hint-disabled"]
+names = ["welcome", "name", "connections", "home", "note", "transcript", "general", "recording", "calendars", "ai", "search", "storage", "recording-pill", "connections-expanded", "delete-confirm", "meeting-menu", "toast", "empty-library", "narrow-settings", "recording-bar", "chat", "tasks", "people", "person", "series", "digest", "folders", "diagnostics", "tracker-preview", "new-recording", "rename", "regenerate", "capture-warning", "widgets", "update-card", "folder-delete", "merge-people", "folders-advanced", "ai-expanded", "performance-transcript", "performance-meetings", "performance-live", "chat-meeting-empty", "chat-library-empty", "chat-recipes", "chat-recording", "recording-silence", "recording-final-pass", "recording-ready", "recording-not-ready", "summary-skipped", "calendar-reminder-link", "calendar-reminder-no-link", "calendar-upcoming", "calendar-help", "direct-task-checkboxes", "direct-template-bar", "direct-template-picker", "direct-speaker-menu", "compact-transcript", "compact-summary", "compact-storage", "compact-person", "compact-series", "one-step-bar", "one-step-countdown", "one-step-settings", "one-step-auto-title", "ktalk-settings-empty", "ktalk-settings-connected", "ktalk-preview", "ktalk-transcript", "ktalk-success", "calendar-home-events", "calendar-home-empty", "calendar-home-error", "calendar-settings-status", "calendar-settings-error", "mac-sound-no-access", "mac-sound-silent", "mac-sound-ready", "spinner-retina", "hint-disabled", "calendar-recording-blocked", "model-byte-progress", "model-download-stalled", "calendar-partial-success"]
 def render(spec):
     index, name, theme, width, height, zoom = spec
     actual_width = 760 if name == "narrow-settings" and zoom == 1.0 else width
