@@ -204,6 +204,7 @@ impl Transfer {
 }
 #[derive(Default)]
 pub struct Runtime {
+    pub cancel: notetaker_llm::Cancellation,
     pub models: Models,
     pub download_model: Option<String>,
     pub transfer: Option<Transfer>,
@@ -943,12 +944,13 @@ mod transfer_tests {
         let (mut state, commands, _events) = crate::test_ui::state();
         state.ready = true;
         state.download("auto".into());
-        assert!(matches!(commands.try_recv().unwrap(), Command::Download(_)));
-        state.retry_download();
         assert!(matches!(
             commands.try_recv().unwrap(),
-            Command::CancelDownload
+            Command::Download(_, _)
         ));
+        state.retry_download();
+        assert!(state.quickstart.cancel.is_cancelled());
+        assert!(commands.try_recv().is_err());
         auto_download(&mut state);
         assert!(commands.try_recv().is_err());
         state.apply(worker::Event::Downloaded(
@@ -957,7 +959,10 @@ mod transfer_tests {
         ));
         assert!(state.quickstart.retry_at.is_none());
         auto_download(&mut state);
-        assert!(matches!(commands.try_recv().unwrap(), Command::Download(_)));
+        assert!(matches!(
+            commands.try_recv().unwrap(),
+            Command::Download(_, _)
+        ));
     }
 }
 
@@ -1026,6 +1031,27 @@ mod aggregate_progress_tests {
 mod required_models_tests {
     use super::*;
     #[test]
+    fn cancelled_optional_download_preserves_recording_readiness() {
+        let (mut state, commands, _events) = crate::test_ui::state();
+        state.ready = true;
+        state
+            .quickstart
+            .models
+            .set(&state.settings.model.clone(), Status::Ready);
+        state.download("semantic".into());
+        assert!(matches!(
+            commands.try_recv().unwrap(),
+            Command::Download(_, _)
+        ));
+        state.retry_download();
+        state.apply(worker::Event::Downloaded(
+            Err("Отменено".into()),
+            Models::default(),
+        ));
+        assert!(state.quickstart.models.speech_ready(&state.settings.model));
+        assert!(state.can_prepare_recording());
+    }
+    #[test]
     fn recording_starts_while_optional_models_are_absent_or_downloading() {
         let (mut state, commands, _events) = crate::test_ui::state();
         state.ready = true;
@@ -1072,7 +1098,7 @@ mod required_models_tests {
         assert!(!state.settings.semantic_search);
         state.settings.semantic_search = true;
         auto_download(&mut state);
-        assert!(matches!(commands.try_recv().unwrap(),Command::Download(id) if id=="semantic"));
+        assert!(matches!(commands.try_recv().unwrap(),Command::Download(id, _) if id=="semantic"));
         state.apply(worker::Event::Downloaded(
             Err("network unavailable".into()),
             state.quickstart.models.clone(),
@@ -1106,10 +1132,8 @@ mod required_models_tests {
         state.downloading = true;
         state.quickstart.download_model = Some("semantic".into());
         auto_download(&mut state);
-        assert!(matches!(
-            commands.try_recv().unwrap(),
-            Command::CancelDownload
-        ));
+        assert!(state.quickstart.cancel.is_cancelled());
+        assert!(commands.try_recv().is_err());
         auto_download(&mut state);
         assert!(commands.try_recv().is_err());
     }

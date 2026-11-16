@@ -2570,6 +2570,40 @@ impl NotetakerApp {
         self.quickstart.blur(&mut self.state);
         self.state.exit();
     }
+    fn exit_dialog(&mut self, ctx: &egui::Context, now: Instant) {
+        if !self.state.exit_requested || self.state.can_exit() {
+            return;
+        }
+        theme::modal(ctx, "Завершаю запись и сохраняю…")
+            .closable(false)
+            .default_width(420.0)
+            .show(ctx, |ui| {
+                if let Some(status) = self.state.recording.status() {
+                    theme::recording_status(ui, &status.text, status.warning, status.progress);
+                } else {
+                    ui.horizontal(|ui| { theme::spinner(ui); ui.weak("Сохраняю изменения и завершаю операции…"); });
+                }
+                if let Some(error) = self.state.error.as_ref().or(self.state.settings_autosave.error.as_ref()) {
+                    theme::callout(ui, theme::icons::TRIANGLE_ALERT, |ui| { ui.label(error); });
+                }
+                if self.state.shutdown.can_force(now) {
+                    ui.weak("Несохранённые правки будут потеряны. Сохранённое аудио можно дораспознать после запуска кнопкой «Распознать из аудио».");
+                    theme::footer(ui, |ui| {
+                        if theme::button(ui, "Выйти сейчас", ButtonStyle::Primary).clicked()
+                            && self.state.shutdown.force(now)
+                        {
+                            #[cfg(not(test))]
+                            std::thread::spawn(|| {
+                                std::thread::sleep(Duration::from_secs(30));
+                                std::process::exit(0);
+                            });
+                            ctx.request_repaint();
+                        }
+                    });
+                }
+            });
+        ctx.request_repaint_after(Duration::from_millis(100));
+    }
     fn settings_dialog(&mut self, ui: &mut egui::Ui) {
         if self.settings_panel.show(
             ui,
@@ -2583,7 +2617,8 @@ impl NotetakerApp {
         }
     }
     fn interaction_blocked(&self, ctx: &egui::Context) -> bool {
-        self.show_settings
+        self.state.exit_requested
+            || self.show_settings
             || self.state.ktalk.preview_open
             || self.state.ktalk.merge.is_some()
             || self.show_record
@@ -2945,6 +2980,14 @@ impl eframe::App for NotetakerApp {
         }
         if self.state.can_exit() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else if self.state.exit_requested {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+        if self.state.shutdown.deadline_passed(Instant::now()) {
+            #[cfg(not(test))]
+            std::process::exit(0);
         }
         if self.state.recording.busy()
             || self.state.call_prompt.is_some()
@@ -2968,6 +3011,12 @@ impl eframe::App for NotetakerApp {
 impl NotetakerApp {
     fn frame(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        if self.state.exit_requested {
+            egui::Frame::central_panel(ui.style())
+                .show(ui, |ui| ui.set_min_size(ui.available_size()));
+            self.exit_dialog(&ctx, Instant::now());
+            return;
+        }
         if std::mem::take(&mut self.state.permissions.show_requested) {
             ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd_to(
@@ -7161,5 +7210,57 @@ mod calendar_midnight_tests {
             next_state_wake_at(&state, monotonic + Duration::from_secs(120), after).unwrap()
                 > Duration::from_secs(60)
         );
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+    fn text(shape: &egui::epaint::Shape) -> String {
+        match shape {
+            egui::epaint::Shape::Text(t) => t.galley.text().into(),
+            egui::epaint::Shape::Vec(shapes) => {
+                shapes.iter().map(text).collect::<Vec<_>>().join("\n")
+            }
+            _ => String::new(),
+        }
+    }
+    #[test]
+    fn final_pass_wait_dialog_shows_progress_and_delays_force_action() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        ctx.global_style_mut(|style| style.animation_time = 0.0);
+        let (state, _commands, _events) = crate::test_ui::state();
+        let mut app = NotetakerApp::with_state(state);
+        app.state.recording.phase = Phase::Finalizing;
+        app.state.recording.progress = Some((2, 5));
+        let start = Instant::now();
+        app.state.exit_at(start);
+        assert!(!app.state.can_exit());
+        let render = |app: &mut NotetakerApp, now| {
+            let out = crate::test_ui::frame(&ctx, vec![], &mut |_| app.exit_dialog(&ctx, now));
+            let rendered = out
+                .shapes
+                .iter()
+                .map(|s| text(&s.shape))
+                .collect::<Vec<_>>()
+                .join("\n");
+            out.drop_without_applying_deltas();
+            rendered
+        };
+        render(&mut app, start);
+        let early = render(&mut app, start + Duration::from_secs(9));
+        assert!(early.contains("Завершаю запись"), "{early}");
+        assert!(early.contains("Распознаю запись: 2 из 5"), "{early}");
+        assert!(!early.contains("Выйти сейчас"));
+        let later = render(&mut app, start + Duration::from_secs(10));
+        assert!(later.contains("Выйти сейчас"));
+        assert!(later.contains("Несохранённые правки"));
+        crate::test_ui::click(
+            &ctx,
+            &mut |_| app.exit_dialog(&ctx, start + Duration::from_secs(10)),
+            "Выйти сейчас",
+        );
+        assert!(app.state.can_exit());
     }
 }

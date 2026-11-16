@@ -345,6 +345,7 @@ pub struct Dialog<'a> {
     width: f32,
     anchored: bool,
     open: Option<&'a mut bool>,
+    closable: bool,
 }
 
 pub fn modal<'a>(ctx: &egui::Context, title: impl Into<String>) -> Dialog<'a> {
@@ -361,10 +362,15 @@ pub fn modal<'a>(ctx: &egui::Context, title: impl Into<String>) -> Dialog<'a> {
         width: 420.0,
         anchored: false,
         open: None,
+        closable: true,
     }
 }
 
 impl<'a> Dialog<'a> {
+    pub fn closable(mut self, closable: bool) -> Self {
+        self.closable = closable;
+        self
+    }
     pub fn open(mut self, open: &'a mut bool) -> Self {
         self.open = Some(open);
         self
@@ -427,7 +433,9 @@ impl<'a> Dialog<'a> {
                         .truncate(),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    close = icon_button(ui, icons::X, "Закрыть").clicked();
+                    if self.closable {
+                        close = icon_button(ui, icons::X, "Закрыть").clicked();
+                    }
                 });
             });
             ui.add_space(12.0);

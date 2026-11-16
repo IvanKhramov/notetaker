@@ -58,6 +58,7 @@ pub fn refresh(
     zone: &str,
     now: chrono::DateTime<chrono::Utc>,
     store: &dyn CredentialStore,
+    cancel: &crate::Cancellation,
 ) -> Result<Vec<SubscriptionStatus>> {
     let zone = timezone(zone)?;
     let client = reqwest::blocking::Client::builder()
@@ -73,8 +74,9 @@ pub fn refresh(
                 let secret = store.read(&subscription.id)?;
                 let url = validate_url(&secret)?;
                 // Do not format reqwest errors: they contain the private subscription URL.
-                let response = client
-            .get(url)
+                let request = client.get(url);
+                let bytes = cancel.wait(move || {
+                    let response = request
             .send()
             .and_then(|r| r.error_for_status())
             .map_err(|_| {
@@ -82,12 +84,14 @@ pub fn refresh(
                     "Не удалось загрузить календарь; проверьте URL и сеть (редиректы запрещены)"
                 )
             })?;
-                let mut bytes = Vec::new();
-                response
-                    .take(8 * 1024 * 1024 + 1)
-                    .read_to_end(&mut bytes)
-                    .map_err(|_| anyhow::anyhow!("Не удалось прочитать календарь"))?;
-                ensure!(bytes.len() <= 8 * 1024 * 1024, "Календарь больше 8 МБ");
+                    let mut bytes = Vec::new();
+                    response
+                        .take(8 * 1024 * 1024 + 1)
+                        .read_to_end(&mut bytes)
+                        .map_err(|_| anyhow::anyhow!("Не удалось прочитать календарь"))?;
+                    ensure!(bytes.len() <= 8 * 1024 * 1024, "Календарь больше 8 МБ");
+                    Ok(bytes)
+                })?;
                 let text = String::from_utf8(bytes)
                     .map_err(|_| anyhow::anyhow!("ICS должен быть UTF-8"))?;
                 Ok(parse_ics_report(
@@ -118,6 +122,25 @@ pub fn refresh(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cancelled_refresh_does_not_start_a_request() {
+        let cancel = crate::Cancellation::default();
+        cancel.cancel();
+        let store = Memory(RefCell::new("https://127.0.0.1:1/calendar.ics".into()));
+        let reports = refresh(
+            &[Subscription {
+                id: "calendar-test".into(),
+                name: "Тест".into(),
+            }],
+            "UTC",
+            chrono::Utc::now(),
+            &store,
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(reports[0].error.as_deref(), Some("Операция отменена"));
+        assert!(reports[0].events.is_empty());
+    }
     use std::cell::RefCell;
     struct Memory(RefCell<String>);
     impl CredentialStore for Memory {

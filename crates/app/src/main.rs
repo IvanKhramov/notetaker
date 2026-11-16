@@ -23,6 +23,7 @@ mod permissions;
 mod quickstart;
 mod recording_options;
 mod settings;
+mod shutdown;
 mod speakers;
 mod state;
 #[cfg(test)]

@@ -450,6 +450,7 @@ pub struct AppState {
     pub exported: VecDeque<PathBuf>,
     pub status: String,
     pub exit_requested: bool,
+    pub shutdown: crate::shutdown::Shutdown,
     tx: Sender<Command>,
     rx: Receiver<Event>,
 }
@@ -561,6 +562,7 @@ impl AppState {
             exported: VecDeque::new(),
             status: "Открываем библиотеку…".into(),
             exit_requested: false,
+            shutdown: Default::default(),
             tx,
             rx,
         }
@@ -619,6 +621,9 @@ impl AppState {
         }
     }
     pub fn start_semantic_index(&mut self) {
+        if self.exit_requested {
+            return;
+        }
         if !self.settings.semantic_search && self.llm.embeddings.provider.is_empty() {
             return;
         }
@@ -632,6 +637,7 @@ impl AppState {
             self.semantic_running = true;
             self.send(Command::SemanticIndex {
                 root: self.settings.library.clone(),
+                cancel: self.shutdown.cancel.clone(),
             });
         }
     }
@@ -651,10 +657,14 @@ impl AppState {
         self.refresh_results();
     }
     pub fn refresh_results(&mut self) {
+        if self.exit_requested {
+            return;
+        }
         self.request += 1;
         self.listing = true;
         self.query_changed = None;
         self.send(Command::List {
+            cancel: self.shutdown.cancel.clone(),
             root: self.settings.library.clone(),
             query: self.query.clone(),
             semantic: self.semantic_enabled && self.semantic_ready,
@@ -1337,13 +1347,14 @@ impl AppState {
         }
     }
     pub fn refresh_calendar(&mut self) {
-        if self.calendar_busy {
+        if self.calendar_busy || self.exit_requested {
             return;
         }
         self.calendar_busy = true;
         self.calendar_checked = Some(Instant::now());
         self.calendar_generation += 1;
         self.send(Command::Calendar {
+            cancel: self.shutdown.cancel.clone(),
             subscriptions: self.settings.calendars.clone(),
             timezone: self.settings.calendar_timezone.clone(),
             generation: self.calendar_generation,
@@ -1631,7 +1642,7 @@ impl AppState {
     pub fn retry_download(&mut self) {
         if self.downloading {
             self.quickstart.retry_requested = true;
-            self.send(Command::CancelDownload);
+            self.quickstart.cancel.cancel();
         } else {
             self.quickstart.retry_at = None;
         }
@@ -1653,21 +1664,22 @@ impl AppState {
                 &model
             }
         ));
-        self.send(Command::Download(model));
+        self.quickstart.cancel = Default::default();
+        self.send(Command::Download(model, self.quickstart.cancel.clone()));
     }
     pub fn can_save_settings(&self) -> bool {
-        if self.ktalk.busy {
+        if self.ktalk.busy && !self.exit_requested {
             return false;
         }
         self.ready
             && !self.recording.busy()
             && self.recording.assist.bookmarks_pending == 0
-            && self.enhancing.is_none()
-            && !self.chat.busy
-            && !self.draft_busy
+            && (self.exit_requested
+                || (self.enhancing.is_none() && !self.chat.busy && !self.draft_busy))
             && !self.unsaved()
             && !self.settings_pending
-            && (self.settings.models_path() == self.settings_draft.models_path()
+            && (self.exit_requested
+                || self.settings.models_path() == self.settings_draft.models_path()
                 || (!self.downloading && !self.semantic_running))
     }
     pub fn save_settings(&mut self) {
@@ -1769,12 +1781,24 @@ impl AppState {
         self.send(command);
     }
     pub fn exit(&mut self) {
+        self.exit_at(Instant::now());
+    }
+    pub fn exit_at(&mut self, now: Instant) {
+        self.shutdown.request(now);
+        if self.exit_requested {
+            self.flush();
+            return;
+        }
         self.connections.blur();
         if self.settings_autosave.pending {
             self.settings_autosave
                 .edit(Instant::now(), false, self.settings_autosave.llm);
         }
         self.exit_requested = true;
+        self.shutdown.cancel.cancel();
+        self.quickstart.cancel.cancel();
+        notetaker_core::embedding::shutdown_workers();
+        self.generation_cancel.cancel();
         self.chat.cancel.cancel();
         self.draft_cancel.cancel();
         self.connections.cancel_all();
@@ -1787,20 +1811,16 @@ impl AppState {
         self.poll_settings(Instant::now());
     }
     pub fn can_exit(&self) -> bool {
-        self.pending_ai.is_empty() && !self.ktalk.busy
-            // A cancelled sign-in reports back once its process is gone.
-            && !self.connections.busy()
-            && (!self.settings_autosave.pending || self.settings_autosave.error.is_some())
-            && self.exit_requested
-            && !self.recording.busy()
-            && self.recording.assist.bookmarks_pending == 0
-            && self.enhancing.is_none()
-            && !self.chat.busy
-            && !self.draft_busy
-            && !self.downloading
-            && !self.quickstart.probe_busy
-            && !self.unsaved()
-            && !self.settings_pending
+        self.exit_requested
+            && (self.shutdown.forced()
+                || (self.pending_ai.is_empty()
+                    && !self.ktalk.busy
+                    && !self.connections.busy()
+                    && !self.settings_autosave.pending
+                    && !self.recording.busy()
+                    && self.recording.assist.bookmarks_pending == 0
+                    && !self.unsaved()
+                    && !self.settings_pending))
     }
     pub fn poll(&mut self) {
         // Bound one UI update even if ASR/LLM produced a burst.
@@ -1986,7 +2006,6 @@ impl AppState {
                     }
                     Err(error) => {
                         self.error = Some(error);
-                        self.exit_requested = false;
                     }
                 }
             }
@@ -2271,7 +2290,6 @@ impl AppState {
                     if !result.errors.is_empty() {
                         doc.changed_at = Instant::now();
                         self.error = Some(result.errors.join("\n"));
-                        self.exit_requested = false;
                     }
                 }
                 self.start_semantic_index();
@@ -2296,7 +2314,6 @@ impl AppState {
                     }
                     if let Err(error) = result {
                         self.error = Some(error);
-                        self.exit_requested = false;
                     }
                 }
                 self.refresh();
@@ -2327,7 +2344,6 @@ impl AppState {
                         }
                         Err(error) => {
                             self.error = Some(error.clone());
-                            self.exit_requested = false;
                         }
                     }
                 }
@@ -2638,7 +2654,6 @@ impl AppState {
                 self.recording.stop = None;
                 if let Some(error) = error {
                     self.error = Some(error);
-                    self.exit_requested = false;
                 }
                 if let Some(reason) = source_issue {
                     self.record_options_pending = None;
@@ -2692,7 +2707,6 @@ impl AppState {
                         }
                         Err(error) => {
                             self.error = Some(error);
-                            self.exit_requested = false;
                         }
                     }
                 }
@@ -2752,7 +2766,10 @@ impl AppState {
                     self.quickstart.retry_at = None;
                     self.quickstart.download_error = None;
                 }
-                self.quickstart.models = models;
+                // Cancelled workers do not carry a fresh readiness snapshot.
+                if !self.quickstart.cancel.is_cancelled() {
+                    self.quickstart.models = models;
+                }
                 match result {
                     Ok(()) => {
                         self.start_semantic_index();
@@ -2912,6 +2929,116 @@ pub fn edit_segment(transcript: &mut Transcript, id: Uuid, text: String) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn exit_guards_cover_only_durable_work_and_force_overrides_them() {
+        type Block = fn(&mut AppState, &PathBuf);
+        let cases: &[(&str, Block)] = &[
+            ("starting", |s, _| s.recording.phase = Phase::Starting),
+            ("recording", |s, _| s.recording.phase = Phase::Recording),
+            ("final pass", |s, _| s.recording.phase = Phase::Finalizing),
+            ("bookmark", |s, _| s.recording.assist.bookmarks_pending = 1),
+            ("Tolk commit", |s, _| s.ktalk.busy = true),
+            ("settings write", |s, _| s.settings_pending = true),
+            ("settings pending", |s, _| {
+                s.settings_autosave.pending = true
+            }),
+            ("settings error", |s, _| {
+                s.settings_autosave.pending = true;
+                s.settings_autosave.error = Some("invalid".into());
+            }),
+            ("notes", |s, p| {
+                s.documents.get_mut(p).unwrap().dirty.notes = true
+            }),
+            ("transcript", |s, p| {
+                s.documents.get_mut(p).unwrap().dirty.transcript = true
+            }),
+            ("summary", |s, p| {
+                s.documents.get_mut(p).unwrap().dirty.enhanced = true
+            }),
+            ("saving", |s, p| {
+                s.documents.get_mut(p).unwrap().saving = true
+            }),
+            ("speaker edit", |s, p| {
+                s.documents.get_mut(p).unwrap().speaker_ui.busy = true
+            }),
+            ("attachment", |s, p| {
+                s.documents.get_mut(p).unwrap().attachments_pending = 1
+            }),
+            ("AI save queue", |s, _| {
+                s.pending_ai.push_back(crate::ai::Action {
+                    index: 3,
+                    operation: crate::ai::Operation::Save,
+                    provider: Default::default(),
+                    key: String::new(),
+                    cancel: Default::default(),
+                    verified: false,
+                })
+            }),
+        ];
+        for (name, block) in cases {
+            let (mut state, _commands, _root, path) = fixture();
+            assert!(!state.can_exit());
+            state.exit_requested = true;
+            assert!(state.can_exit(), "baseline {name}");
+            block(&mut state, &path);
+            assert!(!state.can_exit(), "{name}");
+            let at = Instant::now();
+            state.shutdown.request(at);
+            assert!(state.shutdown.force(at + Duration::from_secs(10)));
+            assert!(state.can_exit(), "forced {name}");
+        }
+    }
+    #[test]
+    fn abandoned_reads_and_downloads_do_not_gate_exit() {
+        let (mut state, _commands, _root, path) = fixture();
+        state.exit_requested = true;
+        state.downloading = true;
+        state.quickstart.probe_busy = true;
+        state.semantic_running = true;
+        state.calendar_busy = true;
+        state.chat.busy = true;
+        state.draft_busy = true;
+        state.enhancing = Some(path);
+        assert!(state.can_exit());
+    }
+    #[test]
+    fn exit_cancels_calendar_and_search_requests_with_their_shared_token() {
+        let (mut state, commands, _events) = crate::test_ui::state();
+        state.refresh_results();
+        state.refresh_calendar();
+        state.exit();
+        let mut seen = 0;
+        for command in commands.try_iter() {
+            if let Command::List { cancel, .. } | Command::Calendar { cancel, .. } = command {
+                assert!(cancel.is_cancelled());
+                seen += 1;
+            }
+        }
+        assert_eq!(seen, 2);
+        assert!(state.can_exit());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn quit_kills_download_without_waiting_for_its_completion_event_and_keeps_partial() {
+        let (mut state, _commands, _events) = crate::test_ui::state();
+        let root = tempfile::tempdir().unwrap();
+        let part = root.path().join("model.part");
+        std::fs::write(&part, b"partial model").unwrap();
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "sleep 60 & wait"]);
+        let (mut child, _lease) = state.quickstart.cancel.spawn(&mut command).unwrap();
+        state.downloading = true;
+        state.exit();
+        assert!(state.quickstart.cancel.is_cancelled());
+        assert!(state.downloading, "no Downloaded event was needed");
+        assert!(state.can_exit());
+        let until = Instant::now() + Duration::from_secs(3);
+        while child.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(std::fs::read(part).unwrap(), b"partial model");
+    }
     use notetaker_core::{Segment, Source, SpeakerId};
     #[test]
     fn quick_button_and_hotkey_use_saved_options_after_fresh_inventory() {
@@ -3593,7 +3720,7 @@ mod tests {
         state.quickstart.models = Default::default();
         let model = state.settings.model.clone();
         crate::quickstart::auto_download(&mut state);
-        assert!(matches!(commands.try_recv().unwrap(), Command::Download(id) if id == model));
+        assert!(matches!(commands.try_recv().unwrap(), Command::Download(id, _) if id == model));
         crate::quickstart::auto_download(&mut state);
         assert!(commands.try_recv().is_err());
         state.apply(Event::Downloaded(
@@ -3604,7 +3731,7 @@ mod tests {
         assert!(commands.try_recv().is_err());
         state.quickstart.retry_at = Some(Instant::now());
         crate::quickstart::auto_download(&mut state);
-        assert!(matches!(commands.try_recv().unwrap(), Command::Download(id) if id == model));
+        assert!(matches!(commands.try_recv().unwrap(), Command::Download(id, _) if id == model));
         state.downloading = false;
         state.quickstart.models.gigaam = crate::quickstart::Status::Ready;
         state.quickstart.models.parakeet = crate::quickstart::Status::Ready;
@@ -3614,7 +3741,7 @@ mod tests {
         state.recording.phase = Phase::Idle;
         crate::quickstart::auto_download(&mut state);
         assert!(
-            matches!(commands.try_recv().unwrap(), Command::Download(id) if id == "diarization")
+            matches!(commands.try_recv().unwrap(), Command::Download(id, _) if id == "diarization")
         );
         state.downloading = false;
         state.quickstart.models.diarization = crate::quickstart::Status::Ready;
@@ -3622,7 +3749,9 @@ mod tests {
         assert!(commands.try_recv().is_err());
         state.settings.semantic_search = true;
         crate::quickstart::auto_download(&mut state);
-        assert!(matches!(commands.try_recv().unwrap(), Command::Download(id) if id == "semantic"));
+        assert!(
+            matches!(commands.try_recv().unwrap(), Command::Download(id, _) if id == "semantic")
+        );
     }
     #[test]
     fn model_folder_change_waits_for_downloads_and_indexing() {
@@ -4241,7 +4370,7 @@ mod tests {
                 ..worker::SaveResult::default()
             },
         });
-        assert!(!state.exit_requested);
+        assert!(state.exit_requested);
         assert!(state.documents[&path].dirty.notes);
         assert_eq!(state.documents[&path].data.notes, "latest notes");
         state.exit();

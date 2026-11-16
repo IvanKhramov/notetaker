@@ -235,12 +235,12 @@ impl Client {
         #[cfg(not(test))]
         pace_requests(&LAST_REQUEST, Instant::now, std::thread::sleep);
         ensure!(!self.cancel.is_cancelled(), "Операция Толка отменена");
-        let response = self
-            .http
-            .get(url)
-            .header("X-Auth-Token", &self.key)
-            .send()
-            .map_err(|_| anyhow::anyhow!("Не удалось получить данные Толка: сеть или таймаут"))?;
+        let request = self.http.get(url).header("X-Auth-Token", &self.key);
+        let response = self.cancel.wait(move || {
+            request
+                .send()
+                .map_err(|_| anyhow::anyhow!("Не удалось получить данные Толка: сеть или таймаут"))
+        })?;
         let code = response.status().as_u16();
         ensure!(
             code != 429,
@@ -251,7 +251,10 @@ impl Client {
             response.status().is_success(),
             "Толк: HTTP {code}; редиректы запрещены"
         );
-        let bytes = read_body_cancel(response, Instant::now() + BODY_DEADLINE, &self.cancel)?;
+        let cancel = self.cancel.clone();
+        let bytes = self
+            .cancel
+            .wait(move || read_body_cancel(response, Instant::now() + BODY_DEADLINE, &cancel))?;
         ensure!(!self.cancel.is_cancelled(), "Операция Толка отменена");
         serde_json::from_slice(&bytes)
             .map_err(|_| anyhow::anyhow!("Некорректная структура ответа Толка"))

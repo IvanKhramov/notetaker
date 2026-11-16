@@ -199,19 +199,55 @@ impl Embedder for LazyLocal {
 }
 /// Called on a dedicated background thread in the GUI, and explicitly by CLI.
 /// Remote indexing requires an explicitly configured embedding scenario.
+struct IndexEmbedder<'a> {
+    inner: &'a mut dyn Embedder,
+    cancel: &'a crate::Cancellation,
+}
+impl Embedder for IndexEmbedder<'_> {
+    fn model_id(&self) -> &str {
+        self.inner.model_id()
+    }
+    fn is_local(&self) -> bool {
+        self.inner.is_local()
+    }
+    fn embed(&mut self, text: &str, query: bool) -> notetaker_core::Result<Vec<f32>> {
+        let check = || {
+            if self.cancel.is_cancelled() {
+                Err(notetaker_core::Error::Embedding(
+                    "Индексация отменена".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        };
+        check()?;
+        let result = self.inner.embed(text, query)?;
+        check()?;
+        Ok(result)
+    }
+}
 pub fn reindex(
     library: &Library,
     full: bool,
     config: Option<&Config>,
+    cancel: &crate::Cancellation,
     progress: &mut dyn FnMut(SemanticProgress),
 ) -> Result<SemanticProgress> {
-    if notetaker_core::embedding::installed() {
-        let mut embedder = LazyLocal { inner: None };
-        return Ok(library.reindex_semantic(&mut embedder, full, progress)?);
-    }
-    let mut embedder =
-        RemoteEmbedder::new(config.context("Скачайте модель поиска по смыслу в настройках")?)?;
-    Ok(library.reindex_semantic(&mut embedder, full, progress)?)
+    let mut embedder: Box<dyn Embedder> = if notetaker_core::embedding::installed() {
+        Box::new(LazyLocal { inner: None })
+    } else {
+        Box::new(RemoteEmbedder::new(
+            config.context("Скачайте модель поиска по смыслу в настройках")?,
+        )?)
+    };
+    Ok(library.reindex_semantic(
+        &mut IndexEmbedder {
+            inner: embedder.as_mut(),
+            cancel,
+        },
+        full,
+        progress,
+    )?)
 }
 pub fn configured(config: Option<&Config>) -> bool {
     notetaker_core::embedding::installed()
@@ -222,6 +258,38 @@ pub fn configured(config: Option<&Config>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cancelled_index_never_returns_an_embedding_to_be_written() {
+        struct Fake {
+            cancel: crate::Cancellation,
+            calls: usize,
+        }
+        impl Embedder for Fake {
+            fn model_id(&self) -> &str {
+                "neutral-test"
+            }
+            fn is_local(&self) -> bool {
+                true
+            }
+            fn embed(&mut self, _: &str, _: bool) -> notetaker_core::Result<Vec<f32>> {
+                self.calls += 1;
+                self.cancel.cancel();
+                Ok(vec![1.0])
+            }
+        }
+        let cancel = crate::Cancellation::default();
+        let mut fake = Fake {
+            cancel: cancel.clone(),
+            calls: 0,
+        };
+        let mut index = IndexEmbedder {
+            inner: &mut fake,
+            cancel: &cancel,
+        };
+        assert!(index.embed("text", false).is_err());
+        assert!(index.embed("next", false).is_err());
+        assert_eq!(fake.calls, 1);
+    }
     use notetaker_core::MeetingMeta;
     use std::{
         io::{BufRead, BufReader, Write},
@@ -309,7 +377,7 @@ mod tests {
             .create_meeting(MeetingMeta::new("Выходные", chrono::Utc::now()))?
             .write_notes("кот спит на окне, на улице солнечная погода")?;
         let start = std::time::Instant::now();
-        reindex(&library, false, None, &mut |_| {})?;
+        reindex(&library, false, None, &Default::default(), &mut |_| {})?;
         eprintln!("REAL_INDEX ms={:.2}", start.elapsed().as_secs_f64() * 1000.);
         assert!(library.retrieve("бюджет", 10, false)?.is_empty());
         let start = std::time::Instant::now();

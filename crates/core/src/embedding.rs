@@ -6,7 +6,10 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
-    sync::mpsc::{self, Receiver},
+    sync::{
+        Arc, Mutex, Weak,
+        mpsc::{self, Receiver},
+    },
     time::Duration,
 };
 
@@ -80,9 +83,27 @@ pub fn installed() -> bool {
     model_dir().is_ok_and(|p| p.join("model.onnx").is_file() && p.join("tokenizer.json").is_file())
 }
 pub struct LocalEmbedder {
-    child: Child,
+    child: Arc<Mutex<Child>>,
     input: ChildStdin,
     output: Receiver<std::io::Result<String>>,
+}
+struct Workers {
+    stopped: bool,
+    children: Vec<Weak<Mutex<Child>>>,
+}
+static WORKERS: Mutex<Workers> = Mutex::new(Workers {
+    stopped: false,
+    children: Vec::new(),
+});
+/// Terminal application shutdown: stop indexing and cached query workers too.
+pub fn shutdown_workers() {
+    let mut workers = WORKERS.lock().unwrap_or_else(|e| e.into_inner());
+    workers.stopped = true;
+    for child in workers.children.iter().filter_map(Weak::upgrade) {
+        let mut child = child.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }
 impl LocalEmbedder {
     pub fn start() -> Result<Self> {
@@ -101,11 +122,19 @@ impl LocalEmbedder {
             use std::os::windows::process::CommandExt;
             command.creation_flags(0x08000000 | 0x00004000); // Hidden, below normal.
         }
+        let mut workers = WORKERS.lock().unwrap_or_else(|e| e.into_inner());
+        if workers.stopped {
+            return Err(Error::Embedding("Приложение завершает работу".into()));
+        }
+        workers.children.retain(|child| child.strong_count() > 0);
         let mut child = command.spawn().map_err(|_| {
             Error::Embedding("Не найден notetaker-embed рядом с приложением".into())
         })?;
         let input = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
+        let child = Arc::new(Mutex::new(child));
+        workers.children.push(Arc::downgrade(&child));
+        drop(workers);
         let (tx, output) = mpsc::sync_channel(1);
         std::thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
@@ -152,7 +181,7 @@ impl Embedder for LocalEmbedder {
         let line = match self.output.recv_timeout(Duration::from_secs(180)) {
             Ok(line) => line?,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                let _ = self.child.kill();
+                let _ = self.child.lock().unwrap_or_else(|e| e.into_inner()).kill();
                 return Err(Error::Embedding("Воркер не ответил за 180 с".into()));
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -170,7 +199,29 @@ impl Embedder for LocalEmbedder {
 }
 impl Drop for LocalEmbedder {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let mut child = self.child.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+#[cfg(all(test, unix))]
+mod shutdown_tests {
+    use super::*;
+    #[test]
+    fn shutdown_reaps_all_registered_local_search_workers() {
+        let child = Command::new("/bin/sh")
+            .args(["-c", "exec sleep 60"])
+            .spawn()
+            .unwrap();
+        let child = Arc::new(Mutex::new(child));
+        WORKERS
+            .lock()
+            .unwrap()
+            .children
+            .push(Arc::downgrade(&child));
+        shutdown_workers();
+        assert!(WORKERS.lock().unwrap().stopped);
+        assert!(child.lock().unwrap().try_wait().unwrap().is_some());
     }
 }
