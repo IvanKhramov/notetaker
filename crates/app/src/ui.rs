@@ -293,7 +293,9 @@ impl NotetakerApp {
         self.recording_reason().is_none()
     }
     fn recording_reason(&self) -> Option<&'static str> {
-        if !self.state.ready {
+        if let Some(reason) = self.state.permissions.blocked() {
+            Some(reason)
+        } else if !self.state.ready {
             Some("Библиотека загружается")
         } else if !self
             .state
@@ -443,7 +445,13 @@ impl NotetakerApp {
             }
             if ui
                 .add_enabled(
-                    self.import_picker.is_none() && self.can_record(),
+                    self.import_picker.is_none()
+                        && self.state.can_prepare_import()
+                        && self
+                            .state
+                            .quickstart
+                            .models
+                            .speech_ready(&self.state.record_model),
                     crate::theme::styled_button(
                         crate::theme::Palette::of(ui),
                         "Импортировать запись…",
@@ -490,6 +498,14 @@ impl NotetakerApp {
             .filter(|s| !s.is_empty())
             .unwrap_or("Встречи");
         theme::page_heading(ui, title);
+        if crate::permissions::panel(
+            ui,
+            &self.state.permissions,
+            false,
+            self.state.recording.busy(),
+        ) {
+            self.state.permissions.check_requested = true;
+        }
         if !self.quickstart.open
             && self
                 .state
@@ -698,8 +714,15 @@ impl NotetakerApp {
         }
         let mut stop = false;
         let bar = theme::bar(p).show(ui, |ui| {
-            if let Some(status) = self.state.recording.status() {
+            if let Some(status) = self
+                .state
+                .permissions
+                .recording_status(&self.state.recording)
+            {
                 theme::recording_status(ui, &status.text, status.warning, status.progress);
+                if self.state.permissions.recording_help(&self.state.recording) {
+                    crate::permissions::open_settings(ui);
+                }
             }
             ui.horizontal(|ui| {
                 let phase = self.state.recording.phase;
@@ -2230,6 +2253,11 @@ impl NotetakerApp {
         }
     }
     fn notifications(&mut self, ctx: &egui::Context) {
+        if self.state.error.as_deref() == Some(crate::permissions::MICROPHONE_DENIED)
+            && self.state.permissions.blocked().is_none()
+        {
+            self.state.error = None;
+        }
         let focused = ctx.input(|i| {
             i.focused
                 && i.viewport().focused.unwrap_or(i.focused)
@@ -2433,6 +2461,7 @@ impl NotetakerApp {
                 }
                 if let Some(error) = self.state.error.clone() {
                     theme::bar(Palette::of(ui)).show(ui, |ui| {
+                        crate::permissions::blocked_action(ui, Some(&error));
                         ui.colored_label(
                             ToastLevel::Error.color(Palette::of(ui)),
                             notetaker_core::display_text(&error),
@@ -2468,6 +2497,7 @@ impl NotetakerApp {
             && !self.state.inventory_pending
             && !self.state.record_source_missing;
         theme::modal(ctx,"Новая запись").open(&mut open).show_footer(ctx,|ui| {
+            if crate::permissions::panel(ui, &self.state.permissions, false, self.state.recording.busy()) { self.state.permissions.check_requested = true; }
             if let Some(reason) = &self.state.record_options_notice { ui.weak(reason); }
             theme::form_field(ui,"Название",Some("Можно оставить пустым: название появится после конспекта."),|ui|ui.add(theme::text_field(&mut self.state.title).desired_width(f32::INFINITY)));
             theme::form_field(ui,"Распознавание",None,|ui| model_selector(ui,"record-model",&mut self.state.record_model));
@@ -2701,6 +2731,10 @@ impl NotetakerApp {
                     ui.ctx()
                         .send_viewport_cmd(egui::ViewportCommand::InnerSize(response.2));
                 }
+                if calendar.is_some() {
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::InnerSize(ui.min_size()));
+                }
                 if ui.input(|input| input.viewport().close_requested()) {
                     dismiss = !ending;
                     ui.ctx()
@@ -2933,6 +2967,35 @@ impl eframe::App for NotetakerApp {
 impl NotetakerApp {
     fn frame(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        if std::mem::take(&mut self.state.permissions.show_requested) {
+            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd_to(
+                egui::ViewportId::ROOT,
+                egui::ViewportCommand::Minimized(false),
+            );
+            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
+        }
+        if cfg!(any(target_os = "macos", windows)) {
+            self.state.permissions.on_focus(
+                ctx.input(|input| {
+                    input.focused
+                        || input
+                            .raw
+                            .viewports
+                            .values()
+                            .any(|viewport| viewport.focused == Some(true))
+                }),
+                self.state.permissions.query,
+            );
+        }
+        if self.state.permissions.check_requested
+            && !self.state.recording.busy()
+            && !self.state.quickstart.probe_busy
+        {
+            self.state.permissions.check_requested = false;
+            self.state.permissions.refresh();
+            self.quickstart.start_probe(&mut self.state);
+        }
         self.organization.windows(
             &ctx,
             !self.state.semantic_running && self.state.can_save_settings(),
@@ -3084,6 +3147,17 @@ impl NotetakerApp {
             ))
             .show(ui, |ui| {
                 ui.add_enabled_ui(!self.state.settings_pending, |ui| {
+                    if !self.home
+                        && self.state.permissions.blocked().is_some()
+                        && crate::permissions::panel(
+                            ui,
+                            &self.state.permissions,
+                            false,
+                            self.state.recording.busy(),
+                        )
+                    {
+                        self.state.permissions.check_requested = true;
+                    }
                     let selected = self.state.selected.clone();
                     if self.people.active() {
                         self.people.screen(ui, &mut self.state);
@@ -3148,6 +3222,9 @@ impl NotetakerApp {
         let onboarding_open = self.quickstart.open;
         crate::ktalk::windows(&ctx, &mut self.state);
         self.quickstart.show(&ctx, &mut self.state);
+        if self.state.permissions.show_requested {
+            ctx.request_repaint();
+        }
         if onboarding_open && !self.quickstart.open {
             self.home = true;
             self.chat_page = false;

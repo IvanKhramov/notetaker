@@ -345,6 +345,7 @@ pub fn start_card(
             if let Some(reason) = reason {
                 ui.weak(reason);
             }
+            crate::permissions::blocked_action(ui, reason);
         });
     (accept, dismiss, panel.response.rect.size())
 }

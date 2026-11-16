@@ -18,6 +18,7 @@ pub enum Status {
     Missing,
     Error(String),
     Warning(String),
+    Denied,
 }
 #[derive(Clone, Debug, Default)]
 pub struct Models {
@@ -415,6 +416,32 @@ impl Panel {
         if let Some(receiver) = &self.probe {
             match receiver.try_recv() {
                 Ok(ProbeEvent::Done(result)) => {
+                    state.permissions.refresh();
+                    if cfg!(any(target_os = "macos", windows))
+                        && let Ok(statuses) = &result
+                    {
+                        for (index, status) in statuses.iter().enumerate() {
+                            match status {
+                                Status::Ready => state.permissions.audio_received(index),
+                                Status::Denied => {
+                                    state.permissions.channels[index] =
+                                        notetaker_capture::Permission::Denied;
+                                    state.permissions.failed[index] = true;
+                                }
+                                Status::Error(_) => state.permissions.capture_failed(index),
+                                Status::Warning(_)
+                                    if index == 0
+                                        && (state.permissions.query)()[0]
+                                            == notetaker_capture::Permission::Unknown =>
+                                {
+                                    state.permissions.channels[0] =
+                                        notetaker_capture::Permission::Unknown;
+                                    state.permissions.failed[0] = false;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     self.probe_status = Some(result.unwrap_or_else(|error| {
                         [
                             Status::Error(error.clone()),
@@ -439,7 +466,7 @@ impl Panel {
             }
         }
     }
-    fn start_probe(&mut self, state: &mut AppState) {
+    pub(crate) fn start_probe(&mut self, state: &mut AppState) {
         if !cfg!(any(windows, target_os = "macos"))
             || state.quickstart.probe_busy
             || state.recording.busy()
@@ -450,6 +477,13 @@ impl Panel {
         let (sender, receiver) = mpsc::channel();
         self.probe = Some(receiver);
         self.probe_status = None;
+        state.permissions.refresh();
+        if matches!(
+            state.permissions.channels[0],
+            notetaker_capture::Permission::NotAsked | notetaker_capture::Permission::Denied
+        ) {
+            state.permissions.repeat_after_microphone_prompt = true;
+        }
         state.quickstart.probe_busy = true;
         std::thread::spawn(move || {
             let result = probe().map_err(|error| format!("{error:#}"));
@@ -492,7 +526,9 @@ impl Panel {
                             ui.label("Проверим звук?");
                             ui.label("Говорите и включите звук на компьютере. Проверка займёт 5 секунд, аудио не сохраняется.");
                             for (index, title) in ["Микрофон", "Системный звук"].into_iter().enumerate() {
-                                probe_line(ui, title, self.probe_status.as_ref().map(|s| &s[index]), index == 1 && cfg!(target_os = "macos"), state.quickstart.probe_busy);
+                                let denied = Status::Denied;
+                                let status = if state.permissions.channels[index] == notetaker_capture::Permission::Denied { Some(&denied) } else { self.probe_status.as_ref().map(|statuses| &statuses[index]) };
+                                probe_line(ui, title, status, index == 1 && cfg!(target_os = "macos"), state.quickstart.probe_busy);
                             }
                             #[cfg(windows)]
                             ui.small("Если нет доступа: Параметры → Конфиденциальность → Микрофон. Разрешите доступ приложениям.");
@@ -587,39 +623,51 @@ fn probe() -> anyhow::Result<[Status; 2]> {
         ..Default::default()
     })?;
     let (tx, rx) = mpsc::sync_channel(128);
-    let mut result = Ok(());
-    for source in &mut sources {
+    let mut errors: [Option<String>; 2] = [None, None];
+    let mut denied = [false; 2];
+    for (index, source) in sources.iter_mut().enumerate() {
         if let Err(error) = source.start(tx.clone()) {
-            result = Err(error);
-            break;
+            errors[index] = Some(format!("{error:#}"));
         }
     }
     drop(tx);
     let mut meters = [LevelMeter::default(), LevelMeter::default()];
-    while result.is_ok() && origin.elapsed() < Duration::from_secs(5) {
+    // Start the measurement after synchronous startup, which may include a prompt.
+    let measuring = Instant::now();
+    while measuring.elapsed() < Duration::from_secs(5) {
         match rx.recv_timeout(Duration::from_millis(50)) {
             Ok(CaptureMessage::Frame(frame)) => {
                 let index = if frame.channel == Channel::Mic { 0 } else { 1 };
+                if frame.samples.iter().any(|sample| sample.abs() > 0.0005) {
+                    denied[index] = false;
+                    errors[index] = None;
+                }
                 meters[index].push(&frame.samples);
             }
-            Ok(CaptureMessage::Event(CaptureEvent::Error { message, .. })) => {
-                result = Err(anyhow::anyhow!(message));
+            Ok(CaptureMessage::Event(CaptureEvent::PermissionDenied { channel })) => {
+                denied[if channel == Channel::Mic { 0 } else { 1 }] = true;
+            }
+            Ok(CaptureMessage::Event(CaptureEvent::Error { channel, message })) => {
+                errors[if channel == Channel::Mic { 0 } else { 1 }] = Some(message);
             }
             Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                result = Err(anyhow::anyhow!("Захват звука завершился раньше времени"));
-            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
-    for source in &mut sources {
+    for (index, source) in sources.iter_mut().enumerate() {
         if let Err(error) = source.stop()
-            && result.is_ok()
+            && errors[index].is_none()
         {
-            result = Err(error);
+            errors[index] = Some(format!("{error:#}"));
         }
     }
-    result?;
     Ok(std::array::from_fn(|index| {
+        if denied[index] {
+            return Status::Denied;
+        }
+        if let Some(error) = errors[index].take() {
+            return Status::Error(error);
+        }
         let levels = meters[index].levels();
         sound_status(
             levels.samples,
@@ -649,11 +697,29 @@ pub fn probe_line(
         Some(Status::Ready) => {
             ui.label(format!("✓ {title}: работает"));
         }
+        Some(Status::Denied) => {
+            ui.colored_label(
+                Palette::of(ui).red,
+                if mac_system {
+                    "Нет доступа к системному звуку"
+                } else {
+                    crate::permissions::MICROPHONE_DENIED
+                },
+            );
+            crate::permissions::open_settings(ui);
+        }
         Some(Status::Warning(reason)) => {
             ui.colored_label(Palette::of(ui).warning, format!("{title}: {reason}"));
         }
         Some(Status::Error(reason)) => {
-            ui.colored_label(Palette::of(ui).red, format!("{title}: {reason}"));
+            ui.colored_label(
+                if mac_system {
+                    Palette::of(ui).warning
+                } else {
+                    Palette::of(ui).red
+                },
+                format!("{title}: {reason}"),
+            );
         }
         _ => {
             ui.weak(format!(
@@ -668,12 +734,7 @@ pub fn probe_line(
     }
     if mac_system && matches!(status, Some(Status::Warning(_) | Status::Error(_))) {
         ui.small("Настройки системы → Конфиденциальность и безопасность → Запись экрана и системного звука. Разрешите доступ для notetaker.");
-        if theme::button(ui, "Открыть настройки", theme::ButtonStyle::Ghost).clicked()
-        {
-            ui.ctx().open_url(egui::OpenUrl::new_tab(
-                "x-apple.systempreferences:com.apple.preference.security",
-            ));
-        }
+        crate::permissions::open_settings(ui);
     }
 }
 

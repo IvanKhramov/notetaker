@@ -286,6 +286,25 @@ impl AudioSource for LiveSource {
     }
 }
 
+/// https://developer.apple.com/documentation/avfoundation/avcapturedevice/authorizationstatus(for:)
+/// Core Audio taps provide no equivalent public system-audio TCC preflight.
+pub fn permissions() -> [crate::Permission; 2] {
+    use crate::Permission;
+    let mic = unsafe {
+        AVMediaTypeAudio.map_or(Permission::Unknown, |media| {
+            match AVCaptureDevice::authorizationStatusForMediaType(media) {
+                AVAuthorizationStatus::Authorized => Permission::Granted,
+                AVAuthorizationStatus::Denied | AVAuthorizationStatus::Restricted => {
+                    Permission::Denied
+                }
+                AVAuthorizationStatus::NotDetermined => Permission::NotAsked,
+                _ => Permission::Unknown,
+            }
+        })
+    };
+    [mic, Permission::Unknown]
+}
+
 fn microphone_permission(stop: &AtomicBool) -> Result<()> {
     unsafe {
         let media = AVMediaTypeAudio.context("Нет AVMediaTypeAudio")?;

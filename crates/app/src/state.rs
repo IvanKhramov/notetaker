@@ -78,7 +78,7 @@ impl Recording {
     pub fn level(&self) -> f32 {
         self.levels[0].max(self.levels[1])
     }
-    fn silent_channels(&self) -> [bool; 2] {
+    pub(crate) fn silent_channels(&self) -> [bool; 2] {
         [0, 1].map(|i| {
             self.silent_since[i].is_some_and(|since| {
                 since.elapsed() >= Duration::from_secs(if i == 0 { 20 } else { 120 })
@@ -188,7 +188,9 @@ impl Recording {
                 }
             }
             PipelineEvent::CaptureEvent(
-                CaptureEvent::Error { channel, .. } | CaptureEvent::Stopped { channel },
+                CaptureEvent::Error { channel, .. }
+                | CaptureEvent::Stopped { channel }
+                | CaptureEvent::PermissionDenied { channel },
             ) => {
                 if self.phase == Phase::Recording {
                     let index = if *channel == notetaker_capture::Channel::Mic {
@@ -419,6 +421,7 @@ pub struct AppState {
     pub tab: Tab,
     pub recording: Recording,
     pub call_prompt: Option<CallPrompt>,
+    pub permissions: crate::permissions::Access,
     detector: Monitor,
     pub inventory: Inventory,
     pub inventory_pending: bool,
@@ -453,7 +456,9 @@ pub struct AppState {
 impl AppState {
     #[cfg(test)]
     pub(crate) fn test_channels(tx: Sender<Command>, rx: Receiver<Event>) -> Self {
-        Self::with_channels(tx, rx)
+        let mut state = Self::with_channels(tx, rx);
+        state.permissions.query = || [notetaker_capture::Permission::Unknown; 2];
+        state
     }
     pub fn new() -> Self {
         let (tx, rx) = worker::spawn();
@@ -527,6 +532,7 @@ impl AppState {
             tab: Tab::Enhanced,
             recording: Recording::default(),
             call_prompt: None,
+            permissions: Default::default(),
             detector: Monitor::default(),
             inventory: Inventory::default(),
             inventory_pending: false,
@@ -803,7 +809,14 @@ impl AppState {
         }
     }
     pub fn can_prepare_recording(&self) -> bool {
+        self.can_prepare_audio(true)
+    }
+    pub fn can_prepare_import(&self) -> bool {
+        self.can_prepare_audio(false)
+    }
+    fn can_prepare_audio(&self, microphone: bool) -> bool {
         self.ready
+            && (!microphone || self.permissions.blocked().is_none())
             && !self.recording.busy()
             && !self.settings_pending
             && !self.exit_requested
@@ -1016,6 +1029,12 @@ impl AppState {
         }
     }
     fn start_recording_with_app(&mut self, call_override: Option<notetaker_detect::DetectedCall>) {
+        self.permissions.refresh();
+        if let Some(reason) = self.permissions.blocked() {
+            self.error = Some(reason.into());
+            self.permissions.show_requested = true;
+            return;
+        }
         if !self.can_prepare_recording() || !self.quickstart.models.speech_ready(&self.record_model)
         {
             return;
@@ -1448,11 +1467,15 @@ impl AppState {
         self.send(Command::Retranscribe { settings, meeting });
     }
     pub fn toggle_recording(&mut self) {
+        self.permissions.refresh();
         if self.recording.busy() {
             self.recording.request_stop();
             if self.selected == self.recording.path {
                 self.tab = Tab::Enhanced;
             }
+        } else if let Some(reason) = self.permissions.blocked() {
+            self.error = Some(reason.into());
+            self.permissions.show_requested = true;
         } else {
             self.start_quick_recording();
         }
@@ -2426,11 +2449,68 @@ impl AppState {
                 self.refresh();
             }
             Event::Pipeline(event) => {
+                if cfg!(any(target_os = "macos", windows)) {
+                    match &event {
+                        PipelineEvent::CaptureEvent(CaptureEvent::PermissionDenied { channel }) => {
+                            let index = if *channel == notetaker_capture::Channel::Mic {
+                                0
+                            } else {
+                                1
+                            };
+                            self.permissions.channels[index] =
+                                notetaker_capture::Permission::Denied;
+                            self.permissions.failed[index] = true;
+                            if index == 0 {
+                                self.permissions.show_requested = true;
+                                self.error = Some(crate::permissions::MICROPHONE_DENIED.into());
+                            }
+                        }
+                        PipelineEvent::CaptureEvent(CaptureEvent::Error { channel, .. }) => {
+                            if cfg!(target_os = "macos")
+                                || *channel == notetaker_capture::Channel::Mic
+                            {
+                                self.permissions.capture_failed(
+                                    if *channel == notetaker_capture::Channel::Mic {
+                                        0
+                                    } else {
+                                        1
+                                    },
+                                );
+                            }
+                        }
+                        PipelineEvent::Levels { mic, system } => {
+                            if *mic > 0.0005 {
+                                self.permissions.audio_received(0);
+                            }
+                            if *system > 0.0005 {
+                                self.permissions.audio_received(1);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 if matches!(&event,PipelineEvent::Levels {system,..} if *system > 0.0005)
                     && matches!(self.call_prompt, Some(CallPrompt::Stop { .. }))
                 {
                     self.call_prompt = None;
                     self.recording.call_end_suppressed = true;
+                }
+                if cfg!(any(target_os = "macos", windows))
+                    && !self.recording.importing
+                    && self.permissions.blocked().is_some()
+                    && matches!(
+                        &event,
+                        PipelineEvent::CaptureEvent(
+                            CaptureEvent::Error {
+                                channel: notetaker_capture::Channel::Mic,
+                                ..
+                            } | CaptureEvent::PermissionDenied {
+                                channel: notetaker_capture::Channel::Mic
+                            }
+                        )
+                    )
+                {
+                    self.recording.request_stop();
                 }
                 let previous = self.recording.phase;
                 self.recording.apply(&event);
@@ -2444,7 +2524,22 @@ impl AppState {
                 if let PipelineEvent::Error(message)
                 | PipelineEvent::CaptureEvent(CaptureEvent::Error { message, .. }) = &event
                 {
-                    self.error = Some(message.clone());
+                    let permission_reason = if matches!(
+                        &event,
+                        PipelineEvent::CaptureEvent(CaptureEvent::Error {
+                            channel: notetaker_capture::Channel::Mic,
+                            ..
+                        })
+                    ) {
+                        self.permissions.blocked()
+                    } else {
+                        None
+                    };
+                    if permission_reason.is_some() {
+                        self.permissions.show_requested = true;
+                    }
+                    self.error =
+                        Some(permission_reason.map_or_else(|| message.clone(), str::to_owned));
                 }
                 if previous != Phase::Finalizing
                     && self.recording.phase == Phase::Finalizing

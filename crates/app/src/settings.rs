@@ -336,10 +336,16 @@ impl Panel {
                 theme::callout(ui, theme::icons::INFO, |ui| {
                     ui.small("Захват звука, трей и глобальная клавиша недоступны на Linux.");
                 });
-                #[cfg(target_os = "macos")]
-                theme::callout(ui, theme::icons::INFO, |ui| {
-                    ui.small("macOS: системный звук целиком, кроме notetaker. Нужны разрешения Microphone и System Audio Recording.");
-                });
+                if (cfg!(target_os = "macos") || state.permissions.needs_help())
+                    && crate::permissions::panel(
+                        ui,
+                        &state.permissions,
+                        true,
+                        state.recording.busy(),
+                    )
+                {
+                    state.permissions.check_requested = true;
+                }
                 ui.add_space(24.0);
                 let settings = &mut state.settings_draft;
                 theme::settings_group(ui, "Запись", |ui| {

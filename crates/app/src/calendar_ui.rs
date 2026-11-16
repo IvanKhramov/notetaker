@@ -83,6 +83,7 @@ pub fn reminder(ui: &mut egui::Ui, event: &CalendarEvent, reason: Option<&str>) 
         if let Some(reason) = reason {
             ui.weak(reason);
         }
+        crate::permissions::blocked_action(ui, reason);
     });
     action
 }

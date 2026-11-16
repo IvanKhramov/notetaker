@@ -19,6 +19,7 @@ mod macos;
 mod maintenance;
 mod organization;
 mod people;
+mod permissions;
 mod quickstart;
 mod recording_options;
 mod settings;
