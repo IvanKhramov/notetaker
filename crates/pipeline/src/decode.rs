@@ -106,7 +106,7 @@ impl<F: FnMut(f32) -> Result<()>> Output<F> {
     }
 }
 
-fn decode_native(
+pub(crate) fn decode_native(
     path: &Path,
     wav: &Path,
     progress: &mut dyn FnMut(f32) -> Result<()>,

@@ -60,6 +60,9 @@ pub fn plan() -> (notetaker_core::Transcript, notetaker_llm::ktalk::Plan) {
     let remote =
         serde_json::from_value(serde_json::json!({"status":"complete","tracks":tracks})).unwrap();
     let recording = notetaker_llm::ktalk::Recording {
+        qualities: Vec::new(),
+        has_audio_record: false,
+        transcription: None,
         id: "neutral-recording".into(),
         title: "Планирование выпуска".into(),
         created_date: start,

@@ -27,6 +27,8 @@ fn meta(title: &str) -> MeetingMeta {
 fn transcript(text: &str) -> Transcript {
     Transcript {
         version: SCHEMA_VERSION,
+        voice_recognitions: Default::default(),
+        voice_rejected: Default::default(),
         bookmarks: Vec::new(),
         speaker_names: Default::default(),
         speaker_suggestions: Default::default(),

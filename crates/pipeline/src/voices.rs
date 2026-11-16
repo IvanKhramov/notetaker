@@ -88,6 +88,7 @@ pub fn remember_named_voices(
                 &voice.name
             };
             samples.push(VoiceSample {
+                recording_id: voice.recording_id.clone(),
                 speaker: voice.speaker.clone(),
                 name: name.clone(),
                 embedding: embed(&wav, ranges)?,
@@ -203,6 +204,7 @@ mod tests {
     }
     fn evidence(id: &str, registered: bool) -> VoiceEvidence {
         VoiceEvidence {
+            recording_id: None,
             speaker: id.into(),
             name: "Олег Сидоров".into(),
             registered,
@@ -424,6 +426,209 @@ mod tests {
         assert_eq!(
             library.read_voices().unwrap().voices[0].name,
             "Нейтральный гость"
+        );
+    }
+}
+
+/// Downloads, PCM and failures are scoped to one TempDir, including cancellation.
+pub struct HistoricalEnrollment {
+    pub people: Vec<String>,
+    pub no_speech: bool,
+}
+pub fn learn_recording(
+    library: &Library,
+    source: &str,
+    evidence: &[VoiceEvidence],
+    download: impl FnOnce(&mut std::fs::File) -> Result<()>,
+    mut embed: impl FnMut(&std::path::Path, Vec<TimeRange>) -> Result<Vec<f32>>,
+    cancelled: impl Fn() -> bool,
+) -> Result<HistoricalEnrollment> {
+    anyhow::ensure!(
+        !evidence.iter().any(|v| v.registered && v.track.is_none()),
+        "Владелец ключа не определён однозначно"
+    );
+    let mut candidates = Vec::new();
+    let mut known = Vec::new();
+    for voice in evidence
+        .iter()
+        .filter(|v| v.registered && v.track.is_some())
+    {
+        if library.learned_recording_identity(source, &voice.speaker)? {
+            known.push(voice.speaker.clone());
+        } else if voice
+            .ranges
+            .iter()
+            .map(|(a, b)| b.saturating_sub(*a).min(15000))
+            .sum::<u64>()
+            >= 6000
+        {
+            candidates.push(voice);
+        }
+    }
+    if candidates.is_empty() {
+        return Ok(HistoricalEnrollment {
+            no_speech: known.is_empty(),
+            people: known,
+        });
+    }
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("recording.mp4");
+    let mut file = std::fs::File::create(&path)?;
+    download(&mut file)?;
+    drop(file);
+    anyhow::ensure!(!cancelled(), "Обучение голосов отменено");
+    let wav = temp.path().join("recording.wav");
+    let bound = crate::decode::decode_native(&path, &wav, &mut |_| {
+        anyhow::ensure!(!cancelled(), "Обучение голосов отменено");
+        Ok(())
+    })? / 16;
+    let mut samples = Vec::new();
+    for voice in candidates {
+        let ranges: Vec<_> = voice
+            .ranges
+            .iter()
+            .filter_map(|&(a, b)| {
+                let end = b.min(bound).min(a.saturating_add(15000));
+                (end.saturating_sub(a) >= 1500).then_some(TimeRange {
+                    start_ms: a,
+                    end_ms: end,
+                })
+            })
+            .take(8)
+            .collect();
+        if ranges.iter().map(|r| r.end_ms - r.start_ms).sum::<u64>() < 6000 {
+            continue;
+        }
+        let embedding = embed(&wav, ranges)?;
+        anyhow::ensure!(!cancelled(), "Обучение голосов отменено");
+        samples.push(VoiceSample {
+            recording_id: voice.recording_id.clone(),
+            speaker: voice.speaker.clone(),
+            name: voice.name.clone(),
+            own: voice.track == Some(Channel::Mic),
+            embedding,
+        });
+    }
+    known.extend(library.learn_recording_voices(source, samples, cancelled)?);
+    Ok(HistoricalEnrollment {
+        no_speech: known.is_empty(),
+        people: known,
+    })
+}
+
+#[cfg(test)]
+mod historical_tests {
+    use super::*;
+    fn evidence() -> VoiceEvidence {
+        VoiceEvidence {
+            recording_id: Some("recording".into()),
+            speaker: "ktalk-person".into(),
+            name: "Анна Петрова".into(),
+            registered: true,
+            track: Some(Channel::System),
+            ranges: vec![(0, 8000)],
+        }
+    }
+    #[test]
+    fn native_mp4_learning_is_idempotent_and_temp_media_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = Library::open(dir.path()).unwrap();
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/voice-learning.mp4");
+        let mut work = None;
+        let report = learn_recording(
+            &library,
+            "source",
+            &[evidence()],
+            |out| {
+                std::io::copy(&mut std::fs::File::open(&source)?, out)?;
+                Ok(())
+            },
+            |wav, ranges| {
+                assert_eq!(ranges.len(), 1);
+                let input = hound::WavReader::open(wav)?;
+                assert_eq!(input.spec().sample_rate, 16000);
+                assert_eq!(input.spec().channels, 1);
+                work = Some(wav.parent().unwrap().to_path_buf());
+                Ok(vec![1.0, 0.0])
+            },
+            || false,
+        )
+        .unwrap();
+        assert_eq!(report.people, vec!["ktalk-person"]);
+        assert!(!work.unwrap().exists());
+        let before = library.read_voices().unwrap();
+        let report = learn_recording(
+            &library,
+            "source",
+            &[evidence()],
+            |_| panic!("already learned: no download"),
+            |_, _| panic!("already learned: no ASR"),
+            || false,
+        )
+        .unwrap();
+        assert_eq!(report.people, vec!["ktalk-person"]);
+        assert!(!report.no_speech);
+        assert_eq!(library.read_voices().unwrap(), before);
+    }
+    #[test]
+    fn failure_and_cancel_remove_temporary_audio_and_ambiguous_owner_never_embeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = Library::open(dir.path()).unwrap();
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/voice-learning.mp4");
+        for cancelled in [false, true] {
+            let mut work = None;
+            let flag = std::cell::Cell::new(false);
+            let result = learn_recording(
+                &library,
+                "failed",
+                &[evidence()],
+                |out| {
+                    std::io::copy(&mut std::fs::File::open(&source)?, out)?;
+                    Ok(())
+                },
+                |wav, _| {
+                    work = Some(wav.parent().unwrap().to_path_buf());
+                    if cancelled {
+                        flag.set(true);
+                        Ok(vec![1.0, 0.0])
+                    } else {
+                        anyhow::bail!("synthetic failure")
+                    }
+                },
+                || flag.get(),
+            );
+            assert!(result.is_err());
+            assert!(!work.unwrap().exists());
+            assert!(library.read_voices().unwrap().voices.is_empty());
+        }
+        let mut owner = evidence();
+        owner.track = None;
+        assert!(
+            learn_recording(
+                &library,
+                "ambiguous",
+                &[owner],
+                |_| panic!("no download for ambiguous owner"),
+                |_, _| panic!("no ASR"),
+                || false
+            )
+            .is_err()
+        );
+        let mut guest = evidence();
+        guest.registered = false;
+        assert!(
+            learn_recording(
+                &library,
+                "guest",
+                &[guest],
+                |_| panic!("guests are not learned"),
+                |_, _| panic!("guests are not learned"),
+                || false
+            )
+            .unwrap()
+            .no_speech
         );
     }
 }

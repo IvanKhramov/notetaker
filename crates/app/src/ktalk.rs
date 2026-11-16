@@ -26,11 +26,11 @@ impl Control {
             handle.cancel();
         }
     }
-    fn check(&self) -> Result<()> {
+    pub(crate) fn check(&self) -> Result<()> {
         anyhow::ensure!(!self.token.is_cancelled(), "Операция Толка отменена");
         Ok(())
     }
-    fn attach(&self, handle: notetaker_asr_proto::CancellationHandle) {
+    pub(crate) fn attach(&self, handle: notetaker_asr_proto::CancellationHandle) {
         if self.token.is_cancelled() {
             handle.cancel();
         }
@@ -264,6 +264,7 @@ pub enum Message {
 }
 #[derive(Default)]
 pub struct State {
+    pub learning: crate::voice_learning::LearningUi,
     pub biometric: bool,
     pub cancel: Control,
     pub settings: Option<Settings>,
@@ -1096,7 +1097,7 @@ pub fn settings_ui(ui: &mut eframe::egui::Ui, state: &mut State) -> Option<Job> 
     let mut flush = false;
     let mut settings = settings_draft(state);
     theme::settings_group(ui, "Пространство Толка", |ui| {
-        ui.add_enabled_ui(!state.busy,|ui| {
+        ui.add_enabled_ui(!state.busy && !state.learning.busy(),|ui| {
             theme::setting_row(ui,"Адрес пространства",|ui| {
                 let response=ui.add(theme::text_field(&mut state.address).hint_text("https://space.ktalk.ru").desired_width(ui.available_width()));
                 state.settings_edited|=response.changed();flush|=response.lost_focus();
@@ -1519,8 +1520,26 @@ pub fn source_note(ui: &mut eframe::egui::Ui, path: &Path, transcript: &Transcri
     )
     .on_hover_text(time);
 }
-pub fn transcript_ui(ui: &mut eframe::egui::Ui, state: &mut crate::state::AppState, path: &Path) {
+pub(crate) fn voice_consent(ui: &mut eframe::egui::Ui) -> Option<bool> {
     use crate::theme::{self, ButtonStyle};
+    let mut choice = None;
+    theme::callout(ui, theme::icons::INFO, |ui| {
+        ui.label("Запоминать голоса людей, чтобы узнавать их на встречах без записи Толка? Отпечатки голосов хранятся только на этом компьютере.");
+        ui.horizontal_wrapped(|ui| {
+            if theme::button(ui, "Включить", ButtonStyle::Primary).clicked() {
+                choice = Some(true);
+            }
+            if theme::button(ui, "Не сейчас", ButtonStyle::Ghost).clicked() {
+                choice = Some(false);
+            }
+        });
+    });
+    choice
+}
+pub(crate) fn mark_learning_offer(root: &Path) -> Result<()> {
+    crate::config::atomic_write(&offer_path(root)?, "1")
+}
+pub fn transcript_ui(ui: &mut eframe::egui::Ui, state: &mut crate::state::AppState, path: &Path) {
     let Some(document) = state.documents.get(path) else {
         return;
     };
@@ -1543,14 +1562,9 @@ pub fn transcript_ui(ui: &mut eframe::egui::Ui, state: &mut crate::state::AppSta
             .tasks
             .get(path)
             .is_some_and(|task| !task.progress.voice_offer_seen);
-    if show_offer {
-        theme::callout(ui, theme::icons::INFO, |ui| {
-            ui.label("Запоминать голоса этих людей, чтобы узнавать их на встречах без записи Толка? Отпечатки голосов хранятся только на этом компьютере.");
-            ui.horizontal_wrapped(|ui| {
-                enable = theme::button(ui, "Включить", ButtonStyle::Primary).clicked();
-                dismiss = theme::button(ui, "Не сейчас", ButtonStyle::Ghost).clicked();
-            });
-        });
+    if show_offer && let Some(choice) = voice_consent(ui) {
+        enable = choice;
+        dismiss = !choice;
     }
     if (enable || dismiss)
         && !state.ktalk.busy
@@ -1635,6 +1649,10 @@ impl crate::state::AppState {
         self.ktalk_job_at(job, Moment::now());
     }
     fn ktalk_job_at(&mut self, job: Job, now: Moment) {
+        if self.ktalk.learning.busy() {
+            self.error = Some("Остановите обучение голосов перед другой операцией Толка".into());
+            return;
+        }
         if self.ktalk.busy || self.settings_pending {
             return;
         }
@@ -1728,6 +1746,9 @@ impl crate::state::AppState {
         self.poll_ktalk_at(Moment::now());
     }
     fn poll_ktalk_at(&mut self, now: Moment) {
+        if crate::voice_learning::poll(self) {
+            return;
+        }
         if self.exit_requested
             || !self.ready
             || self.settings_pending
@@ -1894,6 +1915,10 @@ impl crate::state::AppState {
                 let path = task.meeting.path().to_path_buf();
                 match outcome {
                     Outcome::Applied(applied) => {
+                        self.send(crate::worker::Command::Voices {
+                            root: self.settings.library.clone(),
+                            delete: None,
+                        });
                         self.ktalk.inspected.insert(path.clone());
                         let applied = *applied;
                         self.ktalk
@@ -2209,6 +2234,7 @@ mod tests {
                 &task.meeting,
                 &text,
                 vec![notetaker_core::VoiceSample {
+                    recording_id: None,
                     speaker: "ktalk-another-person".into(),
                     name: name.clone(),
                     embedding: vec![1.0, 0.0],
@@ -2886,6 +2912,9 @@ mod tests {
         output.drop_without_applying_deltas();
         assert!(visible);
         let recording = Recording {
+            qualities: Vec::new(),
+            has_audio_record: false,
+            transcription: None,
             id: "choice".into(),
             title: "Выбрать эту запись".into(),
             created_date: Utc::now(),

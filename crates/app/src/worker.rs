@@ -1414,6 +1414,7 @@ fn record(
                     .and_then(|d| d.speaker_hint)
                     .or(request.settings.speakers),
                 voice_library: request.settings.voice_library,
+                automatic_voice_names: request.settings.automatic_voice_names,
             },
             retention: request
                 .settings

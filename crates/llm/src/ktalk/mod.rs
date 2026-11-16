@@ -1,7 +1,10 @@
 //! Read-only Tolk integration. Remote text exists only in memory.
 mod client;
 mod sync;
-pub use client::{Client, Participant, Recording, Transcript, User};
+pub use client::{
+    AUDIO_LIMIT, Client, NetworkError, Participant, Recording, RecordingQuality, Transcript,
+    TranscriptionStatus, User,
+};
 pub use sync::{
     AppliedTranscript, Plan, Row, SelectionError, VoiceEvidence, apply, match_recording, plan,
     select_recording,
@@ -137,3 +140,7 @@ mod tests {
         assert_eq!(settings.extra.len(), 2);
     }
 }
+
+pub use sync::recording_voice_evidence;
+mod learning;
+pub use learning::{LearningPlan, LearningQueue, learning_origin, learning_plan, learning_source};

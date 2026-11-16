@@ -79,6 +79,14 @@ impl SpeakerUi {
     }
 }
 
+pub fn voice_note(ui: &mut egui::Ui, transcript: &Transcript, id: &str) {
+    if let Some(mark) = transcript.voice_recognitions.get(id) {
+        ui.weak("по голосу").on_hover_text(format!(
+            "Сходство: {:.3}",
+            f32::from(mark.similarity_milli) / 1000.0
+        ));
+    }
+}
 pub fn rename_menu(
     ui: &mut egui::Ui,
     transcript: &Transcript,
@@ -140,6 +148,26 @@ pub fn rename_menu(
             let focus = ui
                 .data_mut(|data| data.remove_temp::<bool>(form_key.with("focus")))
                 .unwrap_or(false);
+            if !renaming && transcript.voice_recognitions.contains_key(id) {
+                voice_note(ui, transcript, id);
+                if crate::theme::menu_item(ui, "", "Это не он", false, false).clicked() {
+                    edit = Some(SpeakerEdit::RejectVoice { speaker: id.into() });
+                    ui.close();
+                }
+                if crate::theme::menu_item(ui, "", "Верно", false, false).clicked() {
+                    edit = Some(SpeakerEdit::Rename {
+                        speaker: id.into(),
+                        name: transcript.speaker_name(id).into(),
+                        is_me: voices.is_some_and(|bank| {
+                            bank.voices.iter().any(|v| {
+                                v.is_me && v.id.as_ref() == transcript.speaker_voice_ids.get(id)
+                            })
+                        }),
+                        everywhere: false,
+                    });
+                    ui.close();
+                }
+            }
             if !renaming {
                 if let Some(voice) = transcript.speaker_voice_ids.get(id)
                     && crate::theme::menu_item(ui, "", "Открыть человека", false, false).clicked()
@@ -179,6 +207,28 @@ pub fn rename_menu(
             }
             if !global_allowed {
                 everywhere = false;
+            }
+            if transcript.voice_rejected.contains(id)
+                && let Some(bank) = voices
+            {
+                crate::theme::disclosure("Выбрать голос").show(ui, |ui| {
+                    for voice in &bank.voices {
+                        if let Some(voice_id) = &voice.id
+                            && crate::theme::button(
+                                ui,
+                                &voice.name,
+                                crate::theme::ButtonStyle::Ghost,
+                            )
+                            .clicked()
+                        {
+                            edit = Some(SpeakerEdit::SelectVoice {
+                                speaker: id.into(),
+                                voice_id: voice_id.clone(),
+                            });
+                            ui.close();
+                        }
+                    }
+                });
             }
             let mut choose = |ui: &mut egui::Ui, name: String, is_me: bool| {
                 edit = Some(SpeakerEdit::Rename {
@@ -402,6 +452,26 @@ pub fn count_control(
             }
         });
     }
+    for speaker in &timeline.speakers {
+        if document
+            .data
+            .transcript
+            .voice_recognitions
+            .contains_key(&speaker.id)
+        {
+            ui.push_id(&speaker.id, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(&speaker.name);
+                    voice_note(ui, &document.data.transcript, &speaker.id);
+                    if theme::button(ui, "Это не он", ButtonStyle::Ghost).clicked() {
+                        edit = Some(SpeakerEdit::RejectVoice {
+                            speaker: speaker.id.clone(),
+                        });
+                    }
+                })
+            });
+        }
+    }
     ui.add_space(8.0);
     (apply, edit)
 }
@@ -597,6 +667,51 @@ mod tests {
 #[cfg(test)]
 mod direct_rename_tests {
     use super::*;
+    #[test]
+    fn voice_menu_shows_source_and_emits_confirmation_and_rejection() {
+        for label in ["Верно", "Это не он"] {
+            let ctx = egui::Context::default();
+            crate::theme::install(&ctx);
+            let mut transcript = Transcript::default();
+            transcript
+                .speaker_names
+                .insert("s1".into(), "Анна Петрова".into());
+            transcript
+                .speaker_voice_ids
+                .insert("s1".into(), "voice-a".into());
+            transcript.voice_recognitions.insert(
+                "s1".into(),
+                notetaker_core::VoiceRecognition {
+                    voice_id: "voice-a".into(),
+                    similarity_milli: 846,
+                },
+            );
+            let meta = MeetingMeta::new("Нейтральная встреча", chrono::Utc::now());
+            let mut edit = None;
+            let mut draw = |ui: &mut egui::Ui| {
+                let anchor = ui.add(egui::Label::new("Анна Петрова").sense(egui::Sense::click()));
+                if let Some(next) =
+                    rename_menu(ui, &transcript, &meta, "s1", None, true, (&anchor, false))
+                {
+                    edit = Some(next);
+                }
+            };
+            crate::test_ui::click(&ctx, &mut draw, "Анна Петрова");
+            let output = crate::test_ui::frame(&ctx, vec![], &mut draw);
+            crate::test_ui::text_rect(&output.shapes, "по голосу");
+            output.drop_without_applying_deltas();
+            crate::test_ui::click(&ctx, &mut draw, label);
+            if label == "Верно" {
+                assert!(
+                    matches!(edit, Some(SpeakerEdit::Rename { name, .. }) if name == "Анна Петрова")
+                );
+            } else {
+                assert!(
+                    matches!(edit, Some(SpeakerEdit::RejectVoice { speaker }) if speaker == "s1")
+                );
+            }
+        }
+    }
     #[test]
     fn name_menu_renames_with_focus_and_only_links_known_voices() {
         for linked in [false, true] {

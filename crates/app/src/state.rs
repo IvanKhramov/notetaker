@@ -1743,7 +1743,7 @@ impl AppState {
         self.poll_settings(Instant::now());
     }
     pub fn can_exit(&self) -> bool {
-        self.pending_ai.is_empty() && !self.ktalk.busy
+        self.pending_ai.is_empty() && !self.ktalk.busy && !self.ktalk.learning.busy()
             // A cancelled sign-in reports back once its process is gone.
             && !self.connections.busy()
             && (!self.settings_autosave.pending || self.settings_autosave.error.is_some())

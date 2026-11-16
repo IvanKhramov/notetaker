@@ -144,6 +144,9 @@ mod tests {
         let words: Vec<_> = texts.iter().enumerate().map(|(i,text)| serde_json::json!({"text":text,"startTimeOffsetInMillis":times[i],"endTimeOffsetInMillis":times[i]+3000})).collect();
         let remote = serde_json::from_value(serde_json::json!({"status":"complete","tracks":[{"speaker":{"isAnonymous":true,"anonymousId":"guest","anonymousName":"Анна Петрова"},"chunks":[{"startTimeOffsetInMillis":0,"endTimeOffsetInMillis":80000,"words":words}]}]})).unwrap();
         let recording = ktalk::Recording {
+            qualities: Vec::new(),
+            has_audio_record: false,
+            transcription: None,
             id: "test".into(),
             title: "Тест".into(),
             created_date: start,

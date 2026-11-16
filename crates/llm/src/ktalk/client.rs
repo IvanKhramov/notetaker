@@ -1,5 +1,5 @@
 use std::{
-    io::Read,
+    io::{Read, Write},
     sync::Mutex,
     time::{Duration, Instant},
 };
@@ -8,6 +8,14 @@ use anyhow::{Result, ensure};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, de::DeserializeOwned};
 
+#[derive(Debug)]
+pub struct NetworkError(pub String);
+impl std::fmt::Display for NetworkError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for NetworkError {}
 const LIMIT: u64 = 16 * 1024 * 1024;
 pub(super) const MAX_TIME_MS: i64 = 86_400_000;
 pub(super) fn malformed() -> anyhow::Error {
@@ -43,7 +51,7 @@ fn read_body_cancel(
         ensure!(!cancel.is_cancelled(), "Операция Толка отменена");
         let read = body
             .read(&mut chunk)
-            .map_err(|_| anyhow::anyhow!("Не удалось прочитать ответ Толка"))?;
+            .map_err(|_| NetworkError("Не удалось прочитать ответ Толка".into()))?;
         if read == 0 {
             return Ok(bytes);
         }
@@ -120,11 +128,83 @@ impl Participant {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Recording {
+    #[serde(default)]
+    pub qualities: Vec<RecordingQuality>,
+    #[serde(default)]
+    pub has_audio_record: bool,
+    pub transcription: Option<TranscriptionStatus>,
     pub id: String,
     pub title: String,
     pub created_date: DateTime<Utc>,
     pub duration: u32,
     pub status: String,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingQuality {
+    pub name: String,
+    pub file_url: Option<String>,
+    pub status: String,
+}
+#[derive(Clone, Debug, Deserialize)]
+pub struct TranscriptionStatus {
+    pub status: String,
+}
+impl Recording {
+    pub fn smallest_quality(&self) -> Result<&RecordingQuality> {
+        self.qualities
+            .iter()
+            .filter(|q| {
+                q.status == "complete" && q.file_url.as_ref().is_some_and(|s| !s.is_empty())
+            })
+            .filter_map(|q| {
+                q.name
+                    .trim_end_matches('p')
+                    .parse::<u32>()
+                    .ok()
+                    .map(|height| (height, q))
+            })
+            .min_by_key(|(height, _)| *height)
+            .map(|(_, q)| q)
+            .ok_or_else(|| anyhow::anyhow!("Нет готового качества записи Толка"))
+    }
+}
+pub const AUDIO_LIMIT: u64 = 300_000_000;
+fn stream_audio(
+    mut body: impl Read,
+    mut out: impl Write,
+    limit: u64,
+    deadline: Instant,
+    cancel: &crate::Cancellation,
+) -> Result<u64> {
+    let mut bytes = 0;
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        ensure!(!cancel.is_cancelled(), "Операция Толка отменена");
+        ensure!(
+            Instant::now() < deadline,
+            "Превышен срок загрузки записи Толка"
+        );
+        let n = body
+            .read(&mut chunk)
+            .map_err(|_| NetworkError("Не удалось прочитать запись Толка".into()))?;
+        ensure!(
+            Instant::now() < deadline,
+            "Превышен срок загрузки записи Толка"
+        );
+        ensure!(
+            n as u64 <= limit.saturating_sub(bytes),
+            "Запись Толка больше 300 МБ"
+        );
+        if n == 0 {
+            break;
+        }
+        out.write_all(&chunk[..n])
+            .map_err(|_| anyhow::anyhow!("Не удалось сохранить временную запись"))?;
+        bytes += n as u64;
+    }
+    ensure!(!cancel.is_cancelled(), "Операция Толка отменена");
+    Ok(bytes)
 }
 #[derive(Debug, Deserialize)]
 pub struct Recordings {
@@ -217,9 +297,73 @@ impl Client {
                 .map_err(|_| anyhow::anyhow!("Не удалось создать клиент Толка"))?,
         })
     }
+    pub fn origin(&self) -> String {
+        self.base.origin().ascii_serialization()
+    }
     pub fn with_cancellation(mut self, cancel: crate::Cancellation) -> Self {
         self.cancel = cancel;
         self
+    }
+    fn response(&self, url: reqwest::Url) -> Result<reqwest::blocking::Response> {
+        #[cfg(not(test))]
+        pace_requests(&LAST_REQUEST, Instant::now, std::thread::sleep);
+        ensure!(!self.cancel.is_cancelled(), "Операция Толка отменена");
+        let response = self
+            .http
+            .get(url)
+            .header("X-Auth-Token", &self.key)
+            .send()
+            .map_err(|_| {
+                NetworkError("Не удалось получить данные Толка: сеть или таймаут".into())
+            })?;
+        let code = response.status().as_u16();
+        ensure!(
+            code != 429,
+            NetworkError("Толк: превышен лимит 50 запросов в минуту; повторите позже".into())
+        );
+        ensure!(
+            code != 401,
+            NetworkError("Толк: ключ не принят (HTTP 401)".into())
+        );
+        ensure!(
+            response.status().is_success(),
+            NetworkError(format!("Толк: HTTP {code}; редиректы запрещены"))
+        );
+        Ok(response)
+    }
+    pub fn download_recording(&self, recording: &Recording, out: &mut impl Write) -> Result<u64> {
+        let quality = recording.smallest_quality()?;
+        let url = self
+            .base
+            .join(
+                quality
+                    .file_url
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("Нет адреса записи Толка"))?,
+            )
+            .map_err(|_| anyhow::anyhow!("Некорректный адрес записи Толка"))?;
+        ensure!(
+            url.origin() == self.base.origin()
+                && url.scheme() == self.base.scheme()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.fragment().is_none(),
+            "Запись Толка должна находиться на настроенном HTTPS host"
+        );
+        let response = self.response(url)?;
+        ensure!(
+            response
+                .content_length()
+                .is_none_or(|size| size <= AUDIO_LIMIT),
+            "Запись Толка больше 300 МБ"
+        );
+        stream_audio(
+            response,
+            out,
+            AUDIO_LIMIT,
+            Instant::now() + Duration::from_secs(600),
+            &self.cancel,
+        )
     }
     fn get<T: DeserializeOwned>(&self, path: &[&str], query: &[(&str, String)]) -> Result<T> {
         ensure!(!self.cancel.is_cancelled(), "Операция Толка отменена");
@@ -232,25 +376,7 @@ impl Client {
             url.query_pairs_mut()
                 .extend_pairs(query.iter().map(|(k, v)| (*k, v)));
         }
-        #[cfg(not(test))]
-        pace_requests(&LAST_REQUEST, Instant::now, std::thread::sleep);
-        ensure!(!self.cancel.is_cancelled(), "Операция Толка отменена");
-        let response = self
-            .http
-            .get(url)
-            .header("X-Auth-Token", &self.key)
-            .send()
-            .map_err(|_| anyhow::anyhow!("Не удалось получить данные Толка: сеть или таймаут"))?;
-        let code = response.status().as_u16();
-        ensure!(
-            code != 429,
-            "Толк: превышен лимит 50 запросов в минуту; повторите позже"
-        );
-        ensure!(code != 401, "Толк: ключ не принят (HTTP 401)");
-        ensure!(
-            response.status().is_success(),
-            "Толк: HTTP {code}; редиректы запрещены"
-        );
+        let response = self.response(url)?;
         let bytes = read_body_cancel(response, Instant::now() + BODY_DEADLINE, &self.cancel)?;
         ensure!(!self.cancel.is_cancelled(), "Операция Толка отменена");
         serde_json::from_slice(&bytes)

@@ -121,7 +121,17 @@ pub struct Bookmark {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VoiceRecognition {
+    pub voice_id: String,
+    pub similarity_milli: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Transcript {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub voice_recognitions: std::collections::BTreeMap<String, VoiceRecognition>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub voice_rejected: std::collections::BTreeSet<String>,
     /// Speaker ID to source recording ID; no remote transcript text.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub ktalk_sources: std::collections::BTreeMap<String, String>,
@@ -143,6 +153,8 @@ impl Default for Transcript {
     fn default() -> Self {
         Self {
             version: SCHEMA_VERSION,
+            voice_recognitions: Default::default(),
+            voice_rejected: Default::default(),
             ktalk_sources: Default::default(),
             segments: Vec::new(),
             bookmarks: Vec::new(),
@@ -170,6 +182,9 @@ impl Transcript {
 
     pub fn rename_speaker(&mut self, id: &str, name: &str) -> bool {
         let name = name.trim();
+        if !name.is_empty() {
+            self.voice_recognitions.remove(id);
+        }
         if name.is_empty() || self.speaker_names.get(id).is_some_and(|n| n == name) {
             return false;
         }

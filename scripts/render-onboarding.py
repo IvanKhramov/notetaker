@@ -90,9 +90,26 @@ impl Panel { pub fn fixture(&mut self,state:&AppState) {
     }); }
 } }
 """
+    if path.stem == "voice_learning":
+        text += """
+impl LearningUi {
+    pub fn fixture(&mut self, root:&std::path::Path, stage:usize) {
+        self.root=Some(root.into());self.days=60;
+        let now=chrono::Utc::now();
+        let recordings=(0..42).map(|i|ktalk::Recording {id:format!("neutral-{i}"),title:"Планирование проекта".into(),created_date:now,duration:1200,status:"complete".into(),qualities:vec![],has_audio_record:true,transcription:None}).collect();
+        let plan=LearningPlan {origin:"https://neutral.ktalk.ru".into(),recordings,estimated_bytes:3_225_600_000,cutoff:now-chrono::Duration::days(60)};
+        if stage==0 {self.status="Доступно записей: 42 · оценка загрузки: до 3225 МБ".into();self.plan=Some(plan);}
+        else if stage==1 {
+            self.queue=LearningQueue::begin(plan.origin.clone(),&plan);self.queue.attempted=6;self.queue.people=(0..9).map(|i|format!("person-{i}")).collect();self.plan=Some(plan);
+            let (_,rx)=mpsc::channel();self.receiver=Some(rx);
+            self.status="Учу голоса: запись 7 из 42 · выучено людей: 9".into();
+        } else {self.queue=LearningQueue {origin:plan.origin,total:38,attempted:38,no_speech:4,network_errors:2,people:(0..12).map(|i|format!("person-{i}")).collect(),..Default::default()};}
+    }
+}
+"""
     if path.stem == "speakers":
         text = text.replace('let form_key = egui::Id::unique(("speaker-rename-form", meta.id, id));', 'let form_key = egui::Id::unique(("speaker-rename-form", meta.id, id)); if ui.ctx().data(|data|data.get_temp::<bool>(egui::Id::unique("fixture-rename-form")).unwrap_or(false)) {ui.data_mut(|data| {data.insert_temp(form_key,true);data.insert_temp(form_key.with("focus"),true);});}')
-        text = text.replace(".close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)", '.open({let show=ui.ctx().data_mut(|data| {let id=egui::Id::unique("fixture-speaker-menu");let show=data.get_temp::<bool>(id).unwrap_or(false);data.insert_temp(id,false);show});show || egui::Popup::is_id_open(ui.ctx(), egui::Popup::menu(anchor).get_id())}).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)')
+        text = text.replace(".close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)", '.open({let show=ui.ctx().data_mut(|data| {let id=egui::Id::unique("fixture-speaker-menu");let show=data.get_temp::<bool>(id).unwrap_or(false);data.insert_temp(id,false);show});show || (id=="speaker_1" && ui.ctx().data_mut(|d|d.remove_temp::<bool>(egui::Id::unique("fixture-voice-menu")).unwrap_or(false))) || egui::Popup::is_id_open(ui.ctx(), egui::Popup::menu(anchor).get_id())}).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)')
     if path.stem == "calendar_ui":
         text = text.replace('theme::disclosure("Пропущенные события")', 'theme::disclosure("Пропущенные события").default_open(true)')
         text = text.replace('theme::disclosure("Где взять ссылку")', 'theme::disclosure("Где взять ссылку").default_open(!ui.ctx().data(|d|d.get_temp::<bool>(egui::Id::unique("calendar-status-preview")).unwrap_or(false)))')
@@ -281,13 +298,31 @@ impl NotetakerApp {
             app.state.calendar_checked=Some(Instant::now());
             if scene==76 || scene==77 {app.show_settings=true;app.settings_panel.section=crate::settings::Section::Calendars;}
         }
+        if (78..=83).contains(&scene) {
+            app.state.settings.voice_library=true;app.state.settings_draft=app.state.settings.clone();
+            app.state.voices.voices.push(notetaker_core::Voice {id:Some("fixture-voice".into()),name:"Анна Петрова".into(),embeddings:vec![vec![1.0,0.0]],updated_at:chrono::Utc::now(),is_me:false,sample_sources:Default::default(),tolk_identities:Default::default()});
+            app.state.voices.recognition_checks=std::collections::BTreeMap::from([("one".into(),false),("two".into(),true),("three".into(),false)]);
+            if scene<=79 {
+                app.home=false;app.state.tab=Tab::Transcript;
+                let document=app.state.documents.get_mut(app.state.selected.as_ref().unwrap()).unwrap();
+                document.data.transcript.speaker_names.insert("speaker_1".into(),"Анна Петрова".into());
+                document.data.transcript.speaker_voice_ids.insert("speaker_1".into(),"fixture-voice".into());
+                document.data.transcript.voice_recognitions.insert("speaker_1".into(),notetaker_core::VoiceRecognition {voice_id:"fixture-voice".into(),similarity_milli:846});
+                document.data.meeting.write_transcript(&document.data.transcript).unwrap();document.data.revisions.transcript=document.data.meeting.load_transcript().unwrap().revision;
+            } else {
+                app.show_settings=true;app.settings_panel.section=if scene==80 {crate::settings::Section::Recording} else {crate::settings::Section::Ktalk};
+                app.state.ktalk.address="https://neutral.ktalk.ru".into();app.state.ktalk.saved=true;app.state.ktalk.status="Подключено: Oleg Sidorov".into();
+                app.state.ktalk.settings=Some(notetaker_llm::ktalk::Settings {base_url:app.state.ktalk.address.clone(),credential_id:"neutral".into(),api_key_env:None,extra:Default::default()});
+                if scene>=81 {app.state.ktalk.learning.fixture(&app.state.settings.library,scene-81);}
+            }
+        }
         app
     }
     pub fn fixture_jump_settled(&self) -> bool { self.state.selected.as_ref().and_then(|path| self.state.documents.get(path)).is_none_or(|document| document.speaker_ui.scroll_to.is_none()) }
     pub fn pill(ui: &mut egui::Ui) { recording_pill(ui, Duration::from_secs(123), 0.3); }
 }
 '''
-    if args.source_ref or path.stem in {"ui", "state", "quickstart", "people", "organization", "maintenance", "trackers", "theme", "calendar_ui", "speakers", "settings"}:
+    if args.source_ref or path.stem in {"ui", "state", "quickstart", "people", "organization", "maintenance", "trackers", "theme", "calendar_ui", "speakers", "settings", "voice_learning"}:
         path = harness / "src" / path.name
         path.write_text(text)
     modules.append(f'#[path = "{path}"] mod {path.stem};')
@@ -308,6 +343,9 @@ impl eframe::App for Preview {
         if self.screen==66 && ui.ctx().content_rect().height()<600.0 {
             ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("fixture-recording-settings-offset"),240.0_f32));
         }
+        ui.ctx().data_mut(|d|d.insert_temp(egui::Id::unique("fixture-voice-menu"),self.screen==79));
+        if self.screen==80 {ui.ctx().data_mut(|d|d.insert_temp(egui::Id::unique("fixture-recording-settings-offset"),350.0_f32));}
+        if self.screen>=81 && ui.ctx().content_rect().height()<600.0 {ui.ctx().data_mut(|d|d.insert_temp(egui::Id::unique("fixture-recording-settings-offset"),300.0_f32));}
         self.app.ui(ui, frame);
         if self.screen==33 {
             let ctx=ui.ctx().clone();
@@ -428,7 +466,7 @@ if shutil.disk_usage(root).free < 2 * 1024**3:
 # Resolve the derived harness root against the copied workspace lock before its locked build.
 subprocess.run(["cargo", "metadata", "--offline", "--format-version", "1", "--manifest-path", str(harness / "Cargo.toml")], cwd=root, env=env, check=True, stdout=subprocess.DEVNULL)
 subprocess.run(["cargo", "build", "--locked", "--manifest-path", str(harness / "Cargo.toml")], cwd=root, env=env, check=True)
-names = ["welcome", "name", "connections", "home", "note", "transcript", "general", "recording", "calendars", "ai", "search", "storage", "recording-pill", "connections-expanded", "delete-confirm", "meeting-menu", "toast", "empty-library", "narrow-settings", "recording-bar", "chat", "tasks", "people", "person", "series", "digest", "folders", "diagnostics", "tracker-preview", "new-recording", "rename", "regenerate", "capture-warning", "widgets", "update-card", "folder-delete", "merge-people", "folders-advanced", "ai-expanded", "performance-transcript", "performance-meetings", "performance-live", "chat-meeting-empty", "chat-library-empty", "chat-recipes", "chat-recording", "recording-silence", "recording-final-pass", "recording-ready", "recording-not-ready", "summary-skipped", "calendar-reminder-link", "calendar-reminder-no-link", "calendar-upcoming", "calendar-help", "direct-task-checkboxes", "direct-template-bar", "direct-template-picker", "direct-speaker-menu", "compact-transcript", "compact-summary", "compact-storage", "compact-person", "compact-series", "one-step-bar", "one-step-countdown", "one-step-settings", "one-step-auto-title", "ktalk-settings-empty", "ktalk-settings-connected", "ktalk-preview", "ktalk-transcript", "ktalk-success", "calendar-home-events", "calendar-home-empty", "calendar-home-error", "calendar-settings-status", "calendar-settings-error"]
+names = ["welcome", "name", "connections", "home", "note", "transcript", "general", "recording", "calendars", "ai", "search", "storage", "recording-pill", "connections-expanded", "delete-confirm", "meeting-menu", "toast", "empty-library", "narrow-settings", "recording-bar", "chat", "tasks", "people", "person", "series", "digest", "folders", "diagnostics", "tracker-preview", "new-recording", "rename", "regenerate", "capture-warning", "widgets", "update-card", "folder-delete", "merge-people", "folders-advanced", "ai-expanded", "performance-transcript", "performance-meetings", "performance-live", "chat-meeting-empty", "chat-library-empty", "chat-recipes", "chat-recording", "recording-silence", "recording-final-pass", "recording-ready", "recording-not-ready", "summary-skipped", "calendar-reminder-link", "calendar-reminder-no-link", "calendar-upcoming", "calendar-help", "direct-task-checkboxes", "direct-template-bar", "direct-template-picker", "direct-speaker-menu", "compact-transcript", "compact-summary", "compact-storage", "compact-person", "compact-series", "one-step-bar", "one-step-countdown", "one-step-settings", "one-step-auto-title", "ktalk-settings-empty", "ktalk-settings-connected", "ktalk-preview", "ktalk-transcript", "ktalk-success", "calendar-home-events", "calendar-home-empty", "calendar-home-error", "calendar-settings-status", "calendar-settings-error", "voice-recognised", "voice-recognised-menu", "voice-settings", "voice-learning-plan", "voice-learning-running", "voice-learning-finished"]
 def render(spec):
     index, name, theme, width, height, zoom = spec
     actual_width = 760 if name == "narrow-settings" and zoom == 1.0 else width

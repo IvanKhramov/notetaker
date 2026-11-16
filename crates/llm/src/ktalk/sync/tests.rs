@@ -7,6 +7,9 @@ fn start() -> DateTime<Utc> {
 }
 fn recording(id: &str, delta: i64, duration: u32) -> Recording {
     Recording {
+        qualities: Vec::new(),
+        has_audio_record: false,
+        transcription: None,
         id: id.into(),
         title: format!("Встреча {id}"),
         created_date: start() + chrono::Duration::seconds(delta),
@@ -939,4 +942,44 @@ fn local_owner_is_identified_uniquely_and_never_uses_the_system_track() {
             .iter()
             .all(|voice| voice.track.is_none())
     );
+}
+
+#[test]
+fn tolk_can_replace_voice_names_but_not_user_confirmation() {
+    let (mut local, remote) = fixture(0);
+    local
+        .speaker_names
+        .insert("s1".into(), "Ошибочная догадка".into());
+    local.voice_recognitions.insert(
+        "s1".into(),
+        notetaker_core::VoiceRecognition {
+            voice_id: "voice-old".into(),
+            similarity_milli: 800,
+        },
+    );
+    let p = plan(
+        &local,
+        start(),
+        recording("a", 0, 400),
+        &remote,
+        Some(&owner()),
+    )
+    .unwrap();
+    assert!(p.after.segments.iter().any(|s| s.speaker.0 != "s1"));
+    assert!(
+        !p.after
+            .speaker_names
+            .values()
+            .any(|name| name == "Ошибочная догадка")
+    );
+    local.voice_recognitions.clear();
+    let p = plan(
+        &local,
+        start(),
+        recording("a", 0, 400),
+        &remote,
+        Some(&owner()),
+    )
+    .unwrap();
+    assert_eq!(p.after.speaker_name("s1"), "Ошибочная догадка");
 }

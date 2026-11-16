@@ -226,3 +226,157 @@ fn slow_body_stops_at_the_deadline_and_large_body_at_the_limit() {
     assert!(error.to_string().contains("16 МиБ"));
     assert_eq!(super::read_body(&b"{}"[..], far).unwrap(), b"{}");
 }
+
+fn audio_recording() -> Recording {
+    Recording {
+        id: "recording".into(),
+        title: "Нейтральная запись".into(),
+        created_date: "2026-11-16T10:00:00Z".parse().unwrap(),
+        duration: 12,
+        status: "complete".into(),
+        qualities: vec![
+            RecordingQuality {
+                name: "720p".into(),
+                file_url: Some("/large".into()),
+                status: "complete".into(),
+            },
+            RecordingQuality {
+                name: "240p".into(),
+                file_url: Some("/recording-blob/recording/240p?private-query=test".into()),
+                status: "complete".into(),
+            },
+        ],
+        has_audio_record: true,
+        transcription: Some(TranscriptionStatus {
+            status: "complete".into(),
+        }),
+    }
+}
+#[test]
+fn audio_uses_smallest_quality_auth_and_same_origin_without_redirects() {
+    let record = audio_recording();
+    let (client, task) = server(200, vec![1, 2, 3, 4]);
+    let mut out = Vec::new();
+    client.download_recording(&record, &mut out).unwrap();
+    assert_eq!(out, [1, 2, 3, 4]);
+    let request = task.join().unwrap().to_lowercase();
+    assert!(request.contains("get /recording-blob/recording/240p?private-query=test"));
+    assert!(request.contains("x-auth-token: test-secret"));
+    let (client, task) = server(302, vec![]);
+    let error = client
+        .download_recording(&record, &mut Vec::new())
+        .unwrap_err()
+        .to_string();
+    task.join().unwrap();
+    assert!(error.contains("302"));
+    assert!(!error.contains("test-secret") && !error.contains("private-query"));
+    let mut foreign = record;
+    foreign.qualities = vec![RecordingQuality {
+        name: "240p".into(),
+        file_url: Some("https://other.example.invalid/private?secret=test".into()),
+        status: "complete".into(),
+    }];
+    assert!(
+        client
+            .download_recording(&foreign, &mut Vec::new())
+            .unwrap_err()
+            .to_string()
+            .contains("настроенном")
+    );
+}
+#[test]
+fn audio_stream_cap_deadline_and_cancel_fail_without_unbounded_allocation() {
+    let cancel = crate::Cancellation::default();
+    let mut out = Vec::new();
+    assert!(
+        stream_audio(
+            std::io::repeat(0).take(1025),
+            &mut out,
+            1024,
+            Instant::now() + Duration::from_secs(1),
+            &cancel
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("300 МБ")
+    );
+    assert!(out.len() <= 1024);
+    assert!(
+        stream_audio(
+            &[0u8][..],
+            std::io::sink(),
+            AUDIO_LIMIT,
+            Instant::now() - Duration::from_secs(1),
+            &cancel
+        )
+        .is_err()
+    );
+    cancel.cancel();
+    assert!(
+        stream_audio(
+            &[0u8][..],
+            std::io::sink(),
+            AUDIO_LIMIT,
+            Instant::now() + Duration::from_secs(1),
+            &cancel
+        )
+        .is_err()
+    );
+}
+#[test]
+fn advertised_audio_over_300_mb_is_rejected_before_writing() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            stream.read_exact(&mut byte).unwrap();
+            request.push(byte[0]);
+        }
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            AUDIO_LIMIT + 1
+        )
+        .unwrap();
+    });
+    let client = Client::build(
+        reqwest::Url::parse(&format!("http://{address}")).unwrap(),
+        "test-secret",
+    )
+    .unwrap();
+    let mut out = Vec::new();
+    let error = client
+        .download_recording(&audio_recording(), &mut out)
+        .unwrap_err();
+    assert!(error.to_string().contains("300 МБ"));
+    assert!(!format!("{error:#}").contains("test-secret"));
+    assert!(out.is_empty());
+    task.join().unwrap();
+}
+#[test]
+fn history_plan_counts_ready_recordings_and_estimates_download_without_media_gets() {
+    let ready = serde_json::json!({"id":"one","title":"Нейтральный обзор","createdDate":"2026-11-16T10:00:00Z","duration":100,"status":"complete","qualities":[{"name":"240p","fileUrl":"/recording-blob/one/240p","status":"complete"}],"transcription":{"status":"complete"}});
+    let mut pending = ready.clone();
+    pending["id"] = "two".into();
+    pending["transcription"]["status"] = "processing".into();
+    let (client, task) = server(
+        200,
+        serde_json::to_vec(&serde_json::json!({"recordings":[ready,pending]})).unwrap(),
+    );
+    let plan =
+        crate::ktalk::learning_plan(&client, "2026-09-17T10:00:00Z".parse().unwrap()).unwrap();
+    assert_eq!(plan.recordings.len(), 1);
+    assert_eq!(plan.estimated_bytes, 6_400_000);
+    task.join().unwrap();
+    let queue = crate::ktalk::LearningQueue::begin("https://neutral.example.invalid".into(), &plan);
+    let mut resumed: crate::ktalk::LearningQueue =
+        serde_json::from_slice(&serde_json::to_vec(&queue).unwrap()).unwrap();
+    assert!(resumed.active);
+    assert_eq!(resumed.remaining, vec!["one"]);
+    resumed.finish_recording("one", vec!["identity".into()], false);
+    assert!(!resumed.active);
+    assert!(resumed.processed.contains("one"));
+}

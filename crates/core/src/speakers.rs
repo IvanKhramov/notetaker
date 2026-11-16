@@ -82,6 +82,8 @@ impl Transcript {
             // A confirmed source identity takes precedence over a target guess.
             self.speaker_voice_ids.remove(into);
         }
+        self.voice_recognitions.remove(from);
+        self.voice_recognitions.remove(into);
         self.speaker_suggestions.remove(from);
         if self.speaker_names.contains_key(into) {
             self.speaker_suggestions.remove(into);
@@ -100,7 +102,9 @@ impl Transcript {
 
     /// Preserve text corrections made after the merge; reject intervening speaker edits.
     pub fn undo_merge(&mut self, undo: &MergeUndo) -> Result<()> {
-        if self.speaker_names != undo.after.speaker_names
+        if self.voice_recognitions != undo.after.voice_recognitions
+            || self.voice_rejected != undo.after.voice_rejected
+            || self.speaker_names != undo.after.speaker_names
             || self.speaker_suggestions != undo.after.speaker_suggestions
             || self.speaker_voice_ids != undo.after.speaker_voice_ids
             || self.self_speaker != undo.after.self_speaker
@@ -125,6 +129,9 @@ impl Transcript {
         self.speaker_voice_ids
             .clone_from(&undo.before.speaker_voice_ids);
         self.self_speaker.clone_from(&undo.before.self_speaker);
+        self.voice_recognitions
+            .clone_from(&undo.before.voice_recognitions);
+        self.voice_rejected.clone_from(&undo.before.voice_rejected);
         Ok(())
     }
 

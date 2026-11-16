@@ -13,10 +13,19 @@ use crate::{Library, Meeting, Result, Transcript, storage::meeting_lock};
 
 pub const VOICE_MODEL: &str = "eres2net-base";
 pub const SUGGESTION_THRESHOLD: f32 = 0.65;
+pub const AUTOMATIC_THRESHOLD: f32 = 0.70;
+pub const AUTOMATIC_MARGIN: f32 = 0.10;
+mod learning;
+mod recognition;
+
 pub const SELF_THRESHOLD: f32 = 0.85;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Voice {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sample_sources: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub tolk_identities: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     pub name: String,
@@ -28,6 +37,8 @@ pub struct Voice {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VoiceLibrary {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub recognition_checks: BTreeMap<String, bool>,
     pub model: String,
     pub voices: Vec<Voice>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
@@ -37,6 +48,7 @@ impl Default for VoiceLibrary {
     fn default() -> Self {
         Self {
             model: VOICE_MODEL.into(),
+            recognition_checks: Default::default(),
             voices: Vec::new(),
             tolk_samples: BTreeSet::new(),
         }
@@ -60,6 +72,8 @@ pub fn cosine(a: &[f32], b: &[f32]) -> Option<f32> {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VoiceEvidence {
+    #[serde(default)]
+    pub recording_id: Option<String>,
     pub speaker: String,
     pub name: String,
     pub registered: bool,
@@ -68,6 +82,7 @@ pub struct VoiceEvidence {
     pub ranges: Vec<(u64, u64)>,
 }
 pub struct VoiceSample {
+    pub recording_id: Option<String>,
     pub speaker: String,
     pub name: String,
     pub embedding: Vec<f32>,
@@ -79,14 +94,9 @@ fn same_name(a: &str, b: &str) -> bool {
     a.trim().to_lowercase() == b.trim().to_lowercase()
 }
 fn add_sample(voice: &mut Voice, embedding: &Vec<f32>) {
-    if !voice.embeddings.contains(embedding) {
-        if voice.embeddings.len() >= 8 {
-            voice.embeddings.remove(0);
-        }
-        voice.embeddings.push(embedding.clone());
-        voice.updated_at = Utc::now();
-    }
+    learning::add_diverse_sample(voice, embedding, None);
 }
+
 fn microphone_speaker(transcript: &Transcript, speaker: &str) -> bool {
     transcript
         .segments
@@ -98,6 +108,7 @@ fn microphone_speaker(transcript: &Transcript, speaker: &str) -> bool {
             .filter(|segment| segment.speaker.0 == speaker)
             .all(|segment| segment.channel == crate::Channel::Mic)
 }
+#[derive(Clone, Copy)]
 enum VoiceKey<'a> {
     Name,
     Linked(&'a str),
@@ -159,12 +170,14 @@ impl VoiceLibrary {
         else {
             return None;
         };
-        let correcting = !everywhere
-            && !transcript.speaker_names.contains_key(speaker)
-            && transcript
-                .speaker_suggestions
-                .get(speaker)
-                .is_some_and(|guess| guess != name.trim());
+        let guess = if transcript.voice_recognitions.contains_key(speaker) {
+            transcript.speaker_names.get(speaker)
+        } else if !transcript.speaker_names.contains_key(speaker) {
+            transcript.speaker_suggestions.get(speaker)
+        } else {
+            None
+        };
+        let correcting = !everywhere && guess.is_some_and(|guess| guess != name.trim());
         let linked = if correcting {
             None
         } else {
@@ -181,6 +194,7 @@ impl VoiceLibrary {
         .err()
         .map(String::from)
     }
+    #[cfg(test)]
     fn enroll(
         &mut self,
         key: VoiceKey<'_>,
@@ -188,6 +202,21 @@ impl VoiceLibrary {
         own: bool,
         embedding: &Vec<f32>,
     ) -> Result<usize> {
+        self.enroll_evidence(key, name, own, embedding, None)
+    }
+    fn enroll_evidence(
+        &mut self,
+        key: VoiceKey<'_>,
+        name: &str,
+        own: bool,
+        embedding: &Vec<f32>,
+        source: Option<&str>,
+    ) -> Result<usize> {
+        let stable = if let VoiceKey::Stable(id) = key {
+            Some(id.to_owned())
+        } else {
+            None
+        };
         let linked = match key {
             VoiceKey::Name => None,
             VoiceKey::Linked(id) | VoiceKey::Stable(id) => Some(id),
@@ -195,6 +224,15 @@ impl VoiceLibrary {
         let existing = self
             .identity(name, linked, own)
             .map_err(|reason| crate::Error::SpeakerEdit(reason.into()))?;
+        if own
+            && let (Some(index), Some(stable)) = (existing, stable.as_ref())
+            && !self.voices[index].tolk_identities.is_empty()
+            && !self.voices[index].tolk_identities.contains(stable)
+        {
+            return Err(crate::Error::SpeakerEdit(
+                "Владелец ключа не совпадает с сохранённым собственным голосом".into(),
+            ));
+        }
         let index = existing.unwrap_or_else(|| {
             let proposed = match key {
                 VoiceKey::Stable(id)
@@ -209,6 +247,8 @@ impl VoiceLibrary {
                 _ => uuid::Uuid::now_v7().to_string(),
             };
             self.voices.push(Voice {
+                sample_sources: Default::default(),
+                tolk_identities: Default::default(),
                 id: Some(proposed),
                 name: name.trim().into(),
                 embeddings: Vec::new(),
@@ -217,7 +257,10 @@ impl VoiceLibrary {
             });
             self.voices.len() - 1
         });
-        add_sample(&mut self.voices[index], embedding);
+        if let Some(stable) = stable {
+            self.voices[index].tolk_identities.insert(stable);
+        }
+        learning::add_diverse_sample(&mut self.voices[index], embedding, source);
         Ok(index)
     }
     fn ensure_ids(&mut self) {
@@ -392,11 +435,12 @@ impl Library {
                     "Некорректный отпечаток голоса".into(),
                 ));
             }
-            match voices.enroll(
+            match voices.enroll_evidence(
                 VoiceKey::Stable(&sample.speaker),
                 &sample.name,
                 sample.own,
                 &sample.embedding,
+                sample.recording_id.as_deref(),
             ) {
                 Ok(_) => {
                     cache.embeddings.insert(
@@ -446,6 +490,7 @@ impl Library {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(e.into()),
         };
+        let sample_source = format!("meeting:{id}");
         let meeting: MeetingVoices = serde_json::from_slice(&bytes)?;
         if meeting.model != VOICE_MODEL {
             return Ok(());
@@ -458,8 +503,12 @@ impl Library {
         if library.model != VOICE_MODEL {
             return Ok(());
         }
+        let before = library.clone();
         library.ensure_ids();
         for (id, name) in &transcript.speaker_names {
+            if transcript.voice_recognitions.contains_key(id) {
+                continue;
+            }
             let Some(embedding) = meeting
                 .embeddings
                 .get(id)
@@ -478,9 +527,12 @@ impl Library {
                         VoiceKey::Linked(id)
                     }
                 });
-            library.enroll(key, name, is_me, embedding)?;
+            library.enroll_evidence(key, name, is_me, embedding, Some(&sample_source))?;
         }
-        write_json(&path, &library)
+        if library != before {
+            write_json(&path, &library)?;
+        }
+        Ok(())
     }
 }
 
@@ -496,6 +548,8 @@ mod tests {
         assert!(cosine(&[1.0], &[1.0, 0.0]).is_none());
         let mut library = VoiceLibrary::default();
         library.voices.push(Voice {
+            sample_sources: Default::default(),
+            tolk_identities: Default::default(),
             id: None,
             name: "Саша".into(),
             embeddings: vec![vec![1.0, 0.0]],
@@ -504,6 +558,8 @@ mod tests {
         });
         assert_eq!(library.suggest(&[1.0, 0.0]).unwrap().0.name, "Саша");
         library.voices.push(Voice {
+            sample_sources: Default::default(),
+            tolk_identities: Default::default(),
             name: "Другой".into(),
             ..library.voices[0].clone()
         });
@@ -577,6 +633,13 @@ mod storage_tests {
 
 #[derive(Clone, Debug)]
 pub enum SpeakerEdit {
+    RejectVoice {
+        speaker: String,
+    },
+    SelectVoice {
+        speaker: String,
+        voice_id: String,
+    },
     Merge {
         from: String,
         into: String,
@@ -677,7 +740,35 @@ impl Library {
             voice_status: String::new(),
         };
         let mut propagation = None;
+        let explicit_voice = matches!(&edit, SpeakerEdit::SelectVoice { .. });
+        let edit = if let SpeakerEdit::SelectVoice { speaker, voice_id } = edit {
+            let voice = voices
+                .as_ref()
+                .and_then(|bank| {
+                    bank.voices
+                        .iter()
+                        .find(|v| v.id.as_deref() == Some(&voice_id))
+                })
+                .ok_or_else(|| crate::Error::SpeakerEdit("Голос не найден в библиотеке".into()))?;
+            let (name, is_me) = (voice.name.clone(), voice.is_me);
+            transcript
+                .speaker_voice_ids
+                .insert(speaker.clone(), voice_id);
+            SpeakerEdit::Rename {
+                speaker,
+                name,
+                is_me,
+                everywhere: false,
+            }
+        } else {
+            edit
+        };
+        let before_voices = voices.clone();
         match edit {
+            SpeakerEdit::SelectVoice { .. } => unreachable!("resolved above"),
+            SpeakerEdit::RejectVoice { speaker } => {
+                transcript.reject_voice(&speaker);
+            }
             SpeakerEdit::Merge { from, into } => {
                 let merge = transcript.merge_speakers(&from, &into)?;
                 let mut snapshots = None;
@@ -774,12 +865,14 @@ impl Library {
                 }
                 // Correcting an unconfirmed guess creates/selects the named identity.
                 // An explicit global rename deliberately retains the matched identity.
-                if !everywhere
-                    && !transcript.speaker_names.contains_key(&speaker)
-                    && transcript
-                        .speaker_suggestions
-                        .get(&speaker)
-                        .is_some_and(|guess| guess != name.trim())
+                let guess = if transcript.voice_recognitions.contains_key(&speaker) {
+                    transcript.speaker_names.get(&speaker)
+                } else if !transcript.speaker_names.contains_key(&speaker) {
+                    transcript.speaker_suggestions.get(&speaker)
+                } else {
+                    None
+                };
+                if !everywhere && !explicit_voice && guess.is_some_and(|guess| guess != name.trim())
                 {
                     transcript.speaker_voice_ids.remove(&speaker);
                 }
@@ -812,11 +905,12 @@ impl Library {
                                     .filter(|embedding| cosine(embedding, embedding).is_some());
 
                                 let index = if let Some(embedding) = embedding {
-                                    Some(voices.enroll(
+                                    Some(voices.enroll_evidence(
                                         linked.as_deref().map_or(VoiceKey::Name, VoiceKey::Linked),
                                         &name,
                                         own_voice,
                                         embedding,
+                                        Some(&format!("meeting:{}", meeting.read_meta()?.id)),
                                     )?)
                                 } else {
                                     existing
@@ -847,7 +941,9 @@ impl Library {
         if let Some(clusters) = clusters {
             write_json(&self.meeting_voices_path(meeting)?, &clusters)?;
         }
-        if let Some(voices) = voices {
+        if let Some(voices) = voices
+            && Some(&voices) != before_voices.as_ref()
+        {
             write_json(&voices_path, &voices)?;
         }
         if let Some((voice_id, name)) = propagation {
@@ -1094,6 +1190,7 @@ mod identity_tests {
                     &meeting,
                     &text,
                     vec![VoiceSample {
+                        recording_id: None,
                         speaker: "ktalk-user".into(),
                         name: "Анна Петрова".into(),
                         embedding: vector,
