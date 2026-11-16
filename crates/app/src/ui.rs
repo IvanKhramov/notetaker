@@ -2696,7 +2696,8 @@ impl NotetakerApp {
             .show(ctx, |ui| {
                 ui.set_width(width);
                 if let Some(remaining) = ending {
-                    ending_action = crate::detection::stop_card(ui, remaining);
+                    // The recording status row below already shows the next meeting.
+                    ending_action = crate::detection::stop_card(ui, remaining, None);
                 } else if let Some(event) = &event {
                     action = crate::calendar_ui::reminder(ui, event, self.recording_reason());
                 }
@@ -2708,6 +2709,7 @@ impl NotetakerApp {
         match action {
             crate::detection::StopAction::Stop => self.state.accept_call(),
             crate::detection::StopAction::Continue => self.state.dismiss_call(),
+            crate::detection::StopAction::DismissNext => self.state.dismiss_calendar_reminder(),
             crate::detection::StopAction::None => {}
         }
     }
@@ -2759,6 +2761,10 @@ impl NotetakerApp {
         }
         let mut ending_action = crate::detection::StopAction::None;
         let ending = matches!(prompt, Some(CallPrompt::Stop { .. }));
+        // The countdown hides the recording indicator, so it shows its line.
+        let next = ending
+            .then(|| self.state.next_meeting(chrono::Utc::now()))
+            .flatten();
         let mut accept = false;
         let mut dismiss = false;
         let builder = egui::ViewportBuilder::default();
@@ -2769,7 +2775,7 @@ impl NotetakerApp {
             egui::ViewportId::from_hash_of("call-notification"),
             builder
                 .with_title("notetaker · звонок")
-                .with_inner_size([340.0, 140.0])
+                .with_inner_size([340.0, if next.is_some() { 168.0 } else { 140.0 }])
                 .with_resizable(false)
                 .with_decorations(false)
                 .with_transparent(false)
@@ -2779,7 +2785,8 @@ impl NotetakerApp {
                 ui.painter()
                     .rect_filled(ui.max_rect(), 0.0, Palette::of(ui).card);
                 if let Some(CallPrompt::Stop { countdown, .. }) = &prompt {
-                    ending_action = crate::detection::stop_card(ui, countdown.remaining);
+                    ending_action =
+                        crate::detection::stop_card(ui, countdown.remaining, next.as_ref());
                 } else if let Some(event) = &calendar {
                     match crate::calendar_ui::reminder(ui, event, self.recording_reason()) {
                         crate::calendar_ui::Action::Start => accept = true,
