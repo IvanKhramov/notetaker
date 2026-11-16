@@ -36,6 +36,7 @@ pub struct LearningUi {
     offer: bool,
     prepare_after_consent: bool,
     paused: bool,
+    planned_period: Option<u32>,
 }
 impl LearningUi {
     pub fn busy(&self) -> bool {
@@ -60,9 +61,10 @@ impl LearningUi {
         });
     }
     fn prepare(&mut self, settings: Settings, cutoff: chrono::DateTime<chrono::Utc>) {
+        self.planned_period = Some(self.days);
         self.prepare_after_consent = false;
         self.plan = None;
-        self.status = "Получаю список записей Толка…".into();
+        self.status.clear();
         self.spawn(move |control| {
             Completed::Plan((|| {
                 let client = settings
@@ -91,6 +93,7 @@ impl LearningUi {
         if self.days == 0 {
             self.days = 60;
         }
+        self.planned_period = (self.queue.total > 0).then_some(self.days);
         Ok(())
     }
 }
@@ -186,11 +189,7 @@ pub fn poll(state: &mut AppState) -> bool {
         match message {
             Completed::Plan(result) => match result {
                 Ok(plan) => {
-                    learning.status = format!(
-                        "Доступно записей: {} · оценка загрузки: до {} МБ",
-                        plan.recordings.len(),
-                        plan.estimated_bytes / 1_000_000
-                    );
+                    learning.status.clear();
                     learning.plan = Some(plan);
                 }
                 Err(error) => {
@@ -333,125 +332,273 @@ pub fn poll(state: &mut AppState) -> bool {
     }
     true
 }
+// A measured 240p recording was 10.8 MB for 12.7 minutes (about 114 kbit/s).
+// Use 120 kbit/s for the UI estimate; the download safety cap is independent.
+const ESTIMATED_BITS_PER_SECOND: u64 = 120_000;
+
+fn plan_status(plan: &LearningPlan, queue: &LearningQueue) -> String {
+    let bytes: u64 = plan
+        .recordings
+        .iter()
+        .map(|recording| {
+            (u64::from(recording.duration) * ESTIMATED_BITS_PER_SECOND / 8).min(ktalk::AUDIO_LIMIT)
+        })
+        .sum();
+    let megabytes = if bytes == 0 {
+        0
+    } else {
+        ((bytes + 5_000_000) / 10_000_000).max(1) * 10
+    };
+    let mut text = format!(
+        "Записей: {} · загрузка около {megabytes} МБ",
+        plan.recordings.len()
+    );
+    let learned = plan
+        .recordings
+        .iter()
+        .filter(|recording| queue.origin == plan.origin && queue.processed.contains(&recording.id))
+        .count();
+    if learned > 0 {
+        text.push_str(&format!(" · уже выучено: {learned}"));
+    }
+    text
+}
+
+fn learning_summary(queue: &LearningQueue) -> String {
+    let mut text = format!(
+        "Выучено людей: {}, из {} записей",
+        queue.people.len(),
+        queue.attempted
+    );
+    let skipped: Vec<_> = [
+        (queue.no_speech, "нет чистой речи"),
+        (queue.network_errors, "ошибка сети"),
+        (queue.other_errors, "другие ошибки"),
+    ]
+    .into_iter()
+    .filter(|(count, _)| *count > 0)
+    .map(|(count, reason)| format!("{count} ({reason})"))
+    .collect();
+    if !skipped.is_empty() {
+        text.push_str(&format!("; пропущено: {}", skipped.join(", ")));
+    }
+    text
+}
+
 pub fn settings(ui: &mut eframe::egui::Ui, state: &mut AppState) {
     theme::settings_group(ui, "Обучение голосов", |ui| {
-        ui.label("Записи скачиваются по одной во временный файл на этом компьютере и удаляются после обработки. Остаются только локальные отпечатки голосов. Ничего не отправляется.");
         let learning = &mut state.ktalk.learning;
         if learning.days == 0 {
             learning.days = 60;
         }
-        let previous_days = learning.days;
-        ui.add_enabled_ui(!learning.queue.active && !learning.busy(), |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Период:");
-                for days in [30, 60, 180] {
-                    ui.selectable_value(&mut learning.days, days, format!("{days} дней"));
-                }
+        let changed = theme::setting_row(ui, "Период", |ui| {
+            ui.add_enabled_ui(!learning.queue.active && !learning.busy(), |ui| {
+                ui.with_layout(
+                    eframe::egui::Layout::left_to_right(eframe::egui::Align::Center),
+                    |ui| {
+                        theme::segmented_full(
+                            ui,
+                            &mut learning.days,
+                            &[(30, "30 дней"), (60, "60 дней"), (180, "180 дней")],
+                        )
+                    },
+                )
+                .inner
             })
+            .inner
         });
-        if learning.days != previous_days {
+        if changed {
             learning.plan = None;
+            learning.planned_period = None;
             learning.status.clear();
         }
-        if ui
-            .add_enabled(
-                state.ktalk.saved && !learning.busy() && !learning.queue.active,
-                theme::styled_button(
-                    theme::Palette::of(ui),
-                    "Выучить голоса по записям Толка",
-                    ButtonStyle::Secondary,
-                ),
-            )
-            .clicked()
-        {
-            if !state.settings.voice_library {
-                learning.offer = true;
-            } else if let Some(settings) = state.ktalk.settings.clone() {
-                learning.prepare(
-                    settings,
-                    chrono::Utc::now() - chrono::Duration::days(i64::from(learning.days)),
-                );
-            }
-        }
-        if learning.offer
-            && !state.settings.voice_library
-            && let Some(enable) = crate::ktalk::voice_consent(ui)
-        {
-            learning.offer = false;
-            state.ktalk.voice_offer_seen = true;
-            if let Err(error) = crate::ktalk::mark_learning_offer(&state.settings.library) {
-                learning.status = error.to_string();
-            }
-            if enable {
-                state.ktalk.learning.prepare_after_consent = true;
-                state.settings_draft.voice_library = true;
-                state.save_preferences();
-            }
-        }
-        let learning = &mut state.ktalk.learning;
-        if let Some(plan) = &learning.plan
+        // Preparing metadata does not start learning; the single action below does.
+        if learning.planned_period != Some(learning.days)
+            && learning.plan.is_none()
             && !learning.queue.active
             && !learning.busy()
+            && state.ktalk.saved
+            && !state.ktalk.busy
+            && !state.settings_pending
+            && state.settings.voice_library
+            && let Some(settings) = state.ktalk.settings.clone()
         {
-            ui.weak("Оценка для 512 кбит/с; фактический размер зависит от записи, не больше 300 МБ на файл. Уже изученные пары запись/человек пропускаются.");
-            if ui
-                .add_enabled(
-                    state.settings.voice_library
-                        && !plan.recordings.is_empty()
-                        && !state.settings_pending
-                        && state.quickstart.models.diarization == crate::quickstart::Status::Ready,
-                    theme::styled_button(theme::Palette::of(ui), "Начать", ButtonStyle::Primary),
-                )
-                .clicked()
-                && let Some(settings) = &state.ktalk.settings
-            {
-                match ktalk::learning_origin(settings) {
-                    Ok(origin) if origin == plan.origin => {
-                        let processed = if learning.queue.origin == origin {
-                            std::mem::take(&mut learning.queue.processed)
+            learning.prepare(
+                settings,
+                chrono::Utc::now() - chrono::Duration::days(i64::from(learning.days)),
+            );
+        }
+        let finished = !learning.queue.active
+            && !learning.busy()
+            && learning.plan.is_none()
+            && learning.queue.total > 0;
+        if learning.queue.active {
+            theme::settings_footer(ui, |ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(ui.available_width());
+                    let queue = &learning.queue;
+                    theme::recording_status(
+                        ui,
+                        &format!(
+                            "Запись {} из {} · выучено людей: {}",
+                            (queue.attempted + 1).min(queue.total),
+                            queue.total,
+                            queue.people.len()
+                        ),
+                        false,
+                        Some((queue.attempted, queue.total)),
+                    );
+                    if learning.paused {
+                        ui.weak(
+                            "Приостановлено до завершения записи или включения библиотеки голосов",
+                        );
+                    }
+                });
+            });
+        } else if finished {
+            theme::settings_footer(ui, |ui| {
+                ui.label(learning_summary(&learning.queue));
+            });
+        } else {
+            theme::setting_row(ui, "Состояние", |ui| {
+                ui.vertical(|ui| {
+                    if learning.busy() {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.weak(if learning.control.token.is_cancelled() {
+                                "Останавливаю…"
+                            } else {
+                                "Считаю записи…"
+                            });
+                        });
+                    } else if let Some(plan) = &learning.plan {
+                        ui.weak(plan_status(plan, &learning.queue));
+                    } else {
+                        ui.weak(if learning.status.is_empty() {
+                            "Записи ещё не посчитаны"
                         } else {
-                            Default::default()
-                        };
-                        learning.queue = LearningQueue::begin(origin, plan);
-                        learning.queue.processed = processed;
-                        learning.queue.days = learning.days;
-                        if let Err(error) = learning.persist() {
-                            learning.status = error.to_string();
-                            learning.queue.active = false;
-                        }
+                            &learning.status
+                        });
                     }
-                    Ok(_) => {
-                        learning.status =
-                            "Пространство изменилось; получите список записей заново".into()
-                    }
-                    Err(error) => learning.status = error.to_string(),
-                }
-            }
+                });
+            });
         }
-        if learning.queue.active || learning.busy() {
-            if learning.paused {
-                ui.weak("Обучение приостановлено: ASR занят или библиотека выключена");
+        let skipped =
+            learning.queue.no_speech + learning.queue.network_errors + learning.queue.other_errors;
+        let failed_plan =
+            !learning.busy() && learning.plan.is_none() && !learning.status.is_empty();
+        if learning.queue.active {
+            theme::settings_footer(ui, |ui| {
+                if theme::button(ui, "Остановить", ButtonStyle::Secondary).clicked() {
+                    learning.queue.active = false;
+                    learning.plan = None;
+                    learning.status.clear();
+                    learning.control.cancel();
+                    if let Err(error) = learning.persist() {
+                        learning.status = error.to_string();
+                    }
+                }
+            });
+        } else if finished || failed_plan {
+            if skipped > 0 || !learning.queue.remaining.is_empty() || failed_plan {
+                theme::settings_footer(ui, |ui| {
+                    if theme::button(ui, "Повторить", ButtonStyle::Ghost).clicked() {
+                        learning.plan = None;
+                        learning.planned_period = None;
+                        learning.status.clear();
+                    }
+                });
+            }
+        } else {
+            let reason = if !state.ktalk.saved {
+                Some("Сначала сохраните настройки Толка")
+            } else if !state.settings.voice_library {
+                Some("Сначала включите запоминание голосов")
+            } else if state.settings_pending {
+                Some("Дождитесь сохранения настроек")
+            } else if state.quickstart.models.diarization != crate::quickstart::Status::Ready {
+                Some("Скачайте модели голосов в настройках распознавания")
+            } else if learning.busy() || learning.plan.is_none() {
+                Some("Дождитесь списка записей")
+            } else if learning
+                .plan
+                .as_ref()
+                .is_some_and(|plan| plan.recordings.is_empty())
+            {
+                Some("За этот период нет записей с готовой транскрипцией")
             } else {
-                ui.spinner();
-            }
-            if theme::button(ui, "Остановить", ButtonStyle::Ghost).clicked() {
-                learning.queue.active = false;
-                learning.control.cancel();
-                if let Err(error) = learning.persist() {
-                    learning.status = error.to_string();
+                None
+            };
+            theme::settings_footer(ui, |ui| {
+                if ui
+                    .add_enabled(
+                        reason.is_none(),
+                        theme::styled_button(
+                            theme::Palette::of(ui),
+                            "Выучить голоса",
+                            ButtonStyle::Primary,
+                        ),
+                    )
+                    .clicked()
+                    && let (Some(settings), Some(plan)) = (&state.ktalk.settings, &learning.plan)
+                {
+                    match ktalk::learning_origin(settings) {
+                        Ok(origin) if origin == plan.origin => {
+                            let processed = if learning.queue.origin == origin {
+                                std::mem::take(&mut learning.queue.processed)
+                            } else {
+                                Default::default()
+                            };
+                            learning.queue = LearningQueue::begin(origin, plan);
+                            learning.queue.processed = processed;
+                            learning.queue.days = learning.days;
+                            if let Err(error) = learning.persist() {
+                                learning.status = error.to_string();
+                                learning.queue.active = false;
+                            }
+                        }
+                        Ok(_) => {
+                            learning.status =
+                                "Пространство изменилось; получите список записей заново".into()
+                        }
+                        Err(error) => learning.status = error.to_string(),
+                    }
                 }
-            }
+                if let Some(reason) = reason {
+                    ui.weak(reason);
+                }
+            });
         }
-        if !learning.queue.active && learning.queue.total > 0 {
-            ui.label(format!("Выучено людей: {}, из {} записей; пропущено: {} (нет чистой речи), {} (ошибка сети), {} (другие ошибки)",learning.queue.people.len(),learning.queue.attempted,learning.queue.no_speech,learning.queue.network_errors,learning.queue.other_errors));
-        }
-        if state.quickstart.models.diarization != crate::quickstart::Status::Ready {
-            ui.weak("Для обучения нужны модели голосов. Скачайте их в настройках распознавания.");
-        }
-        if !learning.status.is_empty() {
-            ui.weak(&learning.status);
+        if !learning.status.is_empty()
+            && (learning.plan.is_some() || finished)
+            && !learning.queue.active
+        {
+            theme::settings_footer(ui, |ui| {
+                ui.weak(&learning.status);
+            });
         }
     });
+    theme::callout(ui, theme::icons::INFO, |ui| {
+        ui.weak("Записи скачиваются по одной во временный файл на этом компьютере и удаляются после обработки. Остаются только локальные отпечатки голосов. Ничего не отправляется.");
+    });
+    if state.ktalk.saved && !state.settings.voice_library && !state.ktalk.voice_offer_seen {
+        state.ktalk.learning.offer = true;
+    }
+    if state.ktalk.learning.offer
+        && !state.settings.voice_library
+        && let Some(enable) = crate::ktalk::voice_consent(ui)
+    {
+        state.ktalk.learning.offer = false;
+        state.ktalk.voice_offer_seen = true;
+        if let Err(error) = crate::ktalk::mark_learning_offer(&state.settings.library) {
+            state.ktalk.learning.status = error.to_string();
+        }
+        if enable {
+            state.ktalk.learning.prepare_after_consent = true;
+            state.settings_draft.voice_library = true;
+            state.save_preferences();
+        }
+    }
 }
 
 pub fn voice_settings(
@@ -471,6 +618,112 @@ pub fn voice_settings(
     ui.weak(format!(
         "Толк поправил распознавание по голосу: {wrong} раз из {total}"
     ));
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    fn plan() -> LearningPlan {
+        LearningPlan {
+            origin: "https://neutral.ktalk.ru".into(),
+            recordings: (0..42)
+                .map(|i| ktalk::Recording {
+                    id: format!("neutral-{i}"),
+                    title: "Нейтральная встреча".into(),
+                    created_date: chrono::Utc::now(),
+                    duration: 720,
+                    status: "complete".into(),
+                    qualities: vec![],
+                    has_audio_record: true,
+                    transcription: None,
+                })
+                .collect(),
+            estimated_bytes: 0,
+            cutoff: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn display_estimate_uses_duration_rounds_to_tens_and_counts_learned_recordings() {
+        let plan = plan();
+        let queue = LearningQueue {
+            origin: plan.origin.clone(),
+            processed: (0..12).map(|i| format!("neutral-{i}")).collect(),
+            ..Default::default()
+        };
+        assert_eq!(
+            plan_status(&plan, &queue),
+            "Записей: 42 · загрузка около 450 МБ · уже выучено: 12"
+        );
+        let mut short = plan.clone();
+        short.recordings.truncate(1);
+        short.recordings[0].duration = 100;
+        assert_eq!(
+            plan_status(&short, &LearningQueue::default()),
+            "Записей: 1 · загрузка около 10 МБ"
+        );
+    }
+
+    #[test]
+    fn learning_card_has_one_action_and_the_status_precedes_it_in_each_phase() {
+        for phase in 0..4 {
+            let ctx = eframe::egui::Context::default();
+            theme::install(&ctx);
+            let (mut state, _, _) = crate::test_ui::state();
+            state.settings.voice_library = true;
+            state.settings_draft = state.settings.clone();
+            state.ktalk.saved = true;
+            state.ktalk.learning.days = 60;
+            state.ktalk.learning.planned_period = Some(60);
+            state.quickstart.models.diarization = crate::quickstart::Status::Ready;
+            let (tx, rx) = mpsc::channel();
+            let (status, action) = match phase {
+                0 => {
+                    state.ktalk.learning.receiver = Some(rx);
+                    ("Считаю записи…", "Выучить голоса")
+                }
+                1 => {
+                    state.ktalk.learning.plan = Some(plan());
+                    ("Записей: 42 · загрузка около 450 МБ", "Выучить голоса")
+                }
+                2 => {
+                    state.ktalk.learning.queue =
+                        LearningQueue::begin(plan().origin.clone(), &plan());
+                    state.ktalk.learning.queue.attempted = 6;
+                    state.ktalk.learning.queue.people =
+                        (0..9).map(|i| format!("person-{i}")).collect();
+                    ("Запись 7 из 42 · выучено людей: 9", "Остановить")
+                }
+                _ => {
+                    state.ktalk.learning.queue = LearningQueue {
+                        total: 38,
+                        attempted: 38,
+                        no_speech: 4,
+                        people: (0..12).map(|i| format!("person-{i}")).collect(),
+                        ..Default::default()
+                    };
+                    (
+                        "Выучено людей: 12, из 38 записей; пропущено: 4 (нет чистой речи)",
+                        "Повторить",
+                    )
+                }
+            };
+            let output = crate::test_ui::frame(&ctx, vec![], &mut |ui| settings(ui, &mut state));
+            let status_rect = crate::test_ui::text_rect(&output.shapes, status);
+            let action_rect = crate::test_ui::text_rect(&output.shapes, action);
+            assert!(status_rect.bottom() <= action_rect.top());
+            for shape in &output.shapes {
+                if let eframe::egui::epaint::Shape::Text(text) = &shape.shape {
+                    assert!(!text.galley.text().contains("512"));
+                    assert!(!text.galley.text().contains("пары запись/человек"));
+                    assert_ne!(text.galley.text(), "Начать");
+                }
+            }
+            output.drop_without_applying_deltas();
+            drop(tx);
+        }
+    }
 }
 
 #[cfg(test)]

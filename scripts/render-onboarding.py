@@ -94,11 +94,11 @@ impl Panel { pub fn fixture(&mut self,state:&AppState) {
         text += """
 impl LearningUi {
     pub fn fixture(&mut self, root:&std::path::Path, stage:usize) {
-        self.root=Some(root.into());self.days=60;
+        self.root=Some(root.into());self.days=60;self.planned_period=Some(60);
         let now=chrono::Utc::now();
-        let recordings=(0..42).map(|i|ktalk::Recording {id:format!("neutral-{i}"),title:"Планирование проекта".into(),created_date:now,duration:1200,status:"complete".into(),qualities:vec![],has_audio_record:true,transcription:None}).collect();
-        let plan=LearningPlan {origin:"https://neutral.ktalk.ru".into(),recordings,estimated_bytes:3_225_600_000,cutoff:now-chrono::Duration::days(60)};
-        if stage==0 {self.status="Доступно записей: 42 · оценка загрузки: до 3225 МБ".into();self.plan=Some(plan);}
+        let recordings=(0..42).map(|i|ktalk::Recording {id:format!("neutral-{i}"),title:"Планирование проекта".into(),created_date:now,duration:720,status:"complete".into(),qualities:vec![],has_audio_record:true,transcription:None}).collect();
+        let plan=LearningPlan {origin:"https://neutral.ktalk.ru".into(),recordings,estimated_bytes:453_600_000,cutoff:now-chrono::Duration::days(60)};
+        if stage==0 {self.queue.origin=plan.origin.clone();self.queue.processed=(0..12).map(|i|format!("neutral-{i}")).collect();self.plan=Some(plan);}
         else if stage==1 {
             self.queue=LearningQueue::begin(plan.origin.clone(),&plan);self.queue.attempted=6;self.queue.people=(0..9).map(|i|format!("person-{i}")).collect();self.plan=Some(plan);
             let (_,rx)=mpsc::channel();self.receiver=Some(rx);
