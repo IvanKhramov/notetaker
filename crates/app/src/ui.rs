@@ -2595,8 +2595,11 @@ impl NotetakerApp {
                             #[cfg(not(test))]
                             std::thread::spawn(|| {
                                 std::thread::sleep(Duration::from_secs(30));
+                                notetaker_runtime::process::terminate_all();
                                 std::process::exit(0);
                             });
+                            #[cfg(not(test))]
+                            notetaker_runtime::process::terminate_all();
                             ctx.request_repaint();
                         }
                     });
@@ -2726,10 +2729,7 @@ impl NotetakerApp {
         let mut dismiss = false;
         let mut builder = egui::ViewportBuilder::default();
         if let Some(rect) = self.main_rect {
-            let corner = ctx
-                .input(|input| input.viewport().monitor_size)
-                .map_or(rect.right_bottom(), |size| egui::pos2(size.x, size.y));
-            builder = builder.with_position(corner - egui::vec2(360.0, 210.0));
+            builder = builder.with_position(notification_position(rect));
         }
         ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("call-notification"),
@@ -2979,6 +2979,8 @@ impl eframe::App for NotetakerApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         }
         if self.state.can_exit() {
+            #[cfg(not(test))]
+            notetaker_runtime::process::terminate_all();
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         } else if self.state.exit_requested {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -2987,7 +2989,10 @@ impl eframe::App for NotetakerApp {
         }
         if self.state.shutdown.deadline_passed(Instant::now()) {
             #[cfg(not(test))]
-            std::process::exit(0);
+            {
+                notetaker_runtime::process::terminate_all();
+                std::process::exit(0);
+            }
         }
         if self.state.recording.busy()
             || self.state.call_prompt.is_some()
@@ -3885,6 +3890,11 @@ fn parse_position(text: &str) -> Option<egui::Pos2> {
 }
 fn indicator_visible(phase: Phase, minimized: bool, focused: bool, countdown: bool) -> bool {
     phase == Phase::Recording && (minimized || !focused) && !countdown
+}
+/// egui supplies monitor size but no monitor origin. Keep notifications on the
+/// main window's screen by using its absolute outer rectangle for every card.
+fn notification_position(main: egui::Rect) -> egui::Pos2 {
+    main.right_bottom() - egui::vec2(360.0, 210.0)
 }
 fn day_label(date: chrono::NaiveDate, today: chrono::NaiveDate) -> String {
     if date == today {
@@ -5524,6 +5534,24 @@ mod tests {
         for phase in [Phase::Idle, Phase::Starting, Phase::Finalizing] {
             assert!(!indicator_visible(phase, true, false, false));
         }
+    }
+    #[test]
+    fn notification_position_preserves_a_nonzero_or_negative_screen_origin() {
+        let first = egui::Rect::from_min_size(egui::pos2(80.0, 100.0), egui::vec2(1120.0, 760.0));
+        let reference = notification_position(first);
+        for origin in [1920.0, -1920.0] {
+            let main = first.translate(egui::vec2(origin, 0.0));
+            let position = notification_position(main);
+            assert_eq!(position, reference + egui::vec2(origin, 0.0));
+            assert!(main.contains(position));
+        }
+        let mut indicator = IndicatorPosition {
+            spawn: Some(egui::pos2(2200.0, 300.0)),
+            current: None,
+        };
+        indicator.moved(egui::pos2(2500.0, 400.0));
+        indicator.closed();
+        assert_eq!(indicator.spawn, Some(egui::pos2(2500.0, 400.0)));
     }
     #[test]
     fn groups_by_local_calendar_day_including_year_boundary() {

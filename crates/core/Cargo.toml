@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+notetaker-runtime = { path = "../runtime" }
 directories = "6"
 toml = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }

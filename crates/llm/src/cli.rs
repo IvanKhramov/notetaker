@@ -1,7 +1,7 @@
 use std::{
     fs::{self, File},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -12,6 +12,7 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use notetaker_core::Mode;
+use notetaker_runtime::process::{Child, Handle, Kind};
 
 use crate::{CompletionRequest, Provider, ProviderConfig, ProviderKind};
 
@@ -20,12 +21,12 @@ pub struct Cancellation(Arc<CancelState>);
 #[derive(Default)]
 struct CancelState {
     cancelled: AtomicBool,
-    processes: Mutex<Vec<u32>>,
+    processes: Mutex<Vec<Handle>>,
 }
 /// Keeps a child registered until its owner has reaped it.
 pub struct ProcessLease {
     cancel: Cancellation,
-    pid: u32,
+    id: u64,
 }
 impl Drop for ProcessLease {
     fn drop(&mut self) {
@@ -34,20 +35,20 @@ impl Drop for ProcessLease {
             .processes
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|pid| *pid != self.pid);
+            .retain(|handle| handle.id() != self.id);
     }
 }
 impl Cancellation {
     pub fn cancel(&self) {
         self.0.cancelled.store(true, Ordering::Relaxed);
-        for pid in self
+        for handle in self
             .0
             .processes
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
         {
-            terminate_tree(*pid);
+            handle.terminate();
         }
     }
     pub fn is_cancelled(&self) -> bool {
@@ -60,19 +61,15 @@ impl Cancellation {
     pub fn spawn(&self, command: &mut Command) -> Result<(Child, ProcessLease)> {
         let mut processes = self.0.processes.lock().unwrap_or_else(|e| e.into_inner());
         ensure!(!self.cancelled(), "Операция отменена");
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            command.process_group(0);
-        }
-        let child = command.spawn()?;
-        let pid = child.id();
-        processes.push(pid);
+        let child = notetaker_runtime::process::spawn(command, Kind::Background)?;
+        let handle = child.handle();
+        let id = handle.id();
+        processes.push(handle);
         Ok((
             child,
             ProcessLease {
                 cancel: self.clone(),
-                pid,
+                id,
             },
         ))
     }
@@ -330,24 +327,7 @@ fn failure_tail(output: &str) -> String {
     tail.chars().take(300).collect()
 }
 
-fn terminate_tree(pid: u32) {
-    #[cfg(windows)]
-    {
-        let _ = background(Path::new("taskkill.exe"))
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .status();
-    }
-    #[cfg(unix)]
-    {
-        // Each request starts a fresh process group, including npm wrapper children.
-        #[allow(unsafe_code)]
-        unsafe {
-            libc::kill(-(pid as i32), libc::SIGKILL);
-        }
-    }
-}
-fn terminate(child: &mut std::process::Child) {
-    terminate_tree(child.id());
+fn terminate(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
 }

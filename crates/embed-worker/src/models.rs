@@ -39,7 +39,12 @@ pub fn download_plan() -> Result<()> {
 pub fn download() -> Result<()> {
     let root = notetaker_core::embedding::models_dir()?;
     fs::create_dir_all(&root)?;
-    let staging = tempfile::tempdir_in(&root)?;
+    let _lock = model_download::lock(&root, notetaker_core::embedding::MODEL_DIRECTORY)?;
+    let staging = model_download::staging(&root, notetaker_core::embedding::MODEL_DIRECTORY)?;
+    if check().is_ok() {
+        fs::remove_dir_all(staging)?;
+        return Ok(());
+    }
     for (source, name, size, sha) in FILES {
         let partial = root.join(format!(".e5-{name}.part"));
         model_download::download(
@@ -62,31 +67,24 @@ pub fn download() -> Result<()> {
             hash.update(&buffer[..n]);
         }
         if bytes != *size || format!("{:x}", hash.finalize()) != *sha {
+            drop(file);
             model_download::discard_corrupt(&partial)?;
             anyhow::bail!("Не совпал SHA-256 или размер {name}");
         }
-        fs::copy(&partial, staging.path().join(name))?;
+        drop(file);
+        fs::copy(&partial, staging.join(name))?;
         fs::OpenOptions::new()
             .write(true)
-            .open(staging.path().join(name))?
+            .open(staging.join(name))?
             .sync_all()?;
         eprintln!("NOTETAKER_MODEL_INSTALLED {name}");
     }
     let dest = notetaker_core::embedding::model_dir()?;
-    if dest.exists() {
-        // Replace individual verified files atomically; never remove the old model
-        // before both downloads are verified. Identical pinned revisions only.
-        for (_, name, _, _) in FILES {
-            let source = fs::File::open(staging.path().join(name))?;
-            let mut temp = tempfile::NamedTempFile::new_in(&dest)?;
-            std::io::copy(&mut std::io::BufReader::new(source), &mut temp)?;
-            temp.as_file().sync_all()?;
-            temp.persist(dest.join(name))
-                .context("Не удалось установить модель")?;
-        }
-    } else {
-        fs::rename(staging.path(), &dest)?;
+    fs::create_dir_all(&dest)?;
+    for (_, name, _, _) in FILES {
+        fs::rename(staging.join(name), dest.join(name)).context("Не удалось установить модель")?;
     }
+    fs::remove_dir_all(staging)?;
     for (_, name, _, _) in FILES {
         fs::remove_file(root.join(format!(".e5-{name}.part")))?;
     }

@@ -113,6 +113,7 @@ fn main() -> eframe::Result {
             Ok(Box::new(ui::NotetakerApp::new()))
         }),
     );
+    notetaker_runtime::process::terminate_all();
     notetaker_runtime::diagnostics::event(if result.is_ok() {
         "app exit"
     } else {

@@ -7,6 +7,23 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Lock before opening a partial file, and hold through verification and install.
+pub fn lock(root: &Path, id: &str) -> Result<fs::File> {
+    notetaker_runtime::file_lock::exclusive(
+        &root.join(format!(".{id}.lock")),
+        Duration::from_secs(5),
+    )
+    .with_context(|| format!("Не удалось получить блокировку модели {id}"))
+}
+pub fn staging(root: &Path, id: &str) -> Result<std::path::PathBuf> {
+    let path = root.join(format!(".{id}.staging"));
+    if path.exists() {
+        fs::remove_dir_all(&path)?;
+    }
+    fs::create_dir(&path)?;
+    Ok(path)
+}
+
 /// Retain the partial file on transport failure. Only append a validated 206 range.
 pub fn download(url: &str, path: &Path, size: u64, id: &str, stall: Duration) -> Result<()> {
     let mut file = OpenOptions::new()
@@ -102,6 +119,32 @@ pub fn discard_corrupt(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn staging_is_deterministic_and_can_only_be_replaced_under_its_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let holder = lock(root.path(), "semantic").unwrap();
+        let first = staging(root.path(), "semantic").unwrap();
+        fs::write(first.join("model.onnx"), b"old verified model copy").unwrap();
+        let error = notetaker_runtime::file_lock::exclusive(
+            &root.path().join(".semantic.lock"),
+            Duration::from_millis(30),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(first.join("model.onnx").is_file());
+        drop(holder);
+        let _holder = lock(root.path(), "semantic").unwrap();
+        let second = staging(root.path(), "semantic").unwrap();
+        assert_eq!(first, second);
+        assert_eq!(fs::read_dir(second).unwrap().count(), 0);
+        assert_eq!(
+            fs::read_dir(root.path())
+                .unwrap()
+                .filter(|entry| entry.as_ref().unwrap().file_type().unwrap().is_dir())
+                .count(),
+            1
+        );
+    }
     use std::{
         net::TcpListener,
         sync::{Arc, Mutex},

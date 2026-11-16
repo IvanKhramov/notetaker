@@ -43,24 +43,27 @@ fn read_system_language() -> String {
         }
     }
     #[cfg(target_os = "macos")]
-    if let Ok(output) = std::process::Command::new("defaults")
-        .args(["read", "-g", "AppleLocale"])
-        .output()
+    if let Ok(output) =
+        notetaker_runtime::process::output(std::process::Command::new("defaults").args([
+            "read",
+            "-g",
+            "AppleLocale",
+        ]))
     {
         return String::from_utf8_lossy(&output.stdout).trim().into();
     }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        if let Ok(output) = std::process::Command::new("powershell.exe")
-            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-            .args([
-                "-NoProfile",
-                "-Command",
-                "[System.Globalization.CultureInfo]::CurrentUICulture.Name",
-            ])
-            .output()
-        {
+        if let Ok(output) = notetaker_runtime::process::output(
+            std::process::Command::new("powershell.exe")
+                .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+                .args([
+                    "-NoProfile",
+                    "-Command",
+                    "[System.Globalization.CultureInfo]::CurrentUICulture.Name",
+                ]),
+        ) {
             return String::from_utf8_lossy(&output.stdout).trim().into();
         }
     }

@@ -127,10 +127,39 @@ pub fn models_dir() -> Result<PathBuf> {
 
 pub fn installed(root: &Path, model: &ModelManifest) -> Result<PathBuf> {
     let path = root.join(model.id);
-    for file in model.files {
+    let sizes: std::collections::BTreeMap<String, u64> = if model.directory.is_empty() {
         ensure!(
-            path.join(file).is_file(),
-            "missing {}; run notetaker-asr download {}",
+            model.files.len() == 1,
+            "Некорректный манифест одиночной модели"
+        );
+        [(model.files[0].to_owned(), model.size)].into()
+    } else {
+        ensure!(
+            fs::read_to_string(path.join("SHA256"))? == model.sha256,
+            "Версия модели не совпадает"
+        );
+        let entries = fs::read_to_string(path.join("FILES"))?;
+        let sizes: std::collections::BTreeMap<String, u64> = entries
+            .lines()
+            .map(|line| -> Result<_> {
+                let (name, size) = line
+                    .split_once('\t')
+                    .context("Некорректный список размеров модели")?;
+                Ok((name.to_owned(), size.parse()?))
+            })
+            .collect::<Result<_>>()?;
+        ensure!(
+            sizes.len() == model.files.len(),
+            "Некорректный список файлов модели"
+        );
+        sizes
+    };
+    for file in model.files {
+        let expected = sizes.get(*file).context("Нет размера файла модели")?;
+        let metadata = fs::metadata(path.join(file))?;
+        ensure!(
+            metadata.is_file() && *expected > 0 && metadata.len() == *expected,
+            "Файл отсутствует или обрезан: {}; повторите notetaker-asr download {}",
             path.join(file).display(),
             model.id
         );
@@ -194,15 +223,12 @@ fn unpack_archive(archive: impl Read, extracted: &Path, model: &ModelManifest) -
 }
 
 fn download_one(root: &Path, model: &ModelManifest) -> Result<()> {
+    let _lock = model_download::lock(root, model.id)?;
+    let staging = model_download::staging(root, model.id)?;
     if installed(root, model).is_ok() {
+        fs::remove_dir_all(staging)?;
         return Ok(());
     }
-    ensure!(
-        !root.join(model.id).exists(),
-        "incomplete model directory {}; move it aside before retrying",
-        root.join(model.id).display()
-    );
-    let staging = tempfile::tempdir_in(root)?;
     let archive = root.join(format!(".{}.part", model.id));
     model_download::download(
         model.url,
@@ -215,22 +241,34 @@ fn download_one(root: &Path, model: &ModelManifest) -> Result<()> {
         model_download::discard_corrupt(&archive)?;
         return Err(error);
     }
-    let extracted = staging.path().join("extracted");
+    let extracted = staging.join("extracted");
     fs::create_dir(&extracted)?;
     if model.directory.is_empty() {
-        fs::rename(&archive, extracted.join(model.files[0]))?;
+        // The installed inode must never have been open as a writable partial.
+        fs::copy(&archive, extracted.join(model.files[0]))?;
     } else {
         unpack_archive(File::open(&archive)?, &extracted, model)?;
     }
     let source = extracted.join(model.directory);
+    let mut sizes = String::new();
     for name in model.files {
-        ensure!(source.join(name).is_file(), "archive missing {name}");
+        let metadata = fs::metadata(source.join(name))?;
+        ensure!(
+            metadata.is_file() && metadata.len() > 0,
+            "В архиве нет файла {name}"
+        );
+        sizes.push_str(&format!("{name}\t{}\n", metadata.len()));
     }
+    fs::write(source.join("FILES"), sizes)?;
     fs::write(source.join("SHA256"), model.sha256)?;
+    if root.join(model.id).exists() {
+        fs::remove_dir_all(root.join(model.id))?;
+    }
     fs::rename(source, root.join(model.id))?;
     if archive.exists() {
         fs::remove_file(&archive)?;
     }
+    fs::remove_dir_all(staging)?;
     eprintln!("NOTETAKER_MODEL_INSTALLED {}", model.id);
     eprintln!(
         "Installed {} in {}",
@@ -325,5 +363,183 @@ mod tests {
         assert!(verify(&b"abd"[..], &model).is_err());
         assert!(verify(&b"ab"[..], &model).is_err());
         assert!(manifest("../gigaam-v3").is_err());
+    }
+}
+
+#[cfg(test)]
+mod installation_tests {
+    use super::*;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        process::{Child, Command, Stdio},
+        thread,
+        time::Instant,
+    };
+    fn model(url: String) -> ModelManifest {
+        ModelManifest {
+            id: "neutral",
+            url: Box::leak(url.into_boxed_str()),
+            sha256: Box::leak(format!("{:x}", Sha256::digest(b"abcdef")).into_boxed_str()),
+            size: 6,
+            directory: "",
+            files: &["model.bin"],
+        }
+    }
+    fn headers(stream: &mut std::net::TcpStream) {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut byte = [0];
+        while !request.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            request.push(byte[0]);
+        }
+    }
+    struct Worker(Child);
+    impl Drop for Worker {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    fn wait(child: &mut Child) -> std::process::ExitStatus {
+        let until = Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                return status;
+            }
+            assert!(Instant::now() < until, "downloader did not finish");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    #[test]
+    fn concurrent_downloaders_lock_before_opening_the_partial() {
+        const CHILD_ROOT: &str = "NOTETAKER_MODEL_LOCK_TEST_ROOT";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let root = PathBuf::from(root);
+            if let Some(ready) = std::env::var_os("NOTETAKER_MODEL_LOCK_TEST_READY") {
+                fs::write(ready, b"ready").unwrap();
+            }
+            download_one(
+                &root,
+                &model(std::env::var("NOTETAKER_MODEL_LOCK_TEST_URL").unwrap()),
+            )
+            .unwrap();
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/model", listener.local_addr().unwrap());
+        let server_listener = listener.try_clone().unwrap();
+        let (started, received) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = server_listener.accept().unwrap();
+            headers(&mut stream);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nabc")
+                .unwrap();
+            started.send(()).unwrap();
+            released.recv_timeout(Duration::from_secs(40)).unwrap();
+            stream.write_all(b"def").unwrap();
+        });
+        let spawn = |ready: Option<&Path>| {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact", "models::installation_tests::concurrent_downloaders_lock_before_opening_the_partial", "--nocapture"])
+                .env(CHILD_ROOT,root.path()).env("NOTETAKER_MODEL_LOCK_TEST_URL",&url).stdout(Stdio::null()).stderr(Stdio::null());
+            if let Some(ready) = ready {
+                command.env("NOTETAKER_MODEL_LOCK_TEST_READY", ready);
+            }
+            Worker(command.spawn().unwrap())
+        };
+        let mut first = spawn(None);
+        received.recv_timeout(Duration::from_secs(15)).unwrap();
+        let ready = root.path().join("second-ready");
+        let mut second = spawn(Some(&ready));
+        let until = Instant::now() + Duration::from_secs(15);
+        while !ready.exists() {
+            assert!(Instant::now() < until);
+            thread::sleep(Duration::from_millis(10));
+        }
+        thread::sleep(Duration::from_millis(100));
+        assert!(
+            second.0.try_wait().unwrap().is_none(),
+            "second installer bypassed the lock"
+        );
+        release.send(()).unwrap();
+        assert!(wait(&mut first.0).success());
+        assert!(wait(&mut second.0).success());
+        server.join().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "second installer sent a late HTTP request"
+        );
+        assert_eq!(
+            fs::read(root.path().join("neutral/model.bin")).unwrap(),
+            b"abcdef"
+        );
+        assert!(!root.path().join(".neutral.staging").exists());
+    }
+    #[test]
+    fn stale_writable_descriptor_cannot_truncate_the_installed_inode() {
+        let root = tempfile::tempdir().unwrap();
+        let partial = root.path().join(".neutral.part");
+        fs::write(&partial, b"abcdef").unwrap();
+        let stale = fs::OpenOptions::new().write(true).open(&partial).unwrap();
+        download_one(root.path(), &model("http://127.0.0.1:1/unused".into())).unwrap();
+        stale.set_len(0).unwrap();
+        assert_eq!(
+            fs::read(root.path().join("neutral/model.bin")).unwrap(),
+            b"abcdef"
+        );
+    }
+    #[test]
+    fn truncated_install_is_downloaded_again_and_stale_staging_is_replaced() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("neutral")).unwrap();
+        fs::write(root.path().join("neutral/model.bin"), b"ab").unwrap();
+        fs::create_dir(root.path().join(".neutral.staging")).unwrap();
+        fs::write(root.path().join(".neutral.staging/old-copy"), b"stale").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let manifest = model(format!("http://{}/model", listener.local_addr().unwrap()));
+        assert!(installed(root.path(), &manifest).is_err());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            headers(&mut stream);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nabcdef")
+                .unwrap();
+        });
+        download_one(root.path(), &manifest).unwrap();
+        server.join().unwrap();
+        assert!(installed(root.path(), &manifest).is_ok());
+        assert_eq!(
+            fs::read(root.path().join("neutral/model.bin")).unwrap(),
+            b"abcdef"
+        );
+        assert!(!root.path().join(".neutral.staging").exists());
+    }
+    #[test]
+    fn archive_install_requires_recorded_verified_sizes() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = ModelManifest {
+            id: "archive",
+            directory: "archive-root",
+            files: &["encoder.onnx"],
+            ..model(String::new())
+        };
+        let path = root.path().join(manifest.id);
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("encoder.onnx"), b"abc").unwrap();
+        fs::write(path.join("SHA256"), manifest.sha256).unwrap();
+        assert!(installed(root.path(), &manifest).is_err());
+        fs::write(path.join("FILES"), "encoder.onnx\t3\n").unwrap();
+        assert!(installed(root.path(), &manifest).is_ok());
+        fs::write(path.join("encoder.onnx"), b"a").unwrap();
+        assert!(installed(root.path(), &manifest).is_err());
     }
 }

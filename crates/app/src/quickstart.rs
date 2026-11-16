@@ -311,11 +311,14 @@ pub fn wake_after(state: &AppState, now: Instant) -> Option<Duration> {
 
 pub fn check_speech(model: &str) -> Status {
     let result = worker::asr_binary().and_then(|binary| {
-        Ok(worker::background_process(&binary)
-            .args(["check-model", model])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()?)
+        Ok(notetaker_runtime::process::spawn(
+            worker::background_process(&binary)
+                .args(["check-model", model])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+            notetaker_runtime::process::Kind::Background,
+        )?
+        .wait()?)
     });
     match result {
         Ok(status) if status.success() => Status::Ready,

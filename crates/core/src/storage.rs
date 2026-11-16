@@ -71,38 +71,14 @@ pub(crate) fn lock_meeting_files(path: &Path) -> Result<Option<fs::File>> {
 }
 
 fn lock_meeting_files_for(path: &Path, timeout: std::time::Duration) -> Result<Option<fs::File>> {
-    let file = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path.join(".notetaker.lock"))?;
-    let started = std::time::Instant::now();
-    loop {
-        match file.try_lock() {
-            Ok(()) => return Ok(Some(file)),
-            Err(fs::TryLockError::WouldBlock) if started.elapsed() < timeout => {
-                std::thread::sleep(std::time::Duration::from_millis(25));
-            }
-            Err(fs::TryLockError::WouldBlock) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    format!(
-                        "meeting lock timed out after {timeout:?}: {}",
-                        path.display()
-                    ),
-                )
-                .into());
-            }
-            Err(fs::TryLockError::Error(error)) if lock_unsupported(&error) => {
-                tracing::warn!(path = %path.display(), %error,
-                    "file locking unsupported; using in-process meeting lock only");
-                // CLI has no tracing subscriber; the GUI captures stderr in its log.
-                eprintln!("warning: file locking unsupported; using in-process meeting lock only");
-                return Ok(None);
-            }
-            Err(fs::TryLockError::Error(error)) => return Err(error.into()),
+    match notetaker_runtime::file_lock::exclusive(&path.join(".notetaker.lock"), timeout) {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if lock_unsupported(&error) => {
+            tracing::warn!(path = %path.display(), %error, "file locking unsupported; using in-process meeting lock only");
+            eprintln!("warning: file locking unsupported; using in-process meeting lock only");
+            Ok(None)
         }
+        Err(error) => Err(error.into()),
     }
 }
 
