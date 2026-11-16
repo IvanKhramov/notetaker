@@ -20,6 +20,76 @@ pub fn eligible(event: &CalendarEvent, now: DateTime<Utc>) -> bool {
         && event.start <= now + chrono::Duration::minutes(5)
         && (event.link.attendees.len() >= 2 || call_link(event).is_some())
 }
+pub struct NextMeeting {
+    title: String,
+    time: String,
+    pub tooltip: String,
+}
+impl NextMeeting {
+    pub fn text(&self) -> String {
+        format!("Далее: {} · {}", self.title, self.time)
+    }
+    pub fn new(event: &CalendarEvent, now: DateTime<Utc>) -> Self {
+        let seconds = (event.start - now).num_seconds();
+        let time = if seconds > 0 {
+            format!("через {} мин", (seconds + 59) / 60)
+        } else {
+            format!("началась {} мин назад", -seconds / 60)
+        };
+        let mut next = Self {
+            title: event.link.title.clone(),
+            time,
+            tooltip: String::new(),
+        };
+        let text = next.text();
+        next.tooltip = if seconds <= 60 {
+            format!(
+                "{text}\nСледующая запись доступна после завершения текущей и финального распознавания."
+            )
+        } else {
+            text.clone()
+        };
+        next
+    }
+}
+/// A single secondary row, shared by the recording bar and floating indicator.
+pub fn next_meeting(ui: &mut egui::Ui, next: &NextMeeting) -> bool {
+    ui.horizontal(|ui| {
+        let time = format!("· {}", next.time);
+        let font = theme::medium(theme::SMALL);
+        let ink = theme::Palette::of(ui).muted;
+        let time_width = ui
+            .painter()
+            .layout_no_wrap(time.clone(), font.clone(), ink)
+            .size()
+            .x;
+        let width = (ui.available_width()
+            - theme::COMPACT_HEIGHT
+            - time_width
+            - 2.0 * ui.spacing().item_spacing.x)
+            .max(0.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(width, theme::COMPACT_HEIGHT),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_min_width(width);
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!("Далее: {}", next.title))
+                            .font(font.clone())
+                            .color(ink),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(&next.tooltip);
+            },
+        );
+        ui.add(egui::Label::new(egui::RichText::new(time).font(font).color(ink)).truncate())
+            .on_hover_text(&next.tooltip);
+        theme::icon_button(ui, theme::icons::X, "Скрыть напоминание об этой встрече").clicked()
+    })
+    .inner
+}
 #[derive(Default, PartialEq, Debug)]
 pub enum Action {
     #[default]
@@ -124,6 +194,37 @@ pub fn setup_help(ui: &mut egui::Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn next_meeting_tooltip_explains_the_start_rule_from_one_minute() {
+        let now = Utc::now();
+        let mut event = CalendarEvent {
+            link: notetaker_core::calendar::EventLink {
+                uid: "neutral".into(),
+                title: "Синтетическая встреча".into(),
+                attendees: Vec::new(),
+                call_url: None,
+            },
+            start: now + chrono::Duration::seconds(61),
+            end: now + chrono::Duration::hours(1),
+            all_day: false,
+            organizer: None,
+        };
+        let early = NextMeeting::new(&event, now);
+        assert_eq!(early.text(), "Далее: Синтетическая встреча · через 2 мин");
+        assert_eq!(early.tooltip, early.text());
+        event.start -= chrono::Duration::seconds(1);
+        assert!(
+            NextMeeting::new(&event, now)
+                .tooltip
+                .contains("финального распознавания")
+        );
+        event.start = now - chrono::Duration::minutes(2);
+        assert!(
+            NextMeeting::new(&event, now)
+                .text()
+                .ends_with("началась 2 мин назад")
+        );
+    }
     #[test]
     fn reminder_keeps_focus_and_no_link_has_record_action() {
         let ctx = egui::Context::default();
