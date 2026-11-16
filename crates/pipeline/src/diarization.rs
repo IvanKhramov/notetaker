@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use notetaker_asr_proto::{AsrClient, Diarization, TimeRange};
-use notetaker_core::{Channel, Library, Meeting, SELF_THRESHOLD, Transcript};
+use notetaker_core::{Channel, Library, Meeting, Transcript};
 
 use crate::{Asr, PipelineEvent};
 
@@ -195,37 +195,6 @@ pub(crate) fn final_pass(
             let library =
                 Library::open(meeting.path().parent().context("meeting has no library")?)?;
             let voices = library.prepare_voices()?;
-            let mut self_ids = Vec::new();
-            let mut own_best: Option<(String, f32)> = None;
-            for (id, embedding) in &result.embeddings {
-                if let Some((voice, score)) = voices.suggest(embedding)
-                    && config.automatic_voice_names
-                    && mic.is_none()
-                    && voice.is_me
-                    && score >= SELF_THRESHOLD
-                {
-                    if let Some(voice_id) = &voice.id {
-                        voice_ids.insert("me".into(), voice_id.clone());
-                    }
-                    if own_best.as_ref().is_none_or(|(_, old)| score > *old) {
-                        own_best = Some((id.clone(), score));
-                    }
-                    suggestions.insert(id.clone(), voice.name.clone());
-                }
-            }
-            if let Some((id, _)) = own_best {
-                self_ids.push(id);
-            }
-            for id in self_ids {
-                for turn in &mut result.turns {
-                    if turn.speaker == id {
-                        turn.speaker = "me".into();
-                    }
-                }
-                if let Some(embedding) = result.embeddings.remove(&id) {
-                    result.embeddings.entry("me".into()).or_insert(embedding);
-                }
-            }
             if let Some(mic) = mic {
                 let transcript = meeting.read_transcript()?;
                 let ranges = transcript
@@ -582,11 +551,13 @@ mod tests {
             &tx,
         );
         let loaded = meeting.read_transcript().unwrap();
-        assert_eq!(loaded.segments[0].speaker.0, "me");
-        assert_eq!(loaded.speaker_name("me"), "Иван");
+        assert_eq!(loaded.segments[0].speaker.0, "s1");
+        assert_eq!(loaded.speaker_name("s1"), "Иван");
         assert_eq!(
-            loaded.speaker_voice_ids.get("me"),
-            library.read_voices().unwrap().voices[0].id.as_ref()
+            loaded
+                .speaker_identity("s1")
+                .and_then(|identity| identity.voice_id),
+            library.read_voices().unwrap().voices[0].id.as_deref()
         );
     }
 }

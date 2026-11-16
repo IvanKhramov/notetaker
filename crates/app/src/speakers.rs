@@ -80,10 +80,14 @@ impl SpeakerUi {
 }
 
 pub fn voice_note(ui: &mut egui::Ui, transcript: &Transcript, id: &str) {
-    if let Some(mark) = transcript.voice_recognitions.get(id) {
+    if let Some(notetaker_core::SpeakerIdentity {
+        source: notetaker_core::SpeakerNameSource::Voice { similarity_milli },
+        ..
+    }) = transcript.speaker_identity(id)
+    {
         ui.weak("по голосу").on_hover_text(format!(
             "Сходство: {:.3}",
-            f32::from(mark.similarity_milli) / 1000.0
+            f32::from(similarity_milli) / 1000.0
         ));
     }
 }
@@ -148,7 +152,14 @@ pub fn rename_menu(
             let focus = ui
                 .data_mut(|data| data.remove_temp::<bool>(form_key.with("focus")))
                 .unwrap_or(false);
-            if !renaming && transcript.voice_recognitions.contains_key(id) {
+            if !renaming
+                && matches!(
+                    transcript
+                        .speaker_identity(id)
+                        .map(|identity| identity.source),
+                    Some(notetaker_core::SpeakerNameSource::Voice { .. })
+                )
+            {
                 voice_note(ui, transcript, id);
                 if crate::theme::menu_item(ui, "", "Это не он", false, false).clicked() {
                     edit = Some(SpeakerEdit::RejectVoice { speaker: id.into() });
@@ -158,18 +169,17 @@ pub fn rename_menu(
                     edit = Some(SpeakerEdit::Rename {
                         speaker: id.into(),
                         name: transcript.speaker_name(id).into(),
-                        is_me: voices.is_some_and(|bank| {
-                            bank.voices.iter().any(|v| {
-                                v.is_me && v.id.as_ref() == transcript.speaker_voice_ids.get(id)
-                            })
-                        }),
+                        is_me: false,
                         everywhere: false,
                     });
                     ui.close();
                 }
             }
             if !renaming {
-                if let Some(voice) = transcript.speaker_voice_ids.get(id)
+                if let Some(voice) = transcript
+                    .speaker_identity(id)
+                    .and_then(|identity| identity.voice_id)
+                    .or_else(|| transcript.speaker_voice_ids.get(id).map(String::as_str))
                     && crate::theme::menu_item(ui, "", "Открыть человека", false, false).clicked()
                 {
                     crate::people::request(
@@ -177,18 +187,22 @@ pub fn rename_menu(
                         crate::people::Request {
                             name: transcript.speaker_name(id).into(),
                             email: String::new(),
-                            voice: Some(voice.clone()),
+                            voice: Some(voice.into()),
                         },
                     );
                     ui.close();
                 }
                 if voices.is_some_and(|voices| {
-                    transcript.speaker_voice_ids.get(id).is_some_and(|linked| {
-                        voices
-                            .voices
-                            .iter()
-                            .any(|voice| voice.id.as_ref() == Some(linked))
-                    })
+                    transcript
+                        .speaker_identity(id)
+                        .and_then(|identity| identity.voice_id)
+                        .or_else(|| transcript.speaker_voice_ids.get(id).map(String::as_str))
+                        .is_some_and(|linked| {
+                            voices
+                                .voices
+                                .iter()
+                                .any(|voice| voice.id.as_deref() == Some(linked))
+                        })
                 }) {
                     ui.add_enabled(
                         global_allowed,
@@ -265,7 +279,9 @@ pub fn rename_menu(
                 if voices.is_some_and(|voices| {
                     !voices.name_available(
                         &name,
-                        transcript.speaker_voice_ids.get(id).map(String::as_str),
+                        transcript
+                            .speaker_identity(id)
+                            .and_then(|identity| identity.voice_id),
                         id == "me" || transcript.self_speaker.as_deref() == Some(id),
                     )
                 }) {
@@ -328,10 +344,9 @@ pub fn rename_menu(
                     choose(
                         ui,
                         transcript
-                            .speaker_names
-                            .get(id)
-                            .or_else(|| transcript.speaker_suggestions.get(id))
-                            .cloned()
+                            .speaker_identity(id)
+                            .map(|identity| identity.name.to_owned())
+                            .or_else(|| transcript.speaker_suggestions.get(id).cloned())
                             .unwrap_or_else(|| "Я".into()),
                         true,
                     );
@@ -453,12 +468,14 @@ pub fn count_control(
         });
     }
     for speaker in &timeline.speakers {
-        if document
-            .data
-            .transcript
-            .voice_recognitions
-            .contains_key(&speaker.id)
-        {
+        if matches!(
+            document
+                .data
+                .transcript
+                .speaker_identity(&speaker.id)
+                .map(|identity| identity.source),
+            Some(notetaker_core::SpeakerNameSource::Voice { .. })
+        ) {
             ui.push_id(&speaker.id, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(&speaker.name);
@@ -589,10 +606,9 @@ fn selection_controls(
                         .clicked()
                         {
                             let id = transcript
-                                .speaker_names
-                                .iter()
-                                .find(|(_, name)| name.as_str() == attendee.label())
-                                .map(|(id, _)| id.clone())
+                                .speaker_identities()
+                                .find(|(_, identity)| identity.name == attendee.label())
+                                .map(|(id, _)| id.to_owned())
                                 .unwrap_or_else(|| transcript.new_speaker_id());
                             assign(ui, id, Some(attendee.label().into()));
                         }
@@ -674,14 +690,12 @@ mod direct_rename_tests {
             crate::theme::install(&ctx);
             let mut transcript = Transcript::default();
             transcript
-                .speaker_names
-                .insert("s1".into(), "Анна Петрова".into());
-            transcript
                 .speaker_voice_ids
                 .insert("s1".into(), "voice-a".into());
             transcript.voice_recognitions.insert(
                 "s1".into(),
                 notetaker_core::VoiceRecognition {
+                    name: "Анна Петрова".into(),
                     voice_id: "voice-a".into(),
                     similarity_milli: 846,
                 },

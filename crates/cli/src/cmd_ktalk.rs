@@ -54,6 +54,12 @@ fn sync(
     print_plan(plan, out)?;
     if !dry_run {
         let result = ktalk::apply(library, meeting, plan)?;
+        if library
+            .review_voice_names(meeting, &result.before, &result.after.value)
+            .is_err()
+        {
+            notetaker_runtime::diagnostics::event("Tolk voice recognition statistics not saved");
+        }
         if let Some(error) = result.index_error {
             writeln!(out, "Имена сохранены; поиск не обновлён: {error}")?;
         }

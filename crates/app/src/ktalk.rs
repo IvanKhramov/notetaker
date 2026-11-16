@@ -170,6 +170,7 @@ pub struct Undo {
     pub after: Revision,
 }
 pub struct Applied {
+    pub statistics_updated: bool,
     pub applied_at: Instant,
     pub document: Box<DocumentData>,
     pub undo: Undo,
@@ -402,6 +403,7 @@ pub(crate) fn recorded_here(meeting: &Meeting) -> Result<bool> {
 pub fn pickup(root: &Path, now: DateTime<Utc>) -> Result<Vec<Task>> {
     let library = Library::open(root)?;
     library.discard_voice_ledgers()?;
+    notetaker_pipeline::cleanup_learning_temp(&library)?;
     let mut tasks = Vec::new();
     let mut present = std::collections::HashSet::new();
     for meeting in library.list_meetings()? {
@@ -673,7 +675,9 @@ fn apply(task: &mut Task, plan: &Plan, voices: bool, control: &Control) -> Resul
     }
     task.progress.enrol_status = voice_status.clone();
     persist(task)?;
-    Ok(Applied {
+    let statistics_after = applied.after.value;
+    let mut result = Applied {
+        statistics_updated: false,
         applied_at,
         document: Box::new(DocumentData::read(meeting.clone())?),
         undo: Undo {
@@ -690,7 +694,17 @@ fn apply(task: &mut Task, plan: &Plan, voices: bool, control: &Control) -> Resul
         segments,
         recording: plan.recording.clone(),
         voice_status,
-    })
+    };
+    let stats = (|| -> Result<()> {
+        let library = Library::open(meeting.path().parent().context("Нет библиотеки")?)?;
+        Ok(library.review_voice_names(&meeting, &result.undo.before, &statistics_after)?)
+    })();
+    if stats.is_err() {
+        notetaker_runtime::diagnostics::event("Tolk voice recognition statistics not saved");
+    } else {
+        result.statistics_updated = !result.undo.before.voice_recognitions.is_empty();
+    }
+    Ok(result)
 }
 fn sync(
     task: &mut Task,
@@ -1236,8 +1250,10 @@ fn preview_speaker(transcript: Option<&Transcript>, speaker: &str, rows: &[ktalk
     {
         return "Я".into();
     }
-    if let Some(name) = transcript.and_then(|text| text.speaker_names.get(speaker)) {
-        return name.clone();
+    if let Some(name) =
+        transcript.and_then(|text| text.speaker_identity(speaker).map(|identity| identity.name))
+    {
+        return name.into();
     }
     let mut ids = Vec::new();
     for row in rows {
@@ -1915,10 +1931,12 @@ impl crate::state::AppState {
                 let path = task.meeting.path().to_path_buf();
                 match outcome {
                     Outcome::Applied(applied) => {
-                        self.send(crate::worker::Command::Voices {
-                            root: self.settings.library.clone(),
-                            delete: None,
-                        });
+                        if applied.statistics_updated {
+                            self.send(crate::worker::Command::Voices {
+                                root: self.settings.library.clone(),
+                                delete: None,
+                            });
+                        }
                         self.ktalk.inspected.insert(path.clone());
                         let applied = *applied;
                         self.ktalk
@@ -2413,6 +2431,37 @@ mod tests {
             task.after(&Outcome::Waiting, now + chrono::Duration::minutes(minute));
         }
         assert!(task.progress.done);
+    }
+    #[test]
+    fn damaged_voice_statistics_cannot_break_the_applied_result_pending_or_undo() {
+        let (_root, mut task, _) = fixture();
+        let (before, plan) =
+            crate::ktalk_fixture::plan_with_recognition(Some(notetaker_core::VoiceRecognition {
+                name: "Анна Петрова".into(),
+                voice_id: "ktalk-neutral".into(),
+                similarity_milli: 800,
+            }));
+        task.meeting.write_transcript(&before).unwrap();
+        let lib = Library::open(task.meeting.path().parent().unwrap()).unwrap();
+        std::fs::create_dir_all(lib.private_state_dir()).unwrap();
+        let bank = lib.private_state_dir().join("voices.json");
+        std::fs::write(&bank, b"{broken").unwrap();
+        let result = apply(&mut task, &plan, true, &Control::default()).unwrap();
+        assert!(!result.statistics_updated);
+        assert!(!result.document.transcript.ktalk_sources.is_empty());
+        assert!(result.document.transcript.voice_recognitions.is_empty());
+        assert_eq!(result.undo.before, before);
+        let saved = read_progress(&task.meeting).unwrap();
+        assert!(saved.done && saved.enrol_pending);
+        assert_eq!(
+            saved.pending_enrollment.unwrap().revision,
+            result.undo.after
+        );
+        assert_eq!(std::fs::read(bank).unwrap(), b"{broken");
+        task.meeting
+            .restore_transcript(&result.undo.before, result.undo.after)
+            .unwrap();
+        assert_eq!(task.meeting.read_transcript().unwrap(), before);
     }
     #[test]
     fn deleted_meeting_drops_its_pending_enrollment_instead_of_failing_forever() {

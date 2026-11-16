@@ -122,8 +122,23 @@ pub struct Bookmark {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VoiceRecognition {
+    pub name: String,
     pub voice_id: String,
     pub similarity_milli: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpeakerNameSource {
+    User,
+    Tolk,
+    Voice { similarity_milli: u16 },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SpeakerIdentity<'a> {
+    pub name: &'a str,
+    pub voice_id: Option<&'a str>,
+    pub source: SpeakerNameSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,13 +192,75 @@ impl Transcript {
     }
 
     pub fn speaker_name<'a>(&'a self, id: &'a str) -> &'a str {
-        self.speaker_names.get(id).map(String::as_str).unwrap_or(id)
+        self.speaker_identity(id)
+            .map_or(id, |identity| identity.name)
+    }
+
+    /// The only resolution path for names used in views, prompts and derived data.
+    pub fn speaker_identity(&self, id: &str) -> Option<SpeakerIdentity<'_>> {
+        if let Some(name) = self.speaker_names.get(id) {
+            return Some(SpeakerIdentity {
+                name,
+                voice_id: self.speaker_voice_ids.get(id).map(String::as_str),
+                source: if self.ktalk_sources.contains_key(id) {
+                    SpeakerNameSource::Tolk
+                } else {
+                    SpeakerNameSource::User
+                },
+            });
+        }
+        self.voice_recognitions
+            .get(id)
+            .filter(|_| !self.voice_rejected.contains(id))
+            .map(|mark| SpeakerIdentity {
+                name: &mark.name,
+                voice_id: Some(&mark.voice_id),
+                source: SpeakerNameSource::Voice {
+                    similarity_milli: mark.similarity_milli,
+                },
+            })
+    }
+
+    pub fn speaker_identities(&self) -> impl Iterator<Item = (&str, SpeakerIdentity<'_>)> {
+        self.speaker_names
+            .keys()
+            .chain(
+                self.voice_recognitions
+                    .keys()
+                    .filter(|id| !self.speaker_names.contains_key(*id)),
+            )
+            .filter_map(|id| {
+                self.speaker_identity(id)
+                    .map(|identity| (id.as_str(), identity))
+            })
+    }
+
+    /// Change spelling without confirming an automatic name in another meeting.
+    pub fn rename_linked_speaker(&mut self, id: &str, name: &str) -> bool {
+        let value = if let Some(name) = self.speaker_names.get_mut(id) {
+            Some(name)
+        } else if let Some(mark) = self.voice_recognitions.get_mut(id) {
+            Some(&mut mark.name)
+        } else {
+            self.speaker_suggestions.get_mut(id)
+        };
+        if let Some(value) = value
+            && value != name
+        {
+            *value = name.into();
+            return true;
+        }
+        false
     }
 
     pub fn rename_speaker(&mut self, id: &str, name: &str) -> bool {
         let name = name.trim();
         if !name.is_empty() {
-            self.voice_recognitions.remove(id);
+            if let Some(mark) = self.voice_recognitions.remove(id) {
+                self.speaker_voice_ids.insert(id.into(), mark.voice_id);
+            }
+            // A deliberate user action can confirm a previously rejected identity.
+            self.voice_rejected.remove(id);
         }
         if name.is_empty() || self.speaker_names.get(id).is_some_and(|n| n == name) {
             return false;

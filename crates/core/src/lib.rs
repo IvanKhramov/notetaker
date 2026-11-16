@@ -32,7 +32,7 @@ pub use tasks::{Task, TaskLine, parse_task_lines, parse_tasks, person_matches, r
 mod vocabulary;
 mod voices;
 pub use export::{ExportFormat, format_timestamp};
-pub use model::VoiceRecognition;
+pub use model::{SpeakerIdentity, SpeakerNameSource, VoiceRecognition};
 pub use speakers::{MergeUndo, SpeakerStats, SpeakerTimeline, TimelineSegment};
 pub use vocabulary::Vocabulary;
 pub use voices::{MeetingVoices, SELF_THRESHOLD, VOICE_MODEL, Voice, VoiceLibrary, cosine};

@@ -71,6 +71,11 @@ impl Library {
         }
         let mut learned = Vec::new();
         for sample in samples {
+            if sample.own {
+                return Err(crate::Error::SpeakerEdit(
+                    "Исторические записи Толка не обучают собственный голос".into(),
+                ));
+            }
             let key = format!("recording:{source}:{}", sample.speaker);
             if bank.tolk_samples.contains(&key) {
                 continue;

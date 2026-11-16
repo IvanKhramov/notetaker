@@ -515,11 +515,13 @@ pub fn plan(
             || segment.end_ms as i64 > interval.1
             || segment.edited
             || local.speaker_names.contains_key(original)
-                && !local.voice_recognitions.contains_key(original)
         {
             continue;
         }
-        if original == "me" && !local.voice_recognitions.contains_key(original) {
+        if original == "me"
+            && !local.voice_rejected.contains(original)
+            && !local.voice_recognitions.contains_key(original)
+        {
             let Some(owner) = owner else { continue };
             ensure!(!owner.name().is_empty(), "Некорректный профиль Толка");
             if local.speaker_suggestions.get("me") != Some(&owner.name()) {
@@ -579,6 +581,7 @@ pub fn plan(
                 .entry((*id).clone())
                 .or_insert_with(|| (*name).clone());
             after.speaker_suggestions.remove(*id);
+            after.voice_recognitions.remove(*id);
             if !local.speaker_names.contains_key(*id) {
                 after.speaker_voice_ids.remove(*id);
             }
@@ -655,7 +658,6 @@ pub fn apply(library: &Library, meeting: &Meeting, plan: &Plan) -> Result<Applie
         !stale,
         "Транскрипт изменился; повторите синхронизацию Толка"
     );
-    library.review_voice_names(meeting, &before, &after.value)?;
     let index_error = library
         .reindex_incremental()
         .err()
@@ -667,14 +669,15 @@ pub fn apply(library: &Library, meeting: &Meeting, plan: &Plan) -> Result<Applie
     })
 }
 
-/// Historical recordings use their own timeline and the same owner disambiguation.
+/// Historical recordings never prove ownership by a display name.
 pub fn recording_voice_evidence(
     remote: &Transcript,
     recording: &Recording,
     owner: &User,
 ) -> Result<Vec<VoiceEvidence>> {
     remote.validate()?;
-    let mut voices = voice_evidence(remote, 0, u64::from(recording.duration) * 1000, Some(owner))?;
+    let mut voices = voice_evidence(remote, 0, u64::from(recording.duration) * 1000, None)?;
+    voices.retain(|voice| voice.name.trim().to_lowercase() != owner.name().to_lowercase());
     for voice in &mut voices {
         voice.recording_id = Some(recording.id.clone());
     }

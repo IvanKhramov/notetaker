@@ -243,18 +243,11 @@ pub(crate) fn meeting_people(
             people.extend(observation(&a.name, &a.email, None));
         }
     }
-    for (speaker, name) in &transcript.speaker_names {
-        people.extend(observation(
-            name,
-            "",
-            transcript
-                .speaker_voice_ids
-                .get(speaker)
-                .map(String::as_str),
-        ));
+    for (_, identity) in transcript.speaker_identities() {
+        people.extend(observation(identity.name, "", identity.voice_id));
     }
     for (speaker, voice) in &transcript.speaker_voice_ids {
-        if !transcript.speaker_names.contains_key(speaker) {
+        if transcript.speaker_identity(speaker).is_none() {
             people.extend(observation("", "", Some(voice)));
         }
     }

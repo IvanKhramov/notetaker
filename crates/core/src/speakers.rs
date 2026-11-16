@@ -53,7 +53,8 @@ impl Transcript {
             .map(|n| format!("s{n}"))
             .find(|id| {
                 !ids.contains(id)
-                    && !self.speaker_names.contains_key(id)
+                    && self.speaker_identity(id).is_none()
+                    && !self.voice_rejected.contains(id)
                     && !self.speaker_suggestions.contains_key(id)
                     && !self.speaker_voice_ids.contains_key(id)
                     && self.self_speaker.as_ref() != Some(id)
@@ -75,15 +76,32 @@ impl Transcript {
                 segment.edited = true;
             }
         }
-        if let Some(name) = self.speaker_names.remove(from)
-            && !self.speaker_names.contains_key(into)
-        {
-            self.speaker_names.insert(into.into(), name);
-            // A confirmed source identity takes precedence over a target guess.
-            self.speaker_voice_ids.remove(into);
+        let selected = if self.speaker_names.contains_key(into) {
+            self.speaker_identity(into)
+        } else if self.speaker_names.contains_key(from) {
+            self.speaker_identity(from)
+        } else {
+            self.speaker_identity(into)
+                .or_else(|| self.speaker_identity(from))
         }
+        .map(|identity| {
+            (
+                identity.name.to_owned(),
+                identity.voice_id.map(str::to_owned),
+            )
+        });
+        self.speaker_names.remove(from);
         self.voice_recognitions.remove(from);
         self.voice_recognitions.remove(into);
+        if let Some((name, voice)) = selected {
+            self.rename_speaker(into, &name);
+            self.speaker_voice_ids.remove(into);
+            if let Some(voice) = voice {
+                self.speaker_voice_ids.insert(into.into(), voice);
+            }
+        } else if self.voice_rejected.contains(from) || self.voice_rejected.contains(into) {
+            self.voice_rejected.insert(into.into());
+        }
         self.speaker_suggestions.remove(from);
         if self.speaker_names.contains_key(into) {
             self.speaker_suggestions.remove(into);

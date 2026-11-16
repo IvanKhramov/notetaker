@@ -947,12 +947,10 @@ fn local_owner_is_identified_uniquely_and_never_uses_the_system_track() {
 #[test]
 fn tolk_can_replace_voice_names_but_not_user_confirmation() {
     let (mut local, remote) = fixture(0);
-    local
-        .speaker_names
-        .insert("s1".into(), "Ошибочная догадка".into());
     local.voice_recognitions.insert(
         "s1".into(),
         notetaker_core::VoiceRecognition {
+            name: "Ошибочная догадка".into(),
             voice_id: "voice-old".into(),
             similarity_milli: 800,
         },
@@ -972,7 +970,7 @@ fn tolk_can_replace_voice_names_but_not_user_confirmation() {
             .values()
             .any(|name| name == "Ошибочная догадка")
     );
-    local.voice_recognitions.clear();
+    local.rename_speaker("s1", "Ошибочная догадка");
     let p = plan(
         &local,
         start(),
@@ -982,4 +980,30 @@ fn tolk_can_replace_voice_names_but_not_user_confirmation() {
     )
     .unwrap();
     assert_eq!(p.after.speaker_name("s1"), "Ошибочная догадка");
+}
+
+#[test]
+fn historical_namesakes_are_skipped_and_absent_owner_does_not_block_other_people() {
+    let remote: Transcript = serde_json::from_value(serde_json::json!({"status":"complete","tracks":[
+        {"speaker":{"isAnonymous":false,"userInfo":{"key":"neutral-namesake","firstname":"Oleg","surname":"Sidorov"}},"chunks":[{"startTimeOffsetInMillis":0,"endTimeOffsetInMillis":7000,"words":[{"text":"Нейтральная речь","startTimeOffsetInMillis":0,"endTimeOffsetInMillis":7000}]}]},
+        {"speaker":{"isAnonymous":false,"userInfo":{"key":"neutral-peer","firstname":"Анна","surname":"Петрова"}},"chunks":[{"startTimeOffsetInMillis":8000,"endTimeOffsetInMillis":15000,"words":[{"text":"Другой нейтральный ответ","startTimeOffsetInMillis":8000,"endTimeOffsetInMillis":15000}]}]}
+    ]})).unwrap();
+    let item = recording("history", 0, 20);
+    let evidence = recording_voice_evidence(&remote, &item, &owner()).unwrap();
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0].name, "Анна Петрова");
+    assert_eq!(evidence[0].track, Some(Channel::System));
+    assert!(!evidence[0].ranges.is_empty());
+    let mut only_namesake = remote.clone();
+    only_namesake.tracks.truncate(1);
+    assert!(
+        recording_voice_evidence(&only_namesake, &item, &owner())
+            .unwrap()
+            .is_empty()
+    );
+    let mut no_owner = remote;
+    no_owner.tracks.remove(0);
+    let evidence = recording_voice_evidence(&no_owner, &item, &owner()).unwrap();
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0].track, Some(Channel::System));
 }

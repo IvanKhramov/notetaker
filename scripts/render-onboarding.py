@@ -305,9 +305,9 @@ impl NotetakerApp {
             if scene<=79 {
                 app.home=false;app.state.tab=Tab::Transcript;
                 let document=app.state.documents.get_mut(app.state.selected.as_ref().unwrap()).unwrap();
-                document.data.transcript.speaker_names.insert("speaker_1".into(),"Анна Петрова".into());
-                document.data.transcript.speaker_voice_ids.insert("speaker_1".into(),"fixture-voice".into());
-                document.data.transcript.voice_recognitions.insert("speaker_1".into(),notetaker_core::VoiceRecognition {voice_id:"fixture-voice".into(),similarity_milli:846});
+                document.data.transcript.speaker_names.remove("speaker_1");
+                document.data.transcript.speaker_voice_ids.remove("speaker_1");
+                document.data.transcript.voice_recognitions.insert("speaker_1".into(),notetaker_core::VoiceRecognition {name:"Анна Петрова".into(),voice_id:"fixture-voice".into(),similarity_milli:846});
                 document.data.meeting.write_transcript(&document.data.transcript).unwrap();document.data.revisions.transcript=document.data.meeting.load_transcript().unwrap().revision;
             } else {
                 app.show_settings=true;app.settings_panel.section=if scene==80 {crate::settings::Section::Recording} else {crate::settings::Section::Ktalk};

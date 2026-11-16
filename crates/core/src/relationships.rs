@@ -39,16 +39,16 @@ impl MeetingSummary {
                     person.emails.contains(&a.email.trim().to_lowercase())
                 }
             })
+        }) || self.transcript.speaker_identities().any(|(_, identity)| {
+            person.matches(identity.name)
+                || identity
+                    .voice_id
+                    .is_some_and(|id| person.voice_ids.iter().any(|v| v == id))
         }) || self
             .transcript
-            .speaker_names
+            .speaker_voice_ids
             .values()
-            .any(|name| person.matches(name))
-            || self
-                .transcript
-                .speaker_voice_ids
-                .values()
-                .any(|id| person.voice_ids.contains(id))
+            .any(|id| person.voice_ids.contains(id))
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -164,9 +164,8 @@ impl Library {
                     .collect()
             } else {
                 transcript
-                    .speaker_names
-                    .values()
-                    .map(|s| normalized(s))
+                    .speaker_identities()
+                    .map(|(_, identity)| normalized(identity.name))
                     .filter(|s| !s.is_empty())
                     .collect()
             };
@@ -231,14 +230,15 @@ impl Library {
                 .speaker_ids()
                 .into_iter()
                 .filter(|s| {
-                    transcript
-                        .speaker_names
+                    transcript.speaker_identity(s).is_some_and(|identity| {
+                        page.person.matches(identity.name)
+                            || identity
+                                .voice_id
+                                .is_some_and(|id| page.person.voice_ids.iter().any(|v| v == id))
+                    }) || transcript
+                        .speaker_voice_ids
                         .get(s)
-                        .is_some_and(|n| page.person.matches(n))
-                        || transcript
-                            .speaker_voice_ids
-                            .get(s)
-                            .is_some_and(|v| page.person.voice_ids.contains(v))
+                        .is_some_and(|v| page.person.voice_ids.contains(v))
                 })
                 .collect();
             for segment in &mut transcript.segments {

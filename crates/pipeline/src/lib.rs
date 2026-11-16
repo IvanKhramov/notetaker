@@ -4,7 +4,8 @@ mod diarization;
 mod voices;
 pub use diarization::{DiarizationConfig, rediarize};
 pub use voices::{
-    HistoricalEnrollment, learn_recording, named_voice_embedding, remember_named_voices,
+    HistoricalEnrollment, LearningSpaceError, cleanup_learning_temp, learn_recording,
+    named_voice_embedding, remember_named_voices,
 };
 mod audio;
 mod decode;

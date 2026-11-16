@@ -17,6 +17,8 @@ pub const AUTOMATIC_THRESHOLD: f32 = 0.70;
 pub const AUTOMATIC_MARGIN: f32 = 0.10;
 mod learning;
 mod recognition;
+#[cfg(test)]
+mod review_tests;
 
 pub const SELF_THRESHOLD: f32 = 0.85;
 
@@ -171,7 +173,10 @@ impl VoiceLibrary {
             return None;
         };
         let guess = if transcript.voice_recognitions.contains_key(speaker) {
-            transcript.speaker_names.get(speaker)
+            transcript
+                .voice_recognitions
+                .get(speaker)
+                .map(|mark| &mark.name)
         } else if !transcript.speaker_names.contains_key(speaker) {
             transcript.speaker_suggestions.get(speaker)
         } else {
@@ -182,17 +187,29 @@ impl VoiceLibrary {
             None
         } else {
             transcript
-                .speaker_voice_ids
-                .get(speaker)
-                .map(String::as_str)
+                .speaker_identity(speaker)
+                .and_then(|identity| identity.voice_id)
+                .or_else(|| {
+                    transcript
+                        .speaker_voice_ids
+                        .get(speaker)
+                        .map(String::as_str)
+                })
         };
-        self.identity(
-            name,
-            linked,
-            *is_me || own_allowed && microphone_speaker(transcript, speaker),
-        )
-        .err()
-        .map(String::from)
+        let own = *is_me || own_allowed && microphone_speaker(transcript, speaker);
+        if !own
+            && linked.is_some()
+            && self
+                .voices
+                .iter()
+                .any(|voice| voice.is_me && voice.id.as_deref() == linked)
+        {
+            return Some(
+                "Собственный голос обучается с микрофона этой установки или по действию «Это я»"
+                    .into(),
+            );
+        }
+        self.identity(name, linked, own).err().map(String::from)
     }
     #[cfg(test)]
     fn enroll(
@@ -517,6 +534,13 @@ impl Library {
                 continue;
             };
             let is_me = own_allowed && microphone_speaker(transcript, id);
+            if !is_me
+                && library.voices.iter().any(|voice| {
+                    voice.is_me && voice.id.as_ref() == transcript.speaker_voice_ids.get(id)
+                })
+            {
+                continue;
+            }
             let key = transcript
                 .speaker_voice_ids
                 .get(id)
@@ -767,7 +791,13 @@ impl Library {
         match edit {
             SpeakerEdit::SelectVoice { .. } => unreachable!("resolved above"),
             SpeakerEdit::RejectVoice { speaker } => {
-                transcript.reject_voice(&speaker);
+                let target = transcript.reject_voice(&speaker);
+                if target != speaker
+                    && let Some(cache) = &mut clusters
+                    && let Some(embedding) = cache.embeddings.remove(&speaker)
+                {
+                    cache.embeddings.insert(target, embedding);
+                }
             }
             SpeakerEdit::Merge { from, into } => {
                 let merge = transcript.merge_speakers(&from, &into)?;
@@ -845,6 +875,14 @@ impl Library {
                 speaker,
                 name,
             } => {
+                if let Some(cache) = &mut clusters {
+                    for segment in &transcript.segments {
+                        if segments.contains(&segment.id) {
+                            cache.embeddings.remove(&segment.speaker.0);
+                        }
+                    }
+                    cache.embeddings.remove(&speaker);
+                }
                 transcript.reassign_segments(&segments, &speaker)?;
                 if let Some(name) = name {
                     transcript.rename_speaker(&speaker, &name);
@@ -866,7 +904,10 @@ impl Library {
                 // Correcting an unconfirmed guess creates/selects the named identity.
                 // An explicit global rename deliberately retains the matched identity.
                 let guess = if transcript.voice_recognitions.contains_key(&speaker) {
-                    transcript.speaker_names.get(&speaker)
+                    transcript
+                        .voice_recognitions
+                        .get(&speaker)
+                        .map(|mark| &mark.name)
                 } else if !transcript.speaker_names.contains_key(&speaker) {
                     transcript.speaker_suggestions.get(&speaker)
                 } else {
@@ -875,6 +916,10 @@ impl Library {
                 if !everywhere && !explicit_voice && guess.is_some_and(|guess| guess != name.trim())
                 {
                     transcript.speaker_voice_ids.remove(&speaker);
+                    transcript.voice_recognitions.remove(&speaker);
+                }
+                if explicit_voice {
+                    transcript.voice_recognitions.remove(&speaker);
                 }
                 transcript.rename_speaker(&speaker, &name);
                 if is_me {
@@ -884,7 +929,11 @@ impl Library {
                     let own_voice =
                         is_me || own_mic_allowed && microphone_speaker(&transcript, &speaker);
                     let linked = transcript.speaker_voice_ids.get(&speaker).cloned();
-                    if voices.model == VOICE_MODEL {
+                    let linked_own = voices
+                        .voices
+                        .iter()
+                        .any(|voice| voice.is_me && voice.id == linked);
+                    if voices.model == VOICE_MODEL && (!linked_own || own_voice) {
                         match voices.identity(&name, linked.as_deref(), own_voice) {
                             Err(reason) => result.voice_status = reason.into(),
                             Ok(existing) => {
@@ -949,23 +998,23 @@ impl Library {
         if let Some((voice_id, name)) = propagation {
             for previous in self.list_meetings()? {
                 let mut loaded = previous.load_transcript()?;
-                let ids: Vec<_> = loaded
+                let ids: BTreeSet<_> = loaded
                     .value
-                    .speaker_voice_ids
-                    .iter()
-                    .filter(|(_, id)| **id == voice_id)
-                    .map(|(speaker, _)| speaker.clone())
+                    .speaker_identities()
+                    .filter(|(_, identity)| identity.voice_id == Some(voice_id.as_str()))
+                    .map(|(speaker, _)| speaker.to_owned())
+                    .chain(
+                        loaded
+                            .value
+                            .speaker_voice_ids
+                            .iter()
+                            .filter(|(_, id)| **id == voice_id)
+                            .map(|(speaker, _)| speaker.clone()),
+                    )
                     .collect();
                 let mut changed = false;
                 for id in ids {
-                    if loaded.value.speaker_names.contains_key(&id) {
-                        changed |= loaded.value.rename_speaker(&id, &name);
-                    } else if let Some(suggestion) = loaded.value.speaker_suggestions.get_mut(&id)
-                        && *suggestion != name
-                    {
-                        suggestion.clone_from(&name);
-                        changed = true;
-                    }
+                    changed |= loaded.value.rename_linked_speaker(&id, &name);
                 }
                 if changed {
                     previous.save_transcript(&loaded.value, loaded.revision)?;

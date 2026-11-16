@@ -16,12 +16,21 @@ impl crate::Transcript {
             return false;
         }
         let speaker = self.self_speaker.clone().unwrap_or_else(|| "me".into());
-        if let std::collections::btree_map::Entry::Vacant(entry) = self.speaker_names.entry(speaker)
+        if self.voice_rejected.contains(&speaker)
+            || self.speaker_identity(&speaker).is_some()
+            || !self.segments.is_empty()
+                && !self.segments.iter().any(|segment| {
+                    segment.speaker.0 == speaker
+                        && (segment.channel == crate::Channel::Mic
+                            || self.self_speaker.as_ref() == Some(&speaker))
+                })
         {
-            entry.insert(name.trim().into());
-            true
-        } else {
-            false
+            return false;
         }
+        // A configured name is not evidence for an unconfirmed acoustic link.
+        self.speaker_suggestions.remove(&speaker);
+        self.speaker_voice_ids.remove(&speaker);
+        self.speaker_names.insert(speaker, name.trim().into());
+        true
     }
 }

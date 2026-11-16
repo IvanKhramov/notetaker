@@ -2,6 +2,8 @@
 use anyhow::{Context, Result, ensure};
 use notetaker_asr_proto::TimeRange;
 use notetaker_core::{Channel, Library, Meeting, Transcript, VoiceEvidence, VoiceSample};
+mod media;
+pub use media::{LearningSpaceError, cleanup_learning_temp};
 
 pub struct Enrollment {
     pub count: usize,
@@ -438,20 +440,17 @@ pub struct HistoricalEnrollment {
 pub fn learn_recording(
     library: &Library,
     source: &str,
+    duration_secs: u32,
     evidence: &[VoiceEvidence],
     download: impl FnOnce(&mut std::fs::File) -> Result<()>,
     mut embed: impl FnMut(&std::path::Path, Vec<TimeRange>) -> Result<Vec<f32>>,
     cancelled: impl Fn() -> bool,
 ) -> Result<HistoricalEnrollment> {
-    anyhow::ensure!(
-        !evidence.iter().any(|v| v.registered && v.track.is_none()),
-        "Владелец ключа не определён однозначно"
-    );
     let mut candidates = Vec::new();
     let mut known = Vec::new();
     for voice in evidence
         .iter()
-        .filter(|v| v.registered && v.track.is_some())
+        .filter(|v| v.registered && v.track == Some(Channel::System))
     {
         if library.learned_recording_identity(source, &voice.speaker)? {
             known.push(voice.speaker.clone());
@@ -471,7 +470,7 @@ pub fn learn_recording(
             people: known,
         });
     }
-    let temp = tempfile::tempdir()?;
+    let (_lock, temp) = media::workspace(library, duration_secs)?;
     let path = temp.path().join("recording.mp4");
     let mut file = std::fs::File::create(&path)?;
     download(&mut file)?;
@@ -499,13 +498,15 @@ pub fn learn_recording(
         if ranges.iter().map(|r| r.end_ms - r.start_ms).sum::<u64>() < 6000 {
             continue;
         }
-        let embedding = embed(&wav, ranges)?;
+        let clip = temp.path().join("fragments.wav");
+        let ranges = media::fragments(&wav, &clip, ranges, &cancelled)?;
+        let embedding = embed(&clip, ranges)?;
         anyhow::ensure!(!cancelled(), "Обучение голосов отменено");
         samples.push(VoiceSample {
             recording_id: voice.recording_id.clone(),
             speaker: voice.speaker.clone(),
             name: voice.name.clone(),
-            own: voice.track == Some(Channel::Mic),
+            own: false,
             embedding,
         });
     }
@@ -531,6 +532,7 @@ mod historical_tests {
     }
     #[test]
     fn native_mp4_learning_is_idempotent_and_temp_media_is_removed() {
+        let _test = media::TEST_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let library = Library::open(dir.path()).unwrap();
         let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -539,6 +541,7 @@ mod historical_tests {
         let report = learn_recording(
             &library,
             "source",
+            12,
             &[evidence()],
             |out| {
                 std::io::copy(&mut std::fs::File::open(&source)?, out)?;
@@ -561,6 +564,7 @@ mod historical_tests {
         let report = learn_recording(
             &library,
             "source",
+            12,
             &[evidence()],
             |_| panic!("already learned: no download"),
             |_, _| panic!("already learned: no ASR"),
@@ -573,6 +577,7 @@ mod historical_tests {
     }
     #[test]
     fn failure_and_cancel_remove_temporary_audio_and_ambiguous_owner_never_embeds() {
+        let _test = media::TEST_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let library = Library::open(dir.path()).unwrap();
         let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -583,6 +588,7 @@ mod historical_tests {
             let result = learn_recording(
                 &library,
                 "failed",
+                12,
                 &[evidence()],
                 |out| {
                     std::io::copy(&mut std::fs::File::open(&source)?, out)?;
@@ -609,12 +615,14 @@ mod historical_tests {
             learn_recording(
                 &library,
                 "ambiguous",
+                12,
                 &[owner],
                 |_| panic!("no download for ambiguous owner"),
                 |_, _| panic!("no ASR"),
                 || false
             )
-            .is_err()
+            .unwrap()
+            .no_speech
         );
         let mut guest = evidence();
         guest.registered = false;
@@ -622,6 +630,7 @@ mod historical_tests {
             learn_recording(
                 &library,
                 "guest",
+                12,
                 &[guest],
                 |_| panic!("guests are not learned"),
                 |_, _| panic!("guests are not learned"),

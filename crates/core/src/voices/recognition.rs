@@ -37,9 +37,14 @@ impl VoiceLibrary {
         automatic: bool,
     ) {
         let mut used: BTreeSet<_> = transcript
-            .speaker_names
-            .keys()
-            .filter_map(|id| transcript.speaker_voice_ids.get(id).cloned())
+            .speaker_identities()
+            .filter(|(id, _)| {
+                transcript
+                    .segments
+                    .iter()
+                    .any(|segment| segment.speaker.0 == *id)
+            })
+            .filter_map(|(_, identity)| identity.voice_id.map(str::to_owned))
             .collect();
         for voice in &self.voices {
             if let Some(id) = &voice.id
@@ -47,10 +52,13 @@ impl VoiceLibrary {
                     .tolk_identities
                     .iter()
                     .any(|alias| used.contains(alias))
-                    || transcript
-                        .speaker_names
-                        .values()
-                        .any(|name| same_name(name, &voice.name)))
+                    || transcript.speaker_identities().any(|(speaker, identity)| {
+                        same_name(identity.name, &voice.name)
+                            && transcript
+                                .segments
+                                .iter()
+                                .any(|segment| segment.speaker.0 == speaker)
+                    }))
             {
                 used.insert(id.clone());
             }
@@ -59,7 +67,7 @@ impl VoiceLibrary {
             .iter()
             .filter_map(|(speaker, embedding)| {
                 if !transcript.segments.iter().any(|s| s.speaker.0 == *speaker)
-                    || transcript.speaker_names.contains_key(speaker)
+                    || transcript.speaker_identity(speaker).is_some()
                     || transcript.ktalk_sources.contains_key(speaker)
                     || transcript
                         .segments
@@ -83,44 +91,77 @@ impl VoiceLibrary {
             let Some(id) = &voice.id else {
                 continue;
             };
-            if !transcript.voice_rejected.contains(speaker) {
-                transcript
-                    .speaker_voice_ids
-                    .insert(speaker.clone(), id.clone());
-            }
             if automatic
                 && score >= AUTOMATIC_THRESHOLD
                 && margin >= AUTOMATIC_MARGIN
                 && !transcript.voice_rejected.contains(speaker)
                 && used.insert(id.clone())
             {
-                transcript
-                    .speaker_names
-                    .insert(speaker.clone(), voice.name.clone());
+                transcript.speaker_voice_ids.remove(speaker);
                 transcript.speaker_suggestions.remove(speaker);
                 transcript.voice_recognitions.insert(
                     speaker.clone(),
                     crate::VoiceRecognition {
+                        name: voice.name.clone(),
                         voice_id: id.clone(),
                         similarity_milli: (score * 1000.0).round().clamp(0.0, 1000.0) as u16,
                     },
                 );
+            } else if !transcript.voice_rejected.contains(speaker) {
+                transcript
+                    .speaker_voice_ids
+                    .insert(speaker.clone(), id.clone());
             }
         }
     }
 }
 impl Transcript {
-    pub fn reject_voice(&mut self, speaker: &str) {
-        if self.voice_recognitions.remove(speaker).is_some() {
-            if let Some(name) = self.speaker_names.remove(speaker) {
-                self.speaker_suggestions.insert(speaker.into(), name);
-            }
+    pub fn reject_voice(&mut self, speaker: &str) -> String {
+        if let Some(mark) = self.voice_recognitions.remove(speaker) {
             self.speaker_voice_ids.remove(speaker);
             self.voice_rejected.insert(speaker.into());
+            let target = if (speaker == "me" || self.self_speaker.as_deref() == Some(speaker))
+                && !self
+                    .segments
+                    .iter()
+                    .any(|s| s.speaker.0 == speaker && s.channel == crate::Channel::Mic)
+            {
+                let target = self.new_speaker_id();
+                for segment in self.segments.iter_mut().filter(|s| s.speaker.0 == speaker) {
+                    segment.speaker.0.clone_from(&target);
+                }
+                self.self_speaker = None;
+                self.speaker_suggestions.remove(speaker);
+                self.voice_rejected.insert(target.clone());
+                target
+            } else {
+                speaker.into()
+            };
+            self.speaker_suggestions.insert(target.clone(), mark.name);
+            return target;
         }
+        speaker.into()
     }
 }
 impl Library {
+    /// Restore recognition from the local cache after a writer dropped optional fields.
+    pub fn recognize_meeting(&self, meeting: &Meeting, automatic: bool) -> Result<()> {
+        let cache = self.read_meeting_voices(meeting)?;
+        if cache.model != VOICE_MODEL || cache.embeddings.is_empty() {
+            return Ok(());
+        }
+        let bank = self.prepare_voices()?;
+        let mut changed = false;
+        meeting.update_transcript(|transcript| {
+            let before = transcript.clone();
+            bank.recognize(transcript, &cache.embeddings, automatic);
+            changed |= *transcript != before;
+        })?;
+        if changed {
+            self.reindex_incremental()?;
+        }
+        Ok(())
+    }
     /// A stable local key prevents repeated sync from inflating the comparison counter.
     pub fn review_voice_names(
         &self,
@@ -150,9 +191,20 @@ impl Library {
             if truth.is_empty() {
                 continue;
             }
+            let Some(voice) = bank
+                .voices
+                .iter()
+                .find(|voice| voice.id.as_deref() == Some(&mark.voice_id))
+            else {
+                continue;
+            };
+            // A local UUID alone cannot prove a relationship to a Tolk identity.
+            if !mark.voice_id.starts_with("ktalk-") && voice.tolk_identities.is_empty() {
+                continue;
+            }
             let corrected = truth
                 .iter()
-                .any(|id| after.speaker_name(id) != before.speaker_name(speaker));
+                .any(|id| voice.id.as_ref() != Some(id) && !voice.tolk_identities.contains(id));
             let source = truth
                 .iter()
                 .filter_map(|id| after.ktalk_sources.get(id))
@@ -223,7 +275,7 @@ mod tests {
         assert!(t.speaker_suggestions.contains_key("s1"));
         assert!(!t.speaker_names.contains_key("me"));
         assert_eq!(t.voice_recognitions.len(), 1);
-        t.reject_voice("s2");
+        let _ = t.reject_voice("s2");
         assert!(!t.speaker_names.contains_key("s2"));
         assert!(!t.speaker_voice_ids.contains_key("s2"));
         bank.recognize(

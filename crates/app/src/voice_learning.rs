@@ -117,6 +117,7 @@ fn recording_job(
         notetaker_pipeline::learn_recording(
             &library,
             &source,
+            recording.duration,
             &evidence,
             |file| {
                 client.download_recording(&recording, file)?;
@@ -217,12 +218,17 @@ pub fn poll(state: &mut AppState) -> bool {
                         }
                         Err(error) => {
                             let message = error.to_string();
-                            learning.queue.remaining.retain(|next| next != &id);
-                            learning.queue.attempted += 1;
-                            if error.is::<ktalk::NetworkError>() {
-                                learning.queue.network_errors += 1;
+                            if error.is::<notetaker_pipeline::LearningSpaceError>() {
+                                learning.queue.active = false;
+                                learning.plan = None;
                             } else {
-                                learning.queue.other_errors += 1;
+                                learning.queue.remaining.retain(|next| next != &id);
+                                learning.queue.attempted += 1;
+                                if error.is::<ktalk::NetworkError>() {
+                                    learning.queue.network_errors += 1;
+                                } else {
+                                    learning.queue.other_errors += 1;
+                                }
                             }
                             learning.status = message;
                             if learning.queue.remaining.is_empty() {
@@ -623,6 +629,48 @@ pub fn voice_settings(
 #[cfg(test)]
 mod layout_tests {
     use super::*;
+    #[test]
+    fn insufficient_disk_space_stops_the_queue_without_consuming_the_recording() {
+        let (mut state, _, _) = crate::test_ui::state();
+        let root = tempfile::tempdir().unwrap();
+        state.settings.library = root.path().into();
+        state.settings.voice_library = true;
+        state.settings_draft = state.settings.clone();
+        state.ready = true;
+        state.quickstart.models.diarization = crate::quickstart::Status::Ready;
+        state.ktalk.saved = true;
+        state.ktalk.settings = Some(Settings {
+            base_url: "https://neutral.ktalk.ru".into(),
+            credential_id: "neutral".into(),
+            api_key_env: None,
+            extra: Default::default(),
+        });
+        state.ktalk.learning.load(root.path()).unwrap();
+        state.ktalk.learning.queue = LearningQueue {
+            origin: "https://neutral.ktalk.ru".into(),
+            total: 1,
+            remaining: vec!["one".into()],
+            active: true,
+            ..Default::default()
+        };
+        let (tx, rx) = mpsc::channel();
+        state.ktalk.learning.receiver = Some(rx);
+        tx.send(Completed::Record {
+            id: "one".into(),
+            result: Err(notetaker_pipeline::LearningSpaceError::Insufficient.into()),
+            cancelled: false,
+        })
+        .unwrap();
+        poll(&mut state);
+        assert!(!state.ktalk.learning.queue.active);
+        assert_eq!(state.ktalk.learning.queue.remaining, vec!["one"]);
+        assert_eq!(state.ktalk.learning.queue.attempted, 0);
+        assert!(state.ktalk.learning.status.contains("Недостаточно места"));
+        let mut restarted = LearningUi::default();
+        restarted.load(root.path()).unwrap();
+        assert!(!restarted.queue.active);
+        assert_eq!(restarted.queue.remaining, vec!["one"]);
+    }
 
     fn plan() -> LearningPlan {
         LearningPlan {
