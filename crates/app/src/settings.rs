@@ -252,6 +252,7 @@ impl Panel {
                 {
                     state.ktalk_job(job);
                 }
+                crate::voice_learning::settings(ui, state);
             }
             Section::General => {
                 let settings = &mut state.settings_draft;
@@ -383,6 +384,7 @@ impl Panel {
                         "Создавать конспект после встречи",
                     );
                     toggle(ui, &mut settings.voice_library, "Запоминать голоса");
+                    crate::voice_learning::voice_settings(ui, settings, &state.voices);
 
                     ui.add_enabled_ui(cfg!(any(windows, target_os = "macos")), |ui| {
                         toggle(

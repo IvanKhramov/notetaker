@@ -54,6 +54,12 @@ fn sync(
     print_plan(plan, out)?;
     if !dry_run {
         let result = ktalk::apply(library, meeting, plan)?;
+        if library
+            .review_voice_names(meeting, &result.before, &result.after.value)
+            .is_err()
+        {
+            notetaker_runtime::diagnostics::event("Tolk voice recognition statistics not saved");
+        }
         if let Some(error) = result.index_error {
             writeln!(out, "Имена сохранены; поиск не обновлён: {error}")?;
         }
@@ -144,6 +150,9 @@ mod tests {
         let words: Vec<_> = texts.iter().enumerate().map(|(i,text)| serde_json::json!({"text":text,"startTimeOffsetInMillis":times[i],"endTimeOffsetInMillis":times[i]+3000})).collect();
         let remote = serde_json::from_value(serde_json::json!({"status":"complete","tracks":[{"speaker":{"isAnonymous":true,"anonymousId":"guest","anonymousName":"Анна Петрова"},"chunks":[{"startTimeOffsetInMillis":0,"endTimeOffsetInMillis":80000,"words":words}]}]})).unwrap();
         let recording = ktalk::Recording {
+            qualities: Vec::new(),
+            has_audio_record: false,
+            transcription: None,
             id: "test".into(),
             title: "Тест".into(),
             created_date: start,

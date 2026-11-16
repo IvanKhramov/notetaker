@@ -121,6 +121,7 @@ macro_rules! app_settings_schema {
             pub folder: Option<String>,
             pub folder_mode_override: Option<$crate::Mode>,
             pub voice_library: bool,
+            pub automatic_voice_names: bool,
             /// Only credential IDs and display names, never subscription URLs.
             pub calendars: Vec<$calendar>,
             pub calendar_timezone: String,
@@ -197,6 +198,7 @@ macro_rules! app_settings_schema {
                     folder: None,
                     folder_mode_override: None,
                     voice_library: false,
+                    automatic_voice_names: true,
                     calendars: Vec::new(),
                     calendar_timezone: "Europe/Moscow".into(),
                     mcp_exclude_local: true,

@@ -1,5 +1,10 @@
 //! Neutral synthetic meeting shared by headless tests and screenshot scenes.
 pub fn plan() -> (notetaker_core::Transcript, notetaker_llm::ktalk::Plan) {
+    plan_with_recognition(None)
+}
+pub fn plan_with_recognition(
+    recognition: Option<notetaker_core::VoiceRecognition>,
+) -> (notetaker_core::Transcript, notetaker_llm::ktalk::Plan) {
     use notetaker_core::{Channel, Segment, Source, SpeakerId, Transcript};
     let start = chrono::Utc::now() - chrono::Duration::minutes(6);
     let texts = [
@@ -60,6 +65,9 @@ pub fn plan() -> (notetaker_core::Transcript, notetaker_llm::ktalk::Plan) {
     let remote =
         serde_json::from_value(serde_json::json!({"status":"complete","tracks":tracks})).unwrap();
     let recording = notetaker_llm::ktalk::Recording {
+        qualities: Vec::new(),
+        has_audio_record: false,
+        transcription: None,
         id: "neutral-recording".into(),
         title: "Планирование выпуска".into(),
         created_date: start,
@@ -71,6 +79,9 @@ pub fn plan() -> (notetaker_core::Transcript, notetaker_llm::ktalk::Plan) {
         firstname: "Олег".into(),
         surname: "Сидоров".into(),
     };
+    if let Some(mark) = recognition {
+        local.voice_recognitions.insert("system-0".into(), mark);
+    }
     let plan = notetaker_llm::ktalk::plan(&local, start, recording, &remote, Some(&owner)).unwrap();
     (local, plan)
 }

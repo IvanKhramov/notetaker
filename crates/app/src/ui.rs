@@ -4708,6 +4708,11 @@ fn transcript_view(
                                     )
                                     .sense(egui::Sense::click()),
                                 );
+                                crate::speakers::voice_note(
+                                    ui,
+                                    &document.data.transcript,
+                                    &segment.speaker.0,
+                                );
                                 ui.spacing_mut().item_spacing.x = 8.0;
                                 let label = &cache.times[index];
                                 if ui

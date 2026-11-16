@@ -37,6 +37,7 @@ mod updates;
 #[path = "updates_macos.rs"]
 mod updates;
 mod virtual_rows;
+mod voice_learning;
 mod wording;
 mod worker;
 

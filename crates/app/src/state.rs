@@ -1840,6 +1840,7 @@ impl AppState {
             && (self.shutdown.forced()
                 || (self.pending_ai.is_empty()
                     && !self.ktalk.busy
+                    && !self.ktalk.learning.busy()
                     && !self.connections.busy()
                     && !self.settings_autosave.pending
                     && !self.recording.busy()

@@ -518,7 +518,10 @@ pub fn plan(
         {
             continue;
         }
-        if original == "me" {
+        if original == "me"
+            && !local.voice_rejected.contains(original)
+            && !local.voice_recognitions.contains_key(original)
+        {
             let Some(owner) = owner else { continue };
             ensure!(!owner.name().is_empty(), "Некорректный профиль Толка");
             if local.speaker_suggestions.get("me") != Some(&owner.name()) {
@@ -537,7 +540,9 @@ pub fn plan(
                 .ok_or_else(malformed)?;
             continue;
         }
-        if local.self_speaker.as_ref() == Some(original) {
+        if local.self_speaker.as_ref() == Some(original)
+            && !local.voice_recognitions.contains_key(original)
+        {
             continue;
         }
         let interval = [shifted(
@@ -576,6 +581,7 @@ pub fn plan(
                 .entry((*id).clone())
                 .or_insert_with(|| (*name).clone());
             after.speaker_suggestions.remove(*id);
+            after.voice_recognitions.remove(*id);
             if !local.speaker_names.contains_key(*id) {
                 after.speaker_voice_ids.remove(*id);
             }
@@ -585,6 +591,7 @@ pub fn plan(
         }
     }
     let active = after.speaker_ids();
+    after.voice_recognitions.retain(|id, _| active.contains(id));
     after.speaker_names.retain(|id, _| active.contains(id));
     after
         .speaker_suggestions
@@ -597,7 +604,10 @@ pub fn plan(
         .map(|segment| segment.end_ms)
         .max()
         .unwrap_or(0);
-    let voices = voice_evidence(remote, offset, bound, owner)?;
+    let mut voices = voice_evidence(remote, offset, bound, owner)?;
+    for voice in &mut voices {
+        voice.recording_id = Some(recording.id.clone());
+    }
     for voice in voices.iter().filter(|voice| voice.registered) {
         if after.speaker_names.contains_key(&voice.speaker) {
             after
@@ -659,6 +669,20 @@ pub fn apply(library: &Library, meeting: &Meeting, plan: &Plan) -> Result<Applie
     })
 }
 
+/// Historical recordings never prove ownership by a display name.
+pub fn recording_voice_evidence(
+    remote: &Transcript,
+    recording: &Recording,
+    owner: &User,
+) -> Result<Vec<VoiceEvidence>> {
+    remote.validate()?;
+    let mut voices = voice_evidence(remote, 0, u64::from(recording.duration) * 1000, None)?;
+    voices.retain(|voice| voice.name.trim().to_lowercase() != owner.name().to_lowercase());
+    for voice in &mut voices {
+        voice.recording_id = Some(recording.id.clone());
+    }
+    Ok(voices)
+}
 /// Use word timings only. Other speakers, including guests, exclude a 300 ms margin.
 fn voice_evidence(
     remote: &Transcript,
@@ -745,6 +769,7 @@ fn voice_evidence(
         ranges.sort_by_key(|(a, b)| std::cmp::Reverse(b - a));
         ranges.truncate(8);
         result.push(VoiceEvidence {
+            recording_id: None,
             speaker: id.clone(),
             name: name.clone(),
             registered: *registered,

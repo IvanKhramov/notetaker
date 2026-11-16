@@ -813,7 +813,12 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                     let _ = events.send(Event::Loaded {
                         path,
                         result: (|| -> Result<_> {
-                            default_self_name(&meeting, &Settings::load()?.user_name)?;
+                            let settings = Settings::load()?;
+                            if settings.voice_library {
+                                Library::open(meeting.path().parent().context("Нет библиотеки")?)?
+                                    .recognize_meeting(&meeting, settings.automatic_voice_names)?;
+                            }
+                            default_self_name(&meeting, &settings.user_name)?;
                             DocumentData::read(meeting)
                         })()
                         .map_err(error_text),
@@ -1427,6 +1432,7 @@ fn record(
                     .and_then(|d| d.speaker_hint)
                     .or(request.settings.speakers),
                 voice_library: request.settings.voice_library,
+                automatic_voice_names: request.settings.automatic_voice_names,
             },
             retention: request
                 .settings

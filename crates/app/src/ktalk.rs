@@ -26,11 +26,11 @@ impl Control {
             handle.cancel();
         }
     }
-    fn check(&self) -> Result<()> {
+    pub(crate) fn check(&self) -> Result<()> {
         anyhow::ensure!(!self.token.is_cancelled(), "Операция Толка отменена");
         Ok(())
     }
-    fn attach(&self, handle: notetaker_asr_proto::CancellationHandle) {
+    pub(crate) fn attach(&self, handle: notetaker_asr_proto::CancellationHandle) {
         if self.token.is_cancelled() {
             handle.cancel();
         }
@@ -170,6 +170,7 @@ pub struct Undo {
     pub after: Revision,
 }
 pub struct Applied {
+    pub statistics_updated: bool,
     pub applied_at: Instant,
     pub document: Box<DocumentData>,
     pub undo: Undo,
@@ -264,6 +265,7 @@ pub enum Message {
 }
 #[derive(Default)]
 pub struct State {
+    pub learning: crate::voice_learning::LearningUi,
     pub biometric: bool,
     pub cancel: Control,
     pub settings: Option<Settings>,
@@ -401,6 +403,7 @@ pub(crate) fn recorded_here(meeting: &Meeting) -> Result<bool> {
 pub fn pickup(root: &Path, now: DateTime<Utc>) -> Result<Vec<Task>> {
     let library = Library::open(root)?;
     library.discard_voice_ledgers()?;
+    notetaker_pipeline::cleanup_learning_temp(&library)?;
     let mut tasks = Vec::new();
     let mut present = std::collections::HashSet::new();
     for meeting in library.list_meetings()? {
@@ -672,7 +675,9 @@ fn apply(task: &mut Task, plan: &Plan, voices: bool, control: &Control) -> Resul
     }
     task.progress.enrol_status = voice_status.clone();
     persist(task)?;
-    Ok(Applied {
+    let statistics_after = applied.after.value;
+    let mut result = Applied {
+        statistics_updated: false,
         applied_at,
         document: Box::new(DocumentData::read(meeting.clone())?),
         undo: Undo {
@@ -689,7 +694,17 @@ fn apply(task: &mut Task, plan: &Plan, voices: bool, control: &Control) -> Resul
         segments,
         recording: plan.recording.clone(),
         voice_status,
-    })
+    };
+    let stats = (|| -> Result<()> {
+        let library = Library::open(meeting.path().parent().context("Нет библиотеки")?)?;
+        Ok(library.review_voice_names(&meeting, &result.undo.before, &statistics_after)?)
+    })();
+    if stats.is_err() {
+        notetaker_runtime::diagnostics::event("Tolk voice recognition statistics not saved");
+    } else {
+        result.statistics_updated = !result.undo.before.voice_recognitions.is_empty();
+    }
+    Ok(result)
 }
 fn sync(
     task: &mut Task,
@@ -1096,7 +1111,7 @@ pub fn settings_ui(ui: &mut eframe::egui::Ui, state: &mut State) -> Option<Job> 
     let mut flush = false;
     let mut settings = settings_draft(state);
     theme::settings_group(ui, "Пространство Толка", |ui| {
-        ui.add_enabled_ui(!state.busy,|ui| {
+        ui.add_enabled_ui(!state.busy && !state.learning.busy(),|ui| {
             theme::setting_row(ui,"Адрес пространства",|ui| {
                 let response=ui.add(theme::text_field(&mut state.address).hint_text("https://space.ktalk.ru").desired_width(ui.available_width()));
                 state.settings_edited|=response.changed();flush|=response.lost_focus();
@@ -1235,8 +1250,10 @@ fn preview_speaker(transcript: Option<&Transcript>, speaker: &str, rows: &[ktalk
     {
         return "Я".into();
     }
-    if let Some(name) = transcript.and_then(|text| text.speaker_names.get(speaker)) {
-        return name.clone();
+    if let Some(name) =
+        transcript.and_then(|text| text.speaker_identity(speaker).map(|identity| identity.name))
+    {
+        return name.into();
     }
     let mut ids = Vec::new();
     for row in rows {
@@ -1519,8 +1536,26 @@ pub fn source_note(ui: &mut eframe::egui::Ui, path: &Path, transcript: &Transcri
     )
     .on_hover_text(time);
 }
-pub fn transcript_ui(ui: &mut eframe::egui::Ui, state: &mut crate::state::AppState, path: &Path) {
+pub(crate) fn voice_consent(ui: &mut eframe::egui::Ui) -> Option<bool> {
     use crate::theme::{self, ButtonStyle};
+    let mut choice = None;
+    theme::callout(ui, theme::icons::INFO, |ui| {
+        ui.label("Запоминать голоса людей, чтобы узнавать их на встречах без записи Толка? Отпечатки голосов хранятся только на этом компьютере.");
+        ui.horizontal_wrapped(|ui| {
+            if theme::button(ui, "Включить", ButtonStyle::Primary).clicked() {
+                choice = Some(true);
+            }
+            if theme::button(ui, "Не сейчас", ButtonStyle::Ghost).clicked() {
+                choice = Some(false);
+            }
+        });
+    });
+    choice
+}
+pub(crate) fn mark_learning_offer(root: &Path) -> Result<()> {
+    crate::config::atomic_write(&offer_path(root)?, "1")
+}
+pub fn transcript_ui(ui: &mut eframe::egui::Ui, state: &mut crate::state::AppState, path: &Path) {
     let Some(document) = state.documents.get(path) else {
         return;
     };
@@ -1543,14 +1578,9 @@ pub fn transcript_ui(ui: &mut eframe::egui::Ui, state: &mut crate::state::AppSta
             .tasks
             .get(path)
             .is_some_and(|task| !task.progress.voice_offer_seen);
-    if show_offer {
-        theme::callout(ui, theme::icons::INFO, |ui| {
-            ui.label("Запоминать голоса этих людей, чтобы узнавать их на встречах без записи Толка? Отпечатки голосов хранятся только на этом компьютере.");
-            ui.horizontal_wrapped(|ui| {
-                enable = theme::button(ui, "Включить", ButtonStyle::Primary).clicked();
-                dismiss = theme::button(ui, "Не сейчас", ButtonStyle::Ghost).clicked();
-            });
-        });
+    if show_offer && let Some(choice) = voice_consent(ui) {
+        enable = choice;
+        dismiss = !choice;
     }
     if (enable || dismiss)
         && !state.ktalk.busy
@@ -1635,6 +1665,10 @@ impl crate::state::AppState {
         self.ktalk_job_at(job, Moment::now());
     }
     fn ktalk_job_at(&mut self, job: Job, now: Moment) {
+        if self.ktalk.learning.busy() {
+            self.error = Some("Остановите обучение голосов перед другой операцией Толка".into());
+            return;
+        }
         if self.ktalk.busy || self.settings_pending {
             return;
         }
@@ -1728,6 +1762,9 @@ impl crate::state::AppState {
         self.poll_ktalk_at(Moment::now());
     }
     fn poll_ktalk_at(&mut self, now: Moment) {
+        if crate::voice_learning::poll(self) {
+            return;
+        }
         if self.exit_requested
             || !self.ready
             || self.settings_pending
@@ -1894,6 +1931,12 @@ impl crate::state::AppState {
                 let path = task.meeting.path().to_path_buf();
                 match outcome {
                     Outcome::Applied(applied) => {
+                        if applied.statistics_updated {
+                            self.send(crate::worker::Command::Voices {
+                                root: self.settings.library.clone(),
+                                delete: None,
+                            });
+                        }
                         self.ktalk.inspected.insert(path.clone());
                         let applied = *applied;
                         self.ktalk
@@ -2209,6 +2252,7 @@ mod tests {
                 &task.meeting,
                 &text,
                 vec![notetaker_core::VoiceSample {
+                    recording_id: None,
                     speaker: "ktalk-another-person".into(),
                     name: name.clone(),
                     embedding: vec![1.0, 0.0],
@@ -2387,6 +2431,37 @@ mod tests {
             task.after(&Outcome::Waiting, now + chrono::Duration::minutes(minute));
         }
         assert!(task.progress.done);
+    }
+    #[test]
+    fn damaged_voice_statistics_cannot_break_the_applied_result_pending_or_undo() {
+        let (_root, mut task, _) = fixture();
+        let (before, plan) =
+            crate::ktalk_fixture::plan_with_recognition(Some(notetaker_core::VoiceRecognition {
+                name: "Анна Петрова".into(),
+                voice_id: "ktalk-neutral".into(),
+                similarity_milli: 800,
+            }));
+        task.meeting.write_transcript(&before).unwrap();
+        let lib = Library::open(task.meeting.path().parent().unwrap()).unwrap();
+        std::fs::create_dir_all(lib.private_state_dir()).unwrap();
+        let bank = lib.private_state_dir().join("voices.json");
+        std::fs::write(&bank, b"{broken").unwrap();
+        let result = apply(&mut task, &plan, true, &Control::default()).unwrap();
+        assert!(!result.statistics_updated);
+        assert!(!result.document.transcript.ktalk_sources.is_empty());
+        assert!(result.document.transcript.voice_recognitions.is_empty());
+        assert_eq!(result.undo.before, before);
+        let saved = read_progress(&task.meeting).unwrap();
+        assert!(saved.done && saved.enrol_pending);
+        assert_eq!(
+            saved.pending_enrollment.unwrap().revision,
+            result.undo.after
+        );
+        assert_eq!(std::fs::read(bank).unwrap(), b"{broken");
+        task.meeting
+            .restore_transcript(&result.undo.before, result.undo.after)
+            .unwrap();
+        assert_eq!(task.meeting.read_transcript().unwrap(), before);
     }
     #[test]
     fn deleted_meeting_drops_its_pending_enrollment_instead_of_failing_forever() {
@@ -2886,6 +2961,9 @@ mod tests {
         output.drop_without_applying_deltas();
         assert!(visible);
         let recording = Recording {
+            qualities: Vec::new(),
+            has_audio_record: false,
+            transcription: None,
             id: "choice".into(),
             title: "Выбрать эту запись".into(),
             created_date: Utc::now(),

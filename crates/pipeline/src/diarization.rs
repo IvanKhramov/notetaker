@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use notetaker_asr_proto::{AsrClient, Diarization, TimeRange};
-use notetaker_core::{Channel, Library, Meeting, SELF_THRESHOLD, Transcript};
+use notetaker_core::{Channel, Library, Meeting, Transcript};
 
 use crate::{Asr, PipelineEvent};
 
@@ -17,6 +17,7 @@ pub struct DiarizationConfig {
     pub enabled: bool,
     pub speakers: Option<u32>,
     pub voice_library: bool,
+    pub automatic_voice_names: bool,
 }
 impl Default for DiarizationConfig {
     fn default() -> Self {
@@ -24,6 +25,7 @@ impl Default for DiarizationConfig {
             enabled: true,
             speakers: None,
             voice_library: false,
+            automatic_voice_names: true,
         }
     }
 }
@@ -140,6 +142,9 @@ fn reset_system_speakers(transcript: &mut Transcript) {
         }
     }
     transcript
+        .voice_recognitions
+        .retain(|id, _| mic_ids.contains(id));
+    transcript
         .speaker_names
         .retain(|id, _| mic_ids.contains(id));
     transcript
@@ -182,41 +187,14 @@ pub(crate) fn final_pass(
             return;
         }
     };
-    let mut suggestions = BTreeMap::new();
-    let mut names = BTreeMap::new();
-    let mut voice_ids = BTreeMap::new();
+    let mut suggestions = BTreeMap::<String, String>::new();
+    let mut recognition_bank = None;
+    let mut voice_ids = BTreeMap::<String, String>::new();
     if config.voice_library {
         let local = (|| -> Result<()> {
             let library =
                 Library::open(meeting.path().parent().context("meeting has no library")?)?;
             let voices = library.prepare_voices()?;
-            let mut self_ids = Vec::new();
-            for (id, embedding) in &result.embeddings {
-                if let Some((voice, score)) = voices.suggest(embedding) {
-                    if mic.is_none() && voice.is_me && score >= SELF_THRESHOLD {
-                        if let Some(voice_id) = &voice.id {
-                            voice_ids.insert("me".into(), voice_id.clone());
-                        }
-                        self_ids.push(id.clone());
-                        names.insert("me".to_owned(), voice.name.clone());
-                    } else {
-                        if let Some(voice_id) = &voice.id {
-                            voice_ids.insert(id.clone(), voice_id.clone());
-                        }
-                        suggestions.insert(id.clone(), voice.name.clone());
-                    }
-                }
-            }
-            for id in self_ids {
-                for turn in &mut result.turns {
-                    if turn.speaker == id {
-                        turn.speaker = "me".into();
-                    }
-                }
-                if let Some(embedding) = result.embeddings.remove(&id) {
-                    result.embeddings.entry("me".into()).or_insert(embedding);
-                }
-            }
             if let Some(mic) = mic {
                 let transcript = meeting.read_transcript()?;
                 let ranges = transcript
@@ -230,7 +208,9 @@ pub(crate) fn final_pass(
                     .collect();
                 match asr.embed(mic, ranges) {
                     Ok(embedding) => {
-                        if let Some((voice, _)) = voices.suggest(&embedding) {
+                        if let Some((voice, _)) = voices.suggest(&embedding)
+                            && !transcript.speaker_names.contains_key("me")
+                        {
                             if let Some(voice_id) = &voice.id {
                                 voice_ids.insert("me".into(), voice_id.clone());
                             }
@@ -242,6 +222,7 @@ pub(crate) fn final_pass(
                 }
             }
             library.write_meeting_voices(meeting, result.embeddings.clone())?;
+            recognition_bank = Some(voices);
             Ok(())
         })();
         if let Err(error) = local {
@@ -250,9 +231,23 @@ pub(crate) fn final_pass(
     }
     if let Err(error) = meeting.update_transcript(|transcript| {
         assign(transcript, &result);
-        transcript.speaker_suggestions.extend(suggestions.clone());
-        transcript.speaker_names.extend(names.clone());
-        transcript.speaker_voice_ids.extend(voice_ids.clone());
+        for (id, name) in &suggestions {
+            if !transcript.speaker_names.contains_key(id) {
+                transcript
+                    .speaker_suggestions
+                    .insert(id.clone(), name.clone());
+            }
+        }
+        for (id, voice) in &voice_ids {
+            if !transcript.speaker_names.contains_key(id) {
+                transcript
+                    .speaker_voice_ids
+                    .insert(id.clone(), voice.clone());
+            }
+        }
+        if let Some(bank) = &recognition_bank {
+            bank.recognize(transcript, &result.embeddings, config.automatic_voice_names);
+        }
     }) {
         warning(error.into());
     }
@@ -556,11 +551,13 @@ mod tests {
             &tx,
         );
         let loaded = meeting.read_transcript().unwrap();
-        assert_eq!(loaded.segments[0].speaker.0, "me");
-        assert_eq!(loaded.speaker_name("me"), "Иван");
+        assert_eq!(loaded.segments[0].speaker.0, "s1");
+        assert_eq!(loaded.speaker_name("s1"), "Иван");
         assert_eq!(
-            loaded.speaker_voice_ids.get("me"),
-            library.read_voices().unwrap().voices[0].id.as_ref()
+            loaded
+                .speaker_identity("s1")
+                .and_then(|identity| identity.voice_id),
+            library.read_voices().unwrap().voices[0].id.as_deref()
         );
     }
 }

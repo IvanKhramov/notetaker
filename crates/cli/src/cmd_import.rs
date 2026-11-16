@@ -54,6 +54,7 @@ pub fn run(args: Args) -> Result<()> {
                     .and_then(|d| d.speaker_hint)
                     .or(settings.speakers),
                 voice_library: settings.voice_library,
+                automatic_voice_names: settings.automatic_voice_names,
             },
             retention: settings
                 .retention_days
