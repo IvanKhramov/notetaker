@@ -31,6 +31,13 @@ pub fn check() -> Result<()> {
     }
     Ok(())
 }
+pub fn download_plan() -> Result<()> {
+    let ready = check().is_ok();
+    for (_, name, size, _) in FILES {
+        println!("NOTETAKER_DOWNLOAD_PLAN {name} {size} {}", u8::from(ready));
+    }
+    Ok(())
+}
 pub fn download() -> Result<()> {
     let root = notetaker_core::embedding::models_dir()?;
     fs::create_dir_all(&root)?;

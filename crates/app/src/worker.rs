@@ -490,6 +490,7 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
         notetaker_core::embedding::set_models_dir(settings.models_path());
         let models = crate::quickstart::check_models();
         let mut voice_library_enabled = settings.voice_library;
+        let mut download_speech_model = settings.model.clone();
         let _ = events.send(Event::Voices(
             Library::open(&settings.library)
                 .and_then(|l| l.read_voices())
@@ -1039,9 +1040,11 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                     download_cancel =
                         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                     let cancel = download_cancel.clone();
+                    let speech = download_speech_model.clone();
                     let events = events.clone();
                     thread::spawn(move || {
-                        let result = download(&model, &events, &cancel).map_err(error_text);
+                        let result =
+                            download(&model, &events, &cancel, &speech).map_err(error_text);
                         let _ = events
                             .send(Event::Downloaded(result, crate::quickstart::check_models()));
                     });
@@ -1090,6 +1093,7 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                             let _ = events.send(Event::Models(crate::quickstart::check_models()));
                         }
                         voice_library_enabled = settings.voice_library;
+                        download_speech_model = settings.model.clone();
                         let _ = events.send(Event::Voices(
                             Library::open(&settings.library)
                                 .and_then(|l| l.read_voices())
@@ -1678,7 +1682,12 @@ fn ensure_embed_worker(events: &Events) -> Result<()> {
     }
 }
 
-fn download(model: &str, events: &Events, cancel: &std::sync::atomic::AtomicBool) -> Result<()> {
+fn download(
+    model: &str,
+    events: &Events,
+    cancel: &std::sync::atomic::AtomicBool,
+    speech: &str,
+) -> Result<()> {
     let binary = if model == "semantic" {
         ensure_embed_worker(events)?;
         notetaker_core::embedding::worker_path()
@@ -1696,6 +1705,43 @@ fn download(model: &str, events: &Events, cancel: &std::sync::atomic::AtomicBool
     {
         return Ok(());
     }
+    let asr = asr_binary()?;
+    let embed = notetaker_core::embedding::worker_path();
+    for (worker, group) in [
+        (&asr, Some(speech)),
+        (&asr, Some("diarization")),
+        (&embed, None),
+    ] {
+        if !worker.is_file() {
+            continue;
+        } // The optional worker is installed by its existing download step.
+        let mut plan = background_process(worker);
+        plan.arg("download-plan");
+        if let Some(group) = group {
+            plan.arg(group);
+        }
+        let output = plan.output()?;
+        ensure!(
+            output.status.success(),
+            "Не удалось получить размеры моделей: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let plan = String::from_utf8(output.stdout)?;
+        ensure!(
+            !plan.trim().is_empty()
+                && plan
+                    .lines()
+                    .all(|line| line.starts_with("NOTETAKER_DOWNLOAD_PLAN ")),
+            "Воркер не поддерживает план загрузки. Обновите полный пакет приложения."
+        );
+        for line in plan.lines() {
+            let _ = events.send(Event::DownloadProgress(line.into()));
+        }
+    }
+    let _ = events.send(Event::DownloadProgress(format!(
+        "NOTETAKER_DOWNLOAD_PLAN_END {}",
+        u8::from(embed.is_file())
+    )));
     let mut command = background_process(&binary);
     command.arg("download");
     if model != "semantic" {

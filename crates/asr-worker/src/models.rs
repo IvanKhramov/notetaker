@@ -254,23 +254,37 @@ fn download_one(root: &Path, model: &ModelManifest) -> Result<()> {
     Ok(())
 }
 
+fn downloads(id: &str) -> Result<Vec<&'static ModelManifest>> {
+    Ok(match id {
+        "auto" => vec![&GIGAAM, &PARAKEET, &SILERO, &WHISPER_TINY],
+        "diarization" => vec![&PYANNOTE, &ERES2NET],
+        _ => {
+            let model = manifest(id)?;
+            if id == GIGAAM.id || id == PARAKEET.id {
+                vec![model, &SILERO]
+            } else {
+                vec![model]
+            }
+        }
+    })
+}
+pub fn download_plan(id: &str) -> Result<()> {
+    let root = models_dir()?;
+    for model in downloads(id)? {
+        println!(
+            "NOTETAKER_DOWNLOAD_PLAN {} {} {}",
+            model.id,
+            model.size,
+            u8::from(installed(&root, model).is_ok())
+        );
+    }
+    Ok(())
+}
 pub fn download(id: &str) -> Result<()> {
     let root = models_dir()?;
     fs::create_dir_all(&root)?;
-    if id == "auto" {
-        download_one(&root, &GIGAAM)?;
-        download_one(&root, &PARAKEET)?;
-        download_one(&root, &SILERO)?;
-        return download_one(&root, &WHISPER_TINY);
-    }
-    if id == "diarization" {
-        download_one(&root, &PYANNOTE)?;
-        return download_one(&root, &ERES2NET);
-    }
-    let model = manifest(id)?;
-    download_one(&root, model)?;
-    if id == GIGAAM.id || id == PARAKEET.id {
-        download_one(&root, &SILERO)?;
+    for model in downloads(id)? {
+        download_one(&root, model)?;
     }
     Ok(())
 }

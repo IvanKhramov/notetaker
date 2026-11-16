@@ -63,7 +63,11 @@ struct Edits {
 impl Edits {
     fn text(&mut self, ui: &mut egui::Ui, label: &str, value: &mut String) {
         let response = setting(ui, label, |ui| {
-            ui.add(crate::theme::text_field(value).desired_width(ui.available_width().min(240.0)))
+            ui.add(
+                crate::theme::text_field(value)
+                    .hint_text(list_hint(label))
+                    .desired_width(ui.available_width().min(240.0)),
+            )
         });
         self.typing |= response.changed();
         self.blur |= response.lost_focus();
@@ -76,12 +80,30 @@ impl Edits {
         let response = setting(ui, label, |ui| {
             ui.add(
                 egui::TextEdit::multiline(value)
+                    .hint_text(list_hint(label))
                     .desired_rows(2)
                     .desired_width(ui.available_width()),
             )
         });
         self.typing |= response.changed();
         self.blur |= response.lost_focus();
+    }
+}
+fn list_hint(label: &str) -> &'static str {
+    match label {
+        "Другие варианты имени" => "Ваня, Ivan, Храмов И.",
+        "Словарь (один термин на строку)" => {
+            "Kubernetes = кубернетес, кубер
+PostgreSQL = постгрес"
+        }
+        "Свои приложения для звонков" => {
+            if cfg!(target_os = "macos") {
+                "zoom.us\nGoogle Chrome"
+            } else {
+                "KonturTalk.exe\nTelemost.exe"
+            }
+        }
+        _ => "",
     }
 }
 fn hint(ui: &mut egui::Ui, text: &str) {
@@ -1005,6 +1027,12 @@ fn toggle(ui: &mut egui::Ui, value: &mut bool, label: &str) -> egui::Response {
 }
 fn setting<R>(ui: &mut egui::Ui, label: &str, value: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let description = match label {
+        "Другие варианты имени" => {
+            Some("Через запятую. По этим именам приложение находит ваши задачи и реплики.")
+        }
+        "Свои приложения для звонков" => {
+            Some("По одному имени исполняемого файла на строку, без пути и масок.")
+        }
         "Режим новых встреч" => Some(
             "Локально: локальный AI. Гибрид: текст может отправляться провайдеру. Аудио остаётся на компьютере.",
         ),
@@ -1022,7 +1050,7 @@ fn setting<R>(ui: &mut egui::Ui, label: &str, value: impl FnOnce(&mut egui::Ui) 
         }
         "Проверять обновления" => Some("Раз в час и при запуске."),
         "Словарь (один термин на строку)" => {
-            Some("Алиасы: werf = верф, вёрф.")
+            Some("Один термин на строку. Варианты после знака = разделяйте запятыми.")
         }
         "URL календаря" => Some("Укажите URL, затем перейдите к другому полю."),
         "Масштаб интерфейса" => Some(if cfg!(target_os = "macos") {
@@ -1088,5 +1116,28 @@ mod tests {
         assert_eq!(state.settings.user_name, "After");
         assert_eq!(state.settings_draft.user_name, "After");
         assert!(!state.settings_pending);
+    }
+}
+
+#[cfg(test)]
+mod list_hint_tests {
+    #[test]
+    fn aliases_hint_and_description_are_visible_without_becoming_a_value() {
+        let ctx = eframe::egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut value = String::new();
+        let mut edits = super::Edits::default();
+        let output = crate::test_ui::frame(&ctx, vec![], &mut |ui| {
+            edits.text(ui, "Другие варианты имени", &mut value)
+        });
+        crate::test_ui::text_rect(&output.shapes, "Ваня, Ivan, Храмов И.");
+        crate::test_ui::text_rect(
+            &output.shapes,
+            "Через запятую. По этим именам приложение находит ваши задачи и реплики.",
+        );
+        assert!(value.is_empty());
+        output.drop_without_applying_deltas();
+        assert!(super::list_hint("Свои приложения для звонков").contains('\n'));
+        assert!(super::list_hint("Словарь (один термин на строку)").contains('='));
     }
 }

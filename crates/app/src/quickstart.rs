@@ -52,6 +52,10 @@ pub struct Transfer {
     pub received: u64,
     pub total: u64,
     pub last_byte: Instant,
+    files: std::collections::BTreeMap<String, (u64, u64)>,
+    plan_complete: bool,
+    started: Instant,
+    network_bytes: u64,
 }
 impl Transfer {
     pub fn waiting(now: Instant) -> Self {
@@ -60,9 +64,29 @@ impl Transfer {
             received: 0,
             total: 0,
             last_byte: now,
+            files: Default::default(),
+            plan_complete: false,
+            started: now,
+            network_bytes: 0,
         }
     }
     pub fn update(&mut self, line: &str, now: Instant) {
+        if let Some(known) = line.strip_prefix("NOTETAKER_DOWNLOAD_PLAN_END ") {
+            self.plan_complete = known == "1";
+            return;
+        }
+        if let Some(line) = line.strip_prefix("NOTETAKER_DOWNLOAD_PLAN ") {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            if let [file, total, installed] = fields.as_slice()
+                && let Ok(total) = total.parse::<u64>()
+            {
+                self.files.insert(
+                    (*file).into(),
+                    (if *installed == "1" { total } else { 0 }, total),
+                );
+            }
+            return;
+        }
         let Some(line) = line.strip_prefix("NOTETAKER_DOWNLOAD ") else {
             return;
         };
@@ -70,6 +94,9 @@ impl Transfer {
         if let [file, received, total] = fields.as_slice()
             && let (Ok(received), Ok(total)) = (received.parse::<u64>(), total.parse::<u64>())
         {
+            let previous = self.files.get(*file).map_or(0, |value| value.0);
+            self.network_bytes += received.saturating_sub(previous);
+            self.files.insert((*file).into(), (received, total));
             if *file != self.file || received > self.received {
                 self.last_byte = now;
             }
@@ -78,27 +105,69 @@ impl Transfer {
             self.total = total;
         }
     }
+    pub fn overall(&self) -> (u64, u64) {
+        self.files
+            .values()
+            .fold((0, 0), |(done, total), (file_done, file_total)| {
+                (done + file_done.min(file_total), total + file_total)
+            })
+    }
+    pub fn fraction(&self) -> Option<f32> {
+        let (done, total) = self.overall();
+        (self.plan_complete && total > 0 && self.files.values().all(|(_, total)| *total > 0))
+            .then(|| done as f32 / total as f32)
+    }
+    pub fn remaining_minutes(&self, now: Instant) -> Option<u64> {
+        let seconds = now.saturating_duration_since(self.started).as_secs_f64();
+        let (done, total) = self.overall();
+        if self.fraction().is_none()
+            || seconds < 3.0
+            || self.network_bytes < 1_000_000
+            || done >= total
+            || self.stalled(now)
+        {
+            return None;
+        }
+        Some(
+            (((total - done) as f64 / (self.network_bytes as f64 / seconds) / 60.0).ceil() as u64)
+                .max(1),
+        )
+    }
     pub fn stalled(&self, now: Instant) -> bool {
         (self.total == 0 || self.received < self.total)
             && now.saturating_duration_since(self.last_byte) >= Duration::from_secs(30)
     }
     pub fn text(&self, model: &str, phase: usize) -> String {
-        let label = match model {
-            "diarization" => "голоса",
-            "semantic" => "поиск по смыслу",
-            _ => "модель распознавания",
+        let label = match self.file.as_str() {
+            "gigaam-v3" => "модель русской речи",
+            "parakeet-v3" => "модель многоязычной речи",
+            "silero-vad" => "определение пауз",
+            "whisper-tiny" => "определение языка",
+            "pyannote-3.0" => "разделение собеседников",
+            "eres2net-base" => "распознавание голосов",
+            "model.onnx" => "модель поиска по смыслу",
+            "tokenizer.json" => "словарь поиска по смыслу",
+            _ => match model {
+                "diarization" => "разделение собеседников",
+                "semantic" => "поиск по смыслу",
+                _ => "модель распознавания речи",
+            },
         };
         let progress = if self.total == 0 {
-            "подключение…".into()
+            format!("{} МБ · размер уточняется", self.received / 1_000_000)
         } else {
             format!(
-                "{} из {} МБ · {}",
-                self.received / 1_000_000,
-                self.total.div_ceil(1_000_000),
-                self.file
+                "{:.1} из {:.1} МБ",
+                self.received as f64 / 1_000_000.0,
+                self.total as f64 / 1_000_000.0
             )
         };
-        format!("Подготовка к записи: {label}, {phase} из 3 · {progress}")
+        let eta = self
+            .remaining_minutes(Instant::now())
+            .map_or(String::new(), |minutes| {
+                format!(" · осталось около {minutes} мин")
+            });
+        format!("Подготовка к записи: {label}, этап {phase} из 3 · {progress}{eta}")
     }
 }
 #[derive(Default)]
@@ -234,6 +303,22 @@ pub fn model_status(ui: &mut egui::Ui, state: &mut AppState) {
                 });
             ui.add(egui::Label::new(egui::RichText::new(text).color(Palette::of(ui).muted)).wrap());
         });
+        let fraction = state
+            .quickstart
+            .transfer
+            .as_ref()
+            .and_then(Transfer::fraction);
+        theme::progress(ui, fraction, ui.available_width());
+        if let Some(transfer) = &state.quickstart.transfer {
+            let (done, total) = transfer.overall();
+            if fraction.is_some() {
+                ui.weak(format!(
+                    "Всего: {:.1} из {:.1} МБ",
+                    done as f64 / 1_000_000.0,
+                    total as f64 / 1_000_000.0
+                ));
+            }
+        }
         if state
             .quickstart
             .transfer
@@ -662,7 +747,7 @@ mod transfer_tests {
         let start = Instant::now();
         let mut transfer = Transfer::waiting(start);
         transfer.update("NOTETAKER_DOWNLOAD neutral 184000000 620000000", start);
-        assert!(transfer.text("auto", 1).contains("184 из 620 МБ"));
+        assert!(transfer.text("auto", 1).contains("184.0 из 620.0 МБ"));
         assert!(!transfer.stalled(start + Duration::from_secs(29)));
         assert!(transfer.stalled(start + Duration::from_secs(30)));
         transfer.update(
@@ -701,5 +786,66 @@ mod transfer_tests {
         assert!(state.quickstart.retry_at.is_none());
         auto_download(&mut state);
         assert!(matches!(commands.try_recv().unwrap(), Command::Download(_)));
+    }
+}
+
+#[cfg(test)]
+mod aggregate_progress_tests {
+    use super::*;
+    #[test]
+    fn aggregate_does_not_reset_when_the_next_file_begins_and_eta_uses_real_bytes() {
+        let at = Instant::now();
+        let mut transfer = Transfer::waiting(at);
+        for line in [
+            "NOTETAKER_DOWNLOAD_PLAN gigaam-v3 100000000 0",
+            "NOTETAKER_DOWNLOAD_PLAN silero-vad 100000000 0",
+            "NOTETAKER_DOWNLOAD_PLAN_END 1",
+        ] {
+            transfer.update(line, at);
+        }
+        assert_eq!(transfer.fraction(), Some(0.0));
+        assert_eq!(transfer.remaining_minutes(at), None);
+        transfer.update(
+            "NOTETAKER_DOWNLOAD gigaam-v3 100000000 100000000",
+            at + Duration::from_secs(10),
+        );
+        assert_eq!(transfer.fraction(), Some(0.5));
+        transfer.update(
+            "NOTETAKER_DOWNLOAD silero-vad 0 100000000",
+            at + Duration::from_secs(11),
+        );
+        assert_eq!(transfer.fraction(), Some(0.5));
+        transfer.update(
+            "NOTETAKER_DOWNLOAD silero-vad 50000000 100000000",
+            at + Duration::from_secs(20),
+        );
+        assert_eq!(transfer.fraction(), Some(0.75));
+        assert_eq!(
+            transfer.remaining_minutes(at + Duration::from_secs(20)),
+            Some(1)
+        );
+        assert!(transfer.text("auto", 1).contains("определение пауз"));
+        assert!(!transfer.text("auto", 1).contains("silero-vad"));
+    }
+    #[test]
+    fn unknown_plan_never_invents_a_percentage_and_cached_files_need_no_bandwidth() {
+        let at = Instant::now();
+        let mut transfer = Transfer::waiting(at);
+        transfer.update("NOTETAKER_DOWNLOAD file 2000000 10000000", at);
+        assert_eq!(transfer.fraction(), None);
+        transfer.update("NOTETAKER_DOWNLOAD_PLAN cached 10000000 1", at);
+        transfer.update("NOTETAKER_DOWNLOAD_PLAN_END 0", at);
+        assert_eq!(transfer.fraction(), None);
+        assert_eq!(
+            transfer.remaining_minutes(at + Duration::from_secs(10)),
+            None
+        );
+        transfer.update("NOTETAKER_DOWNLOAD_PLAN_END 1", at);
+        assert_eq!(transfer.overall(), (12000000, 20000000));
+        assert_eq!(transfer.network_bytes, 2000000);
+        assert_eq!(
+            Transfer::waiting(at).remaining_minutes(at + Duration::from_secs(5)),
+            None
+        );
     }
 }
