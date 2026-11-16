@@ -338,9 +338,9 @@ fn decode_ffmpeg_command(
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x0800_0000);
     }
-    let mut child = command
-        .spawn()
-        .context("Не удалось декодировать файл. Установите ffmpeg и добавьте его в PATH")?;
+    let mut child =
+        notetaker_runtime::process::spawn(&mut command, notetaker_runtime::process::Kind::Asr)
+            .context("Не удалось декодировать файл. Установите ffmpeg и добавьте его в PATH")?;
     let result = (|| -> Result<u64> {
         let mut stdout = File::open(pcm.path())?;
         let mut last_output = Instant::now();

@@ -47,7 +47,7 @@ fn model(events: &[CalendarEvent]) -> Home<'_> {
         error: None,
         loading: false,
         now: now(),
-        can_record: true,
+        reason: None,
     }
 }
 #[test]
@@ -300,4 +300,55 @@ fn previous_day_snapshot_and_failed_refresh_are_explicit() {
         "Данные от 14.11 в 12:00"
     );
     assert_eq!(snapshot_label(now(), now(), true), "Данные от 12:00");
+}
+
+#[test]
+fn partial_success_is_muted_under_sorted_events_and_more_stays_collapsed() {
+    let ctx = egui::Context::default();
+    theme::install(&ctx);
+    let mut events: Vec<_> = (0..9)
+        .rev()
+        .map(|index| {
+            event(
+                &format!("Синтетическая встреча {index}"),
+                now() + chrono::Duration::minutes(index * 10),
+            )
+        })
+        .collect();
+    events.push(event("Завершённая", now() - chrono::Duration::hours(1)));
+    let report = notetaker_llm::calendar::SubscriptionStatus {
+        skipped: vec![notetaker_core::calendar::SkippedEvent {
+            title: "Неподдерживаемое событие".into(),
+            reason: notetaker_core::calendar::SkipReason::Timezone,
+        }],
+        ..Default::default()
+    };
+    let mut expanded = false;
+    let mut cache = HomeRows::default();
+    let output = crate::test_ui::frame(&ctx, vec![], &mut |ui| {
+        home(
+            ui,
+            Home {
+                reports: std::slice::from_ref(&report),
+                reason: Some("Подготовка"),
+                ..model(&events)
+            },
+            &mut expanded,
+            &mut cache,
+        );
+    });
+    let text = texts(&output.shapes);
+    assert!(!expanded);
+    assert!(!text.contains(&"Завершённая".into()));
+    assert!(
+        text.iter()
+            .position(|text| text == "Синтетическая встреча 0")
+            .unwrap()
+            < text
+                .iter()
+                .position(|text| text.starts_with("Не показано событий:"))
+                .unwrap()
+    );
+    assert!(!text.iter().any(|text| text.contains("Часть календаря")));
+    output.drop_without_applying_deltas();
 }

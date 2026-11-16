@@ -463,7 +463,7 @@ fn busy_row(ui: &mut egui::Ui, card: &Card) {
         return;
     }
     ui.horizontal_wrapped(|ui| {
-        ui.spinner();
+        crate::theme::spinner(ui);
         if card.signing_in {
             ui.label("Жду вход в браузере, затем проверю подключение…");
             if crate::theme::button(ui, "Отмена", crate::theme::ButtonStyle::Ghost).clicked()
@@ -510,7 +510,7 @@ fn cli_setup(
             );
             if installing {
                 ui.horizontal(|ui| {
-                    ui.spinner();
+                    crate::theme::spinner(ui);
                     ui.label(format!("Устанавливаю {name}. Это займёт пару минут."));
                 });
                 return;
@@ -595,7 +595,7 @@ pub fn execute(mut action: Action) -> Response {
             return Ok(Vec::new());
         }
         if action.operation == Operation::Install {
-            notetaker_llm::install_cli(config.kind)?;
+            notetaker_llm::install_cli(config.kind, &action.cancel)?;
             return Ok(Vec::new());
         }
         if action.operation == Operation::Login {
@@ -624,11 +624,12 @@ pub fn execute(mut action: Action) -> Response {
         } else {
             Some(action.key.clone())
         };
-        let provider = HttpProvider::with_key(config, Mode::Hybrid, key.clone())?;
+        let provider = HttpProvider::with_key(config, Mode::Hybrid, key.clone())?
+            .with_cancellation(action.cancel.clone());
         let models = if action.operation == Operation::Models
             || (action.index == 2 && action.operation == Operation::Default)
         {
-            let models = provider.models()?;
+            let models = action.cancel.wait(move || provider.models())?;
             if action.index == 2 && !models.contains(&action.provider.model) {
                 action.provider.model = if models.iter().any(|id| id == "claude-sonnet-4-6") {
                     "claude-sonnet-4-6".into()
@@ -641,17 +642,21 @@ pub fn execute(mut action: Action) -> Response {
             Vec::new()
         };
         if matches!(action.operation, Operation::Check | Operation::Default) {
-            let provider = HttpProvider::with_key(action.provider.config()?, Mode::Hybrid, key)?;
-            provider.complete(
-                &CompletionRequest {
-                    system: "Reply briefly.".into(),
-                    user: "ok".into(),
-                    max_output_tokens: 16,
-                },
-                &mut |_| {},
-            )?;
+            let provider = HttpProvider::with_key(action.provider.config()?, Mode::Hybrid, key)?
+                .with_cancellation(action.cancel.clone());
+            action.cancel.wait(move || {
+                provider.complete(
+                    &CompletionRequest {
+                        system: "Reply briefly.".into(),
+                        user: "ok".into(),
+                        max_output_tokens: 16,
+                    },
+                    &mut |_| {},
+                )
+            })?;
         }
         if action.operation == Operation::Default && !action.key.is_empty() {
+            anyhow::ensure!(!action.cancel.is_cancelled(), "Операция отменена");
             OsCredentialStore.write(&action.provider.id, &action.key)?;
             action.provider.key_source = "credential".into();
             action.provider.api_key_env = None;
@@ -677,6 +682,17 @@ pub fn execute(mut action: Action) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn exit_waits_for_connection_cleanup_but_cancel_reaches_its_token() {
+        let (mut state, _commands, _events) = crate::test_ui::state();
+        state.connections.cards[0].busy = true;
+        let cancel = state.connections.cards[0].cancel.clone();
+        state.exit();
+        assert!(cancel.is_cancelled());
+        assert!(!state.can_exit());
+        state.connections.cards[0].busy = false;
+        assert!(state.can_exit());
+    }
 
     #[test]
     fn secret_draft_waits_for_blur_even_after_debounce() {

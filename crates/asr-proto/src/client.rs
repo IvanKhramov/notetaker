@@ -1,10 +1,11 @@
 use crate::{
     AudioInput, PROTOCOL_VERSION, Provider, Request, Response, Segment, read_message, write_message,
 };
+use notetaker_runtime::process::{Child, Kind};
 use std::{
     io::{self, BufReader},
     path::Path,
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -65,15 +66,14 @@ impl AsrClient {
         timeout: Duration,
         cancel: CancellationHandle,
     ) -> Result<Self, ClientError> {
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(if notetaker_runtime::diagnostics::enabled() {
+        command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(
+            if notetaker_runtime::diagnostics::enabled() {
                 Stdio::piped()
             } else {
                 Stdio::inherit()
-            })
-            .spawn()?;
+            },
+        );
+        let mut child = notetaker_runtime::process::spawn(&mut command, Kind::Asr)?;
         if let Some(stderr) = child.stderr.take() {
             notetaker_runtime::diagnostics::capture_stderr(stderr);
         }
@@ -367,6 +367,83 @@ fn wait_until<T>(
 #[cfg(all(test, any(unix, windows)))]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn forced_exit_terminates_a_hung_asr_worker_and_its_children() {
+        const ROOT: &str = "NOTETAKER_FORCE_WORKER_TEST_ROOT";
+        if let Some(root) = std::env::var_os(ROOT) {
+            let marker = std::path::PathBuf::from(root).join("survived");
+            let sleeper = marker.with_extension("pid");
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", "sleep 60 & printf '%s' \"$!\" > \"$2\"; (sleep 1; printf late > \"$1\") & printf '{\"type\":\"ready\",\"protocol_version\":1}\\n'; wait", "sh"]).arg(&marker).arg(&sleeper);
+            let mut client = AsrClient::spawn_command(command, Duration::from_secs(10)).unwrap();
+            let sleeper: u32 = std::fs::read_to_string(sleeper).unwrap().parse().unwrap();
+            notetaker_runtime::process::terminate_all();
+            let until = Instant::now() + Duration::from_secs(3);
+            while client.child.try_wait().unwrap().is_none() {
+                assert!(Instant::now() < until);
+                thread::sleep(Duration::from_millis(10));
+            }
+            loop {
+                let status = Command::new("ps")
+                    .args(["-o", "stat=", "-p", &sleeper.to_string()])
+                    .output()
+                    .unwrap();
+                let state = String::from_utf8(status.stdout).unwrap();
+                if state.trim().is_empty() || state.trim().starts_with('Z') {
+                    break;
+                }
+                assert!(
+                    Instant::now() < until,
+                    "worker child is still running: {state}"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                notetaker_runtime::process::spawn(
+                    &mut Command::new("/bin/sh"),
+                    notetaker_runtime::process::Kind::Background
+                )
+                .is_err()
+            );
+            thread::sleep(Duration::from_millis(1100));
+            assert!(!marker.exists(), "a worker descendant survived forced exit");
+            return;
+        }
+        // Shutdown is process-wide, so isolate it from other concurrent protocol tests.
+        let root = std::env::temp_dir().join(format!(
+            "notetaker-force-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "client::tests::forced_exit_terminates_a_hung_asr_worker_and_its_children",
+                "--nocapture",
+            ])
+            .env(ROOT, &root)
+            .spawn()
+            .unwrap();
+        let until = Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            if Instant::now() >= until {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("forced worker exit did not finish");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
     // Fake workers are shell/PowerShell processes; on small CI runners several
     // cold PowerShell starts at once blow any startup timeout, so run one at a time.
     fn serial() -> std::sync::MutexGuard<'static, ()> {

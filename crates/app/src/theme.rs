@@ -345,6 +345,7 @@ pub struct Dialog<'a> {
     width: f32,
     anchored: bool,
     open: Option<&'a mut bool>,
+    closable: bool,
 }
 
 pub fn modal<'a>(ctx: &egui::Context, title: impl Into<String>) -> Dialog<'a> {
@@ -361,10 +362,15 @@ pub fn modal<'a>(ctx: &egui::Context, title: impl Into<String>) -> Dialog<'a> {
         width: 420.0,
         anchored: false,
         open: None,
+        closable: true,
     }
 }
 
 impl<'a> Dialog<'a> {
+    pub fn closable(mut self, closable: bool) -> Self {
+        self.closable = closable;
+        self
+    }
     pub fn open(mut self, open: &'a mut bool) -> Self {
         self.open = Some(open);
         self
@@ -427,7 +433,9 @@ impl<'a> Dialog<'a> {
                         .truncate(),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    close = icon_button(ui, icons::X, "Закрыть").clicked();
+                    if self.closable {
+                        close = icon_button(ui, icons::X, "Закрыть").clicked();
+                    }
                 });
             });
             ui.add_space(12.0);
@@ -2752,11 +2760,77 @@ pub fn recording_status(
             } else {
                 done as f32 / total as f32
             };
-            ui.add(
-                egui::ProgressBar::new(fraction)
-                    .desired_width(72.0)
-                    .desired_height(3.0),
-            );
+            self::progress(ui, Some(fraction), 72.0);
         }
     });
+}
+
+/// The same thin track for measured and indeterminate preparation progress.
+pub fn progress(ui: &mut egui::Ui, fraction: Option<f32>, width: f32) -> egui::Response {
+    if let Some(fraction) = fraction {
+        return ui.add(
+            egui::ProgressBar::new(fraction.clamp(0.0, 1.0))
+                .desired_width(width)
+                .desired_height(3.0),
+        );
+    }
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(width.max(1.0), 3.0), egui::Sense::hover());
+    if ui.is_rect_visible(rect) {
+        ui.ctx().request_repaint();
+        ui.painter()
+            .rect_filled(rect, 1, ui.visuals().extreme_bg_color);
+        let t = ui.input(|input| input.time) as f32;
+        let start = rect.left() + (t.sin() + 1.0) * 0.5 * rect.width() * 0.75;
+        ui.painter().rect_filled(
+            egui::Rect::from_min_size(
+                egui::pos2(start, rect.top()),
+                egui::vec2(rect.width() * 0.25, 3.0),
+            ),
+            1,
+            ui.visuals().selection.bg_fill,
+        );
+    }
+    response
+}
+/// A constant 270 degree sweep stays legible at every animation phase and DPI.
+pub fn spinner(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
+    if ui.is_rect_visible(rect) {
+        ui.ctx().request_repaint();
+        let phase = ui.input(|input| input.time) as f32 * std::f32::consts::TAU;
+        let points = (0..=32)
+            .map(|index| {
+                let angle = phase + index as f32 / 32.0 * std::f32::consts::TAU * 0.75;
+                rect.center() + egui::vec2(angle.cos(), angle.sin()) * 7.0
+            })
+            .collect();
+        ui.painter().circle_stroke(
+            rect.center(),
+            7.0,
+            egui::Stroke::new(1.0, Palette::of(ui).border),
+        );
+        ui.painter().add(egui::Shape::line(
+            points,
+            egui::Stroke::new(2.0, Palette::of(ui).muted),
+        ));
+    }
+    response
+}
+
+#[cfg(test)]
+mod spinner_regression_tests {
+    #[test]
+    fn visible_spinner_requests_animation_at_both_pixel_scales() {
+        let ctx = eframe::egui::Context::default();
+        super::install(&ctx);
+        for scale in [1.0, 2.0] {
+            ctx.set_pixels_per_point(scale);
+            crate::test_ui::frame(&ctx, vec![], &mut |ui| {
+                super::spinner(ui);
+                assert!(ui.ctx().has_requested_repaint());
+            })
+            .drop_without_applying_deltas();
+        }
+    }
 }

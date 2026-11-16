@@ -45,6 +45,8 @@ for path in sources:
         text = text.replace("    fn new(data: DocumentData)", "    pub(crate) fn new(data: DocumentData)")
         text += "impl Recording {pub fn fixture_silence(&mut self) {self.silent_since[0]=Some(std::time::Instant::now()-std::time::Duration::from_secs(25));}}"
     if path.stem == "quickstart":
+        text = text.replace('index == 1 && cfg!(target_os = "macos")', 'index == 1')
+        text += 'impl Panel {pub fn fixture_sound(&mut self, scene: usize) {self.probe_status=Some([Status::Ready, sound_status(if scene==78 {0} else {100}, scene!=80, true)]);}}'
         text = text.replace("    step: usize,", "    pub(crate) step: usize,\n    pub(crate) expanded: bool,")
         text = text.replace('crate::theme::disclosure("Календарь")', 'crate::theme::disclosure("Календарь").default_open(self.expanded)')
         text = text.replace('crate::theme::disclosure("AI для конспектов")', 'crate::theme::disclosure("AI для конспектов").default_open(self.expanded)')
@@ -126,10 +128,50 @@ impl LearningUi {
 impl NotetakerApp {
     pub fn fixture(state: AppState, screen: usize) -> Self {
         let scene=screen;
+        let screen=match screen {97|98=>45,99|100=>3,_=>screen};
+        let screen=match screen {95|96=>3,_=>screen};
+        let screen=match screen {92=>3,93=>3,94=>10,_=>screen};
+        let screen=match screen {89=>3,90=>19,91=>7,_=>screen};
+        let screen=match screen {87=>0,88=>6,_=>screen};
+        let screen=match screen {83=>51,84|85|86=>3,_=>screen};
+        let screen = if (78..=80).contains(&screen) {0} else {screen};
         let screen = match screen {59=>5,60=>4,61=>11,62=>23,63=>24,64=>4,65=>5,66=>7,67=>3,68=>7,69=>7,70=>5,71=>5,72=>5,_=>screen};
         let mut app = Self::with_state(state);
+        if (97..=100).contains(&scene) {
+            app.state.recording.phase=Phase::Recording;app.state.recording.path=app.state.selected.clone();app.state.recording.started=Some(Instant::now()-Duration::from_secs(123));
+            let now=chrono::Utc::now();let event=notetaker_core::calendar::CalendarEvent {link:notetaker_core::calendar::EventLink {uid:"next-preview".into(),title:"Синтетическая следующая встреча с командой".into(),attendees:Vec::new(),call_url:Some("https://space.ktalk.ru/neutral".into())},start:now+chrono::Duration::seconds(if scene==97 {300}else if scene==100 {-120}else{30}),end:now+chrono::Duration::minutes(30),all_day:false,organizer:None};app.state.calendar_events=vec![event];app.state.update_calendar_reminder(now);
+        }
+        if scene==95 || scene==96 {app.state.exit_requested=true;app.state.shutdown.request(Instant::now()-Duration::from_secs(if scene==96 {12}else{0}));app.state.recording.phase=Phase::Finalizing;app.state.recording.progress=Some((2,5));}
+        if scene==92 || scene==93 {
+            app.state.quickstart.models.set(&app.state.settings.model.clone(),crate::quickstart::Status::Ready);
+            if scene==93 {app.state.downloading=true;app.state.quickstart.download_model=Some("diarization".into());let at=Instant::now();let mut transfer=crate::quickstart::Transfer::waiting(at);for line in ["NOTETAKER_DOWNLOAD_PLAN pyannote-3.0 6958444 1","NOTETAKER_DOWNLOAD_PLAN eres2net-base 39593761 0","NOTETAKER_DOWNLOAD_PLAN_END 1","NOTETAKER_DOWNLOAD eres2net-base 10000000 39593761"]{transfer.update(line,at);}app.state.quickstart.transfer=Some(transfer);}
+        }
+        if scene==94 {app.state.quickstart.optional_errors.insert("semantic".into(),"Не удалось подключиться к серверу модели".into());}
+
+        if (89..=91).contains(&scene) {
+            app.state.permissions.channels=[notetaker_capture::Permission::Granted,notetaker_capture::Permission::Unknown];
+            if scene==89 || scene==91 {app.state.permissions.channels[0]=notetaker_capture::Permission::Denied;}
+            if scene==90 {app.state.permissions.channels[1]=notetaker_capture::Permission::Denied;}
+            if scene==91 {app.state.permissions.failed[1]=true;}
+        }
+
+        if (83..=85).contains(&scene) {
+            app.state.downloading=true; app.state.quickstart.models=Default::default();app.state.quickstart.download_model=Some("auto".into());
+            let at=Instant::now()-std::time::Duration::from_secs(if scene==85 {31} else {0});
+            let mut transfer=crate::quickstart::Transfer::waiting(at);transfer.update("NOTETAKER_DOWNLOAD_PLAN gigaam-v3 170197019 0",at);transfer.update("NOTETAKER_DOWNLOAD_PLAN silero-vad 2327524 0",at);transfer.update("NOTETAKER_DOWNLOAD_PLAN_END 1",at);transfer.update("NOTETAKER_DOWNLOAD gigaam-v3 84000000 170197019",at);app.state.quickstart.transfer=Some(transfer);
+        }
+        if scene==86 {
+            app.state.settings.calendars=vec![notetaker_llm::calendar::Subscription {id:"partial-fixture".into(),name:"Тестовый календарь".into()}];
+            let now=chrono::Utc::now();
+            app.state.calendar_events=vec![notetaker_core::calendar::CalendarEvent {link:notetaker_core::calendar::EventLink {uid:"partial-preview".into(),title:"Синтетическая встреча".into(),attendees:vec![],call_url:Some("https://space.ktalk.ru/room123".into())},start:now-chrono::Duration::minutes(2),end:now+chrono::Duration::minutes(30),all_day:false,organizer:None}];
+            app.state.calendar_reports=vec![notetaker_llm::calendar::SubscriptionStatus {skipped:vec![notetaker_core::calendar::SkippedEvent {title:"Неизвестный формат".into(),reason:notetaker_core::calendar::SkipReason::Format}],..Default::default()}];
+        }
+
         app.home = ![4,5,12,14,15].contains(&screen);
         if screen < 3 { app.quickstart.open = true; app.quickstart.step = screen; }
+        if scene==87 {app.state.downloading=true;app.state.quickstart.models=Default::default();let at=Instant::now()-std::time::Duration::from_secs(10);let mut transfer=crate::quickstart::Transfer::waiting(at);for line in ["NOTETAKER_DOWNLOAD_PLAN gigaam-v3 170197019 0","NOTETAKER_DOWNLOAD_PLAN silero-vad 2327524 0","NOTETAKER_DOWNLOAD_PLAN_END 1","NOTETAKER_DOWNLOAD gigaam-v3 84000000 170197019"] { transfer.update(line,Instant::now()); }app.state.quickstart.transfer=Some(transfer);}
+        if scene==88 {app.state.settings_draft.user_aliases=String::new();}
+        if (78..=80).contains(&scene) {app.quickstart.fixture_sound(scene);app.state.downloading=true;app.state.quickstart.models=Default::default();}
         if screen == 13 { app.quickstart.open = true; app.quickstart.step = 2; app.quickstart.expanded = true; }
         if (6..12).contains(&screen) {
             app.show_settings = true;
@@ -298,11 +340,11 @@ impl NotetakerApp {
             app.state.calendar_checked=Some(Instant::now());
             if scene==76 || scene==77 {app.show_settings=true;app.settings_panel.section=crate::settings::Section::Calendars;}
         }
-        if (78..=83).contains(&scene) {
+        if (101..=106).contains(&scene) {
             app.state.settings.voice_library=true;app.state.settings_draft=app.state.settings.clone();
             app.state.voices.voices.push(notetaker_core::Voice {id:Some("fixture-voice".into()),name:"Анна Петрова".into(),embeddings:vec![vec![1.0,0.0]],updated_at:chrono::Utc::now(),is_me:false,sample_sources:Default::default(),tolk_identities:Default::default()});
             app.state.voices.recognition_checks=std::collections::BTreeMap::from([("one".into(),false),("two".into(),true),("three".into(),false)]);
-            if scene<=79 {
+            if scene<=102 {
                 app.home=false;app.state.tab=Tab::Transcript;
                 let document=app.state.documents.get_mut(app.state.selected.as_ref().unwrap()).unwrap();
                 document.data.transcript.speaker_names.remove("speaker_1");
@@ -310,16 +352,17 @@ impl NotetakerApp {
                 document.data.transcript.voice_recognitions.insert("speaker_1".into(),notetaker_core::VoiceRecognition {name:"Анна Петрова".into(),voice_id:"fixture-voice".into(),similarity_milli:846});
                 document.data.meeting.write_transcript(&document.data.transcript).unwrap();document.data.revisions.transcript=document.data.meeting.load_transcript().unwrap().revision;
             } else {
-                app.show_settings=true;app.settings_panel.section=if scene==80 {crate::settings::Section::Recording} else {crate::settings::Section::Ktalk};
+                app.show_settings=true;app.settings_panel.section=if scene==103 {crate::settings::Section::Recording} else {crate::settings::Section::Ktalk};
                 app.state.ktalk.address="https://neutral.ktalk.ru".into();app.state.ktalk.saved=true;app.state.ktalk.status="Подключено: Oleg Sidorov".into();
                 app.state.ktalk.settings=Some(notetaker_llm::ktalk::Settings {base_url:app.state.ktalk.address.clone(),credential_id:"neutral".into(),api_key_env:None,extra:Default::default()});
-                if scene>=81 {app.state.ktalk.learning.fixture(&app.state.settings.library,scene-81);}
+                if scene>=104 {app.state.ktalk.learning.fixture(&app.state.settings.library,scene-104);}
             }
         }
         app
     }
     pub fn fixture_jump_settled(&self) -> bool { self.state.selected.as_ref().and_then(|path| self.state.documents.get(path)).is_none_or(|document| document.speaker_ui.scroll_to.is_none()) }
-    pub fn pill(ui: &mut egui::Ui) { recording_pill(ui, Duration::from_secs(123), 0.3); }
+    pub fn pill(ui: &mut egui::Ui) { recording_pill(ui, Duration::from_secs(123), 0.3, Phase::Recording, None); }
+    pub fn next_pill(&self, ui: &mut egui::Ui) { ui.set_width(320.0);let next=self.state.next_meeting(chrono::Utc::now());recording_pill(ui,Duration::from_secs(123),0.3,Phase::Recording,next.as_ref()); }
 }
 '''
     if args.source_ref or path.stem in {"ui", "state", "quickstart", "people", "organization", "maintenance", "trackers", "theme", "calendar_ui", "speakers", "settings", "voice_learning"}:
@@ -343,10 +386,13 @@ impl eframe::App for Preview {
         if self.screen==66 && ui.ctx().content_rect().height()<600.0 {
             ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("fixture-recording-settings-offset"),240.0_f32));
         }
-        ui.ctx().data_mut(|d|d.insert_temp(egui::Id::unique("fixture-voice-menu"),self.screen==79));
-        if self.screen==80 {ui.ctx().data_mut(|d|d.insert_temp(egui::Id::unique("fixture-recording-settings-offset"),350.0_f32));}
-        if self.screen>=81 && ui.ctx().content_rect().height()<600.0 {ui.ctx().data_mut(|d|d.insert_temp(egui::Id::unique("fixture-recording-settings-offset"),300.0_f32));}
+        ui.ctx().data_mut(|d|d.insert_temp(egui::Id::unique("fixture-voice-menu"),self.screen==102));
+        if self.screen==103 {ui.ctx().data_mut(|d|d.insert_temp(egui::Id::unique("fixture-recording-settings-offset"),350.0_f32));}
+        if self.screen>=104 && ui.ctx().content_rect().height()<600.0 {ui.ctx().data_mut(|d|d.insert_temp(egui::Id::unique("fixture-recording-settings-offset"),300.0_f32));}
         self.app.ui(ui, frame);
+        if self.screen==99 || self.screen==100 {egui::Window::new("Индикатор записи").show(ui.ctx(),|ui|self.app.next_pill(ui));}
+        if self.screen==81 {egui::Window::new("Загрузка").show(ui.ctx(), |ui| {crate::theme::spinner(ui);});}
+        if self.screen==82 {egui::Window::new("Подсказка звонка").show(ui.ctx(), |ui| {crate::detection::start_card(ui,"Chrome",None,Some("Дождитесь проверки звука"));});}
         if self.screen==33 {
             let ctx=ui.ctx().clone();
             theme::modal(&ctx,"Элементы интерфейса").default_width(520.0).show(&ctx,|ui| {
@@ -466,7 +512,7 @@ if shutil.disk_usage(root).free < 2 * 1024**3:
 # Resolve the derived harness root against the copied workspace lock before its locked build.
 subprocess.run(["cargo", "metadata", "--offline", "--format-version", "1", "--manifest-path", str(harness / "Cargo.toml")], cwd=root, env=env, check=True, stdout=subprocess.DEVNULL)
 subprocess.run(["cargo", "build", "--locked", "--manifest-path", str(harness / "Cargo.toml")], cwd=root, env=env, check=True)
-names = ["welcome", "name", "connections", "home", "note", "transcript", "general", "recording", "calendars", "ai", "search", "storage", "recording-pill", "connections-expanded", "delete-confirm", "meeting-menu", "toast", "empty-library", "narrow-settings", "recording-bar", "chat", "tasks", "people", "person", "series", "digest", "folders", "diagnostics", "tracker-preview", "new-recording", "rename", "regenerate", "capture-warning", "widgets", "update-card", "folder-delete", "merge-people", "folders-advanced", "ai-expanded", "performance-transcript", "performance-meetings", "performance-live", "chat-meeting-empty", "chat-library-empty", "chat-recipes", "chat-recording", "recording-silence", "recording-final-pass", "recording-ready", "recording-not-ready", "summary-skipped", "calendar-reminder-link", "calendar-reminder-no-link", "calendar-upcoming", "calendar-help", "direct-task-checkboxes", "direct-template-bar", "direct-template-picker", "direct-speaker-menu", "compact-transcript", "compact-summary", "compact-storage", "compact-person", "compact-series", "one-step-bar", "one-step-countdown", "one-step-settings", "one-step-auto-title", "ktalk-settings-empty", "ktalk-settings-connected", "ktalk-preview", "ktalk-transcript", "ktalk-success", "calendar-home-events", "calendar-home-empty", "calendar-home-error", "calendar-settings-status", "calendar-settings-error", "voice-recognised", "voice-recognised-menu", "voice-settings", "voice-learning-plan", "voice-learning-running", "voice-learning-finished"]
+names = ["welcome", "name", "connections", "home", "note", "transcript", "general", "recording", "calendars", "ai", "search", "storage", "recording-pill", "connections-expanded", "delete-confirm", "meeting-menu", "toast", "empty-library", "narrow-settings", "recording-bar", "chat", "tasks", "people", "person", "series", "digest", "folders", "diagnostics", "tracker-preview", "new-recording", "rename", "regenerate", "capture-warning", "widgets", "update-card", "folder-delete", "merge-people", "folders-advanced", "ai-expanded", "performance-transcript", "performance-meetings", "performance-live", "chat-meeting-empty", "chat-library-empty", "chat-recipes", "chat-recording", "recording-silence", "recording-final-pass", "recording-ready", "recording-not-ready", "summary-skipped", "calendar-reminder-link", "calendar-reminder-no-link", "calendar-upcoming", "calendar-help", "direct-task-checkboxes", "direct-template-bar", "direct-template-picker", "direct-speaker-menu", "compact-transcript", "compact-summary", "compact-storage", "compact-person", "compact-series", "one-step-bar", "one-step-countdown", "one-step-settings", "one-step-auto-title", "ktalk-settings-empty", "ktalk-settings-connected", "ktalk-preview", "ktalk-transcript", "ktalk-success", "calendar-home-events", "calendar-home-empty", "calendar-home-error", "calendar-settings-status", "calendar-settings-error", "mac-sound-no-access", "mac-sound-silent", "mac-sound-ready", "spinner-retina", "hint-disabled", "calendar-recording-blocked", "model-byte-progress", "model-download-stalled", "calendar-partial-success", "welcome-download-progress", "profile-list-hints", "permission-home", "permission-recording", "permission-settings", "recording-ready-speech-only", "optional-speaker-download", "optional-search-failure", "quit-wait", "quit-force", "recording-next-meeting", "recording-next-soon", "indicator-next-meeting", "indicator-next-started", "voice-recognised", "voice-recognised-menu", "voice-settings", "voice-learning-plan", "voice-learning-running", "voice-learning-finished"]
 def render(spec):
     index, name, theme, width, height, zoom = spec
     actual_width = 760 if name == "narrow-settings" and zoom == 1.0 else width
@@ -484,6 +530,7 @@ specs = [(index,name,theme,width,height,zoom)
     for width,height,zoom in [(1280,800,1.0),(960,640,1.0),(960,640,1.5)]
     for index,name in enumerate(names) if not args.screens or name in args.screens
     for theme in ("light","dark")]
+specs += [(81,"spinner-retina",theme,1280,800,2.0) for theme in ("light","dark") if not args.screens or "spinner-retina" in args.screens]
 # Isolated fixture libraries let software rendering run concurrently without shared data writes.
 with ThreadPoolExecutor(max_workers=3) as executor:
     list(executor.map(render,specs))

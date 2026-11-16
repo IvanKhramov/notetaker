@@ -20,6 +20,76 @@ pub fn eligible(event: &CalendarEvent, now: DateTime<Utc>) -> bool {
         && event.start <= now + chrono::Duration::minutes(5)
         && (event.link.attendees.len() >= 2 || call_link(event).is_some())
 }
+pub struct NextMeeting {
+    title: String,
+    time: String,
+    pub tooltip: String,
+}
+impl NextMeeting {
+    pub fn text(&self) -> String {
+        format!("Далее: {} · {}", self.title, self.time)
+    }
+    pub fn new(event: &CalendarEvent, now: DateTime<Utc>) -> Self {
+        let seconds = (event.start - now).num_seconds();
+        let time = if seconds > 0 {
+            format!("через {} мин", (seconds + 59) / 60)
+        } else {
+            format!("началась {} мин назад", -seconds / 60)
+        };
+        let mut next = Self {
+            title: event.link.title.clone(),
+            time,
+            tooltip: String::new(),
+        };
+        let text = next.text();
+        next.tooltip = if seconds <= 60 {
+            format!(
+                "{text}\nСледующая запись доступна после завершения текущей и финального распознавания."
+            )
+        } else {
+            text.clone()
+        };
+        next
+    }
+}
+/// A single secondary row, shared by the recording bar and floating indicator.
+pub fn next_meeting(ui: &mut egui::Ui, next: &NextMeeting) -> bool {
+    ui.horizontal(|ui| {
+        let time = format!("· {}", next.time);
+        let font = theme::medium(theme::SMALL);
+        let ink = theme::Palette::of(ui).muted;
+        let time_width = ui
+            .painter()
+            .layout_no_wrap(time.clone(), font.clone(), ink)
+            .size()
+            .x;
+        let width = (ui.available_width()
+            - theme::COMPACT_HEIGHT
+            - time_width
+            - 2.0 * ui.spacing().item_spacing.x)
+            .max(0.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(width, theme::COMPACT_HEIGHT),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_min_width(width);
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!("Далее: {}", next.title))
+                            .font(font.clone())
+                            .color(ink),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(&next.tooltip);
+            },
+        );
+        ui.add(egui::Label::new(egui::RichText::new(time).font(font).color(ink)).truncate())
+            .on_hover_text(&next.tooltip);
+        theme::icon_button(ui, theme::icons::X, "Скрыть напоминание об этой встрече").clicked()
+    })
+    .inner
+}
 #[derive(Default, PartialEq, Debug)]
 pub enum Action {
     #[default]
@@ -27,7 +97,7 @@ pub enum Action {
     Start,
     Dismiss,
 }
-pub fn reminder(ui: &mut egui::Ui, event: &CalendarEvent, enabled: bool) -> Action {
+pub fn reminder(ui: &mut egui::Ui, event: &CalendarEvent, reason: Option<&str>) -> Action {
     let mut action = Action::None;
     let frame = egui::Frame::popup(ui.style());
     let p = theme::Palette::of(ui);
@@ -67,18 +137,23 @@ pub fn reminder(ui: &mut egui::Ui, event: &CalendarEvent, enabled: bool) -> Acti
             }
             if ui
                 .add_enabled(
-                    enabled,
+                    reason.is_none(),
                     theme::styled_button(
                         theme::Palette::of(ui),
                         action_label(event),
                         ButtonStyle::Primary,
                     ),
                 )
+                .on_disabled_hover_text(reason.unwrap_or_default())
                 .clicked()
             {
                 action = Action::Start;
             }
         });
+        if let Some(reason) = reason {
+            ui.weak(reason);
+        }
+        crate::permissions::blocked_action(ui, reason);
     });
     action
 }
@@ -120,6 +195,37 @@ pub fn setup_help(ui: &mut egui::Ui) {
 mod tests {
     use super::*;
     #[test]
+    fn next_meeting_tooltip_explains_the_start_rule_from_one_minute() {
+        let now = Utc::now();
+        let mut event = CalendarEvent {
+            link: notetaker_core::calendar::EventLink {
+                uid: "neutral".into(),
+                title: "Синтетическая встреча".into(),
+                attendees: Vec::new(),
+                call_url: None,
+            },
+            start: now + chrono::Duration::seconds(61),
+            end: now + chrono::Duration::hours(1),
+            all_day: false,
+            organizer: None,
+        };
+        let early = NextMeeting::new(&event, now);
+        assert_eq!(early.text(), "Далее: Синтетическая встреча · через 2 мин");
+        assert_eq!(early.tooltip, early.text());
+        event.start -= chrono::Duration::seconds(1);
+        assert!(
+            NextMeeting::new(&event, now)
+                .tooltip
+                .contains("финального распознавания")
+        );
+        event.start = now - chrono::Duration::minutes(2);
+        assert!(
+            NextMeeting::new(&event, now)
+                .text()
+                .ends_with("началась 2 мин назад")
+        );
+    }
+    #[test]
     fn reminder_keeps_focus_and_no_link_has_record_action() {
         let ctx = egui::Context::default();
         theme::install(&ctx);
@@ -141,7 +247,7 @@ mod tests {
         let output = crate::test_ui::frame(&ctx, vec![], &mut |ui| {
             ui.add(theme::text_field(&mut value).id(field))
                 .request_focus();
-            reminder(ui, &event, true);
+            reminder(ui, &event, None);
         });
         crate::test_ui::text_rect(&output.shapes, "Начать запись");
         assert!(ctx.memory(|m| m.has_focus(field)));
@@ -150,7 +256,7 @@ mod tests {
         crate::test_ui::click(
             &ctx,
             &mut |ui| {
-                let action = reminder(ui, &event, true);
+                let action = reminder(ui, &event, None);
                 if action != Action::None {
                     chosen = action;
                 }
@@ -291,6 +397,7 @@ impl HomeRows {
                 })
                 .map(|(i, _)| i),
         );
+        self.rows.sort_by_key(|index| events[*index].start);
         self.key = Some((revision, today));
     }
 }
@@ -316,7 +423,7 @@ pub struct Home<'a> {
     pub error: Option<&'a str>,
     pub loading: bool,
     pub now: DateTime<Utc>,
-    pub can_record: bool,
+    pub reason: Option<&'a str>,
 }
 #[derive(Default)]
 pub enum HomeAction {
@@ -357,21 +464,16 @@ pub fn home(
             .or_else(|| model.reports.iter().find_map(|r| r.error.as_deref()));
         let skipped = model.reports.iter().map(|r| r.skipped.len()).sum::<usize>();
         if let Some(issue) = issue {
-            ui.add(egui::Label::new(egui::RichText::new(issue).color(p.red)).wrap());
-        } else if skipped > 0 {
-            ui.colored_label(
-                p.warning,
-                format!("Пропущено событий: {skipped}. Часть календаря не поддерживается."),
-            );
+            ui.add(egui::Label::new(egui::RichText::new(issue).color(p.warning)).wrap());
         }
-        if (issue.is_some() || skipped > 0)
+        if issue.is_some()
             && theme::button(ui, "Открыть настройки календаря", ButtonStyle::Ghost).clicked()
         {
             action = HomeAction::Settings;
         }
         if model.loading {
             ui.horizontal(|ui| {
-                ui.spinner();
+                crate::theme::spinner(ui);
                 ui.label("Загружаем календарь…");
             });
         } else if count == 0 {
@@ -427,9 +529,10 @@ pub fn home(
                     && event.start <= model.now + chrono::Duration::minutes(5)
                     && ui
                         .add_enabled(
-                            model.can_record,
+                            model.reason.is_none(),
                             theme::styled_button(p, action_label(event), ButtonStyle::Secondary),
                         )
+                        .on_disabled_hover_text(model.reason.unwrap_or_default())
                         .clicked()
                 {
                     action = HomeAction::Start(event.clone());
@@ -449,6 +552,18 @@ pub fn home(
             .clicked()
         {
             *expanded = !*expanded;
+        }
+        if issue.is_none() && skipped > 0 {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("Не показано событий: {skipped} ·"))
+                        .small()
+                        .color(p.muted),
+                );
+                if theme::button(ui, "Подробнее", ButtonStyle::Ghost).clicked() {
+                    action = HomeAction::Settings;
+                }
+            });
         }
     });
     ui.add_space(theme::SPACE[2]);

@@ -92,8 +92,16 @@ pub enum StopAction {
     None,
     Stop,
     Continue,
+    /// The next-meeting line inside the card was dismissed.
+    DismissNext,
 }
-pub fn stop_card(ui: &mut eframe::egui::Ui, remaining: Duration) -> StopAction {
+/// The card replaces the recording indicator while it counts down, so it
+/// carries the indicator's next-meeting line too.
+pub fn stop_card(
+    ui: &mut eframe::egui::Ui,
+    remaining: Duration,
+    next: Option<&crate::calendar_ui::NextMeeting>,
+) -> StopAction {
     use crate::theme::{self, ButtonStyle};
     let mut action = StopAction::None;
     let frame = eframe::egui::Frame::popup(ui.style());
@@ -109,6 +117,11 @@ pub fn stop_card(ui: &mut eframe::egui::Ui, remaining: Duration) -> StopAction {
             ))
             .font(theme::medium(theme::BODY)),
         );
+        if let Some(next) = next
+            && crate::calendar_ui::next_meeting(ui, next)
+        {
+            action = StopAction::DismissNext;
+        }
         theme::footer(ui, |ui| {
             if theme::button(ui, "Продолжить запись", ButtonStyle::Ghost).clicked()
             {
@@ -305,6 +318,49 @@ impl Monitor {
         }
         vec![]
     }
+}
+
+/// Suppressing presentation preserves the pending call until the blocker closes.
+pub fn start_visible(interaction_blocked: bool, speech_ready: bool) -> bool {
+    !interaction_blocked && speech_ready
+}
+pub fn start_card(
+    ui: &mut eframe::egui::Ui,
+    app: &str,
+    title: Option<&str>,
+    reason: Option<&str>,
+) -> (bool, bool, eframe::egui::Vec2) {
+    use crate::theme::{self, ButtonStyle, Palette};
+    let mut accept = false;
+    let mut dismiss = false;
+    let panel = eframe::egui::Frame::new()
+        .fill(Palette::of(ui).card)
+        .inner_margin(12.0)
+        .show(ui, |ui| {
+            ui.set_width(316.0);
+            ui.add(
+                eframe::egui::Label::new(
+                    eframe::egui::RichText::new(format!("Звонок в {app}")).strong(),
+                )
+                .truncate(),
+            );
+            ui.add(eframe::egui::Label::new(title.unwrap_or("Записать встречу?")).truncate());
+            ui.horizontal(|ui| {
+                accept = ui
+                    .add_enabled_ui(reason.is_none(), |ui| {
+                        theme::button(ui, "Записать", ButtonStyle::Primary)
+                    })
+                    .inner
+                    .on_disabled_hover_text(reason.unwrap_or_default())
+                    .clicked();
+                dismiss = theme::button(ui, "Не сейчас", ButtonStyle::Secondary).clicked();
+            });
+            if let Some(reason) = reason {
+                ui.weak(reason);
+            }
+            crate::permissions::blocked_action(ui, reason);
+        });
+    (accept, dismiss, panel.response.rect.size())
 }
 
 #[cfg(test)]

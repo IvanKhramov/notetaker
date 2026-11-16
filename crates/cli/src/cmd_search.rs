@@ -65,12 +65,18 @@ pub fn reindex(args: ReindexArgs) -> Result<()> {
     let library = library(args.library)?;
     if args.semantic {
         let config = notetaker_llm::Config::load().ok();
-        notetaker_llm::search::reindex(&library, true, config.as_ref(), &mut |p| {
-            eprintln!(
-                "Поиск по смыслу: {}/{}; новых фрагментов {}; Local только по словам: {}",
-                p.completed, p.total, p.chunks, p.excluded_local
-            )
-        })?;
+        notetaker_llm::search::reindex(
+            &library,
+            true,
+            config.as_ref(),
+            &Default::default(),
+            &mut |p| {
+                eprintln!(
+                    "Поиск по смыслу: {}/{}; новых фрагментов {}; Local только по словам: {}",
+                    p.completed, p.total, p.chunks, p.excluded_local
+                )
+            },
+        )?;
     } else {
         library.reindex_full()?;
     }

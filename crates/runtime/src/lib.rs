@@ -1,6 +1,8 @@
 //! Desktop distribution utilities, shared by GUI and CLI without UI/ML dependencies.
 pub mod diagnostics;
+pub mod file_lock;
 pub mod paths;
+pub mod process;
 #[cfg(feature = "distribution")]
 pub mod report;
 #[cfg(feature = "distribution")]

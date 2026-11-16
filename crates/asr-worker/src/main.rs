@@ -23,6 +23,7 @@ fn run() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     match args.as_slice() {
         [] => serve(&mut io::stdin().lock(), &mut io::stdout().lock()),
+        [command, id] if command == "download-plan" => models::download_plan(id),
         [command, id] if command == "download" => models::download(id),
         [command, id] if command == "check-model" => models::check(id),
         [command, rest @ ..] if command == "bench" => bench::run(rest),
