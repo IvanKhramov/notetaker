@@ -80,7 +80,7 @@ impl Panel {
                 if self.busy {
                     ui.strong(&self.pending);
                     ui.label(&self.streaming);
-                    ui.spinner();
+                    crate::theme::spinner(ui);
                 }
             });
         if let Some(error) = &self.error {

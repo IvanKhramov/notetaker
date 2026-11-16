@@ -45,6 +45,8 @@ for path in sources:
         text = text.replace("    fn new(data: DocumentData)", "    pub(crate) fn new(data: DocumentData)")
         text += "impl Recording {pub fn fixture_silence(&mut self) {self.silent_since[0]=Some(std::time::Instant::now()-std::time::Duration::from_secs(25));}}"
     if path.stem == "quickstart":
+        text = text.replace('index == 1 && cfg!(target_os = "macos")', 'index == 1')
+        text += 'impl Panel {pub fn fixture_sound(&mut self, scene: usize) {self.probe_status=Some([Status::Ready, sound_status(if scene==78 {0} else {100}, scene!=80, true)]);}}'
         text = text.replace("    step: usize,", "    pub(crate) step: usize,\n    pub(crate) expanded: bool,")
         text = text.replace('crate::theme::disclosure("Календарь")', 'crate::theme::disclosure("Календарь").default_open(self.expanded)')
         text = text.replace('crate::theme::disclosure("AI для конспектов")', 'crate::theme::disclosure("AI для конспектов").default_open(self.expanded)')
@@ -109,10 +111,12 @@ impl Panel { pub fn fixture(&mut self,state:&AppState) {
 impl NotetakerApp {
     pub fn fixture(state: AppState, screen: usize) -> Self {
         let scene=screen;
+        let screen = if (78..=80).contains(&screen) {0} else {screen};
         let screen = match screen {59=>5,60=>4,61=>11,62=>23,63=>24,64=>4,65=>5,66=>7,67=>3,68=>7,69=>7,70=>5,71=>5,72=>5,_=>screen};
         let mut app = Self::with_state(state);
         app.home = ![4,5,12,14,15].contains(&screen);
         if screen < 3 { app.quickstart.open = true; app.quickstart.step = screen; }
+        if (78..=80).contains(&scene) {app.quickstart.fixture_sound(scene);app.state.downloading=true;app.state.quickstart.models=Default::default();}
         if screen == 13 { app.quickstart.open = true; app.quickstart.step = 2; app.quickstart.expanded = true; }
         if (6..12).contains(&screen) {
             app.show_settings = true;
@@ -309,6 +313,8 @@ impl eframe::App for Preview {
             ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("fixture-recording-settings-offset"),240.0_f32));
         }
         self.app.ui(ui, frame);
+        if self.screen==81 {egui::Window::new("Загрузка").show(ui.ctx(), |ui| {crate::theme::spinner(ui);});}
+        if self.screen==82 {egui::Window::new("Подсказка звонка").show(ui.ctx(), |ui| {crate::detection::start_card(ui,"Chrome",None,Some("Дождитесь проверки звука"));});}
         if self.screen==33 {
             let ctx=ui.ctx().clone();
             theme::modal(&ctx,"Элементы интерфейса").default_width(520.0).show(&ctx,|ui| {
@@ -428,7 +434,7 @@ if shutil.disk_usage(root).free < 2 * 1024**3:
 # Resolve the derived harness root against the copied workspace lock before its locked build.
 subprocess.run(["cargo", "metadata", "--offline", "--format-version", "1", "--manifest-path", str(harness / "Cargo.toml")], cwd=root, env=env, check=True, stdout=subprocess.DEVNULL)
 subprocess.run(["cargo", "build", "--locked", "--manifest-path", str(harness / "Cargo.toml")], cwd=root, env=env, check=True)
-names = ["welcome", "name", "connections", "home", "note", "transcript", "general", "recording", "calendars", "ai", "search", "storage", "recording-pill", "connections-expanded", "delete-confirm", "meeting-menu", "toast", "empty-library", "narrow-settings", "recording-bar", "chat", "tasks", "people", "person", "series", "digest", "folders", "diagnostics", "tracker-preview", "new-recording", "rename", "regenerate", "capture-warning", "widgets", "update-card", "folder-delete", "merge-people", "folders-advanced", "ai-expanded", "performance-transcript", "performance-meetings", "performance-live", "chat-meeting-empty", "chat-library-empty", "chat-recipes", "chat-recording", "recording-silence", "recording-final-pass", "recording-ready", "recording-not-ready", "summary-skipped", "calendar-reminder-link", "calendar-reminder-no-link", "calendar-upcoming", "calendar-help", "direct-task-checkboxes", "direct-template-bar", "direct-template-picker", "direct-speaker-menu", "compact-transcript", "compact-summary", "compact-storage", "compact-person", "compact-series", "one-step-bar", "one-step-countdown", "one-step-settings", "one-step-auto-title", "ktalk-settings-empty", "ktalk-settings-connected", "ktalk-preview", "ktalk-transcript", "ktalk-success", "calendar-home-events", "calendar-home-empty", "calendar-home-error", "calendar-settings-status", "calendar-settings-error"]
+names = ["welcome", "name", "connections", "home", "note", "transcript", "general", "recording", "calendars", "ai", "search", "storage", "recording-pill", "connections-expanded", "delete-confirm", "meeting-menu", "toast", "empty-library", "narrow-settings", "recording-bar", "chat", "tasks", "people", "person", "series", "digest", "folders", "diagnostics", "tracker-preview", "new-recording", "rename", "regenerate", "capture-warning", "widgets", "update-card", "folder-delete", "merge-people", "folders-advanced", "ai-expanded", "performance-transcript", "performance-meetings", "performance-live", "chat-meeting-empty", "chat-library-empty", "chat-recipes", "chat-recording", "recording-silence", "recording-final-pass", "recording-ready", "recording-not-ready", "summary-skipped", "calendar-reminder-link", "calendar-reminder-no-link", "calendar-upcoming", "calendar-help", "direct-task-checkboxes", "direct-template-bar", "direct-template-picker", "direct-speaker-menu", "compact-transcript", "compact-summary", "compact-storage", "compact-person", "compact-series", "one-step-bar", "one-step-countdown", "one-step-settings", "one-step-auto-title", "ktalk-settings-empty", "ktalk-settings-connected", "ktalk-preview", "ktalk-transcript", "ktalk-success", "calendar-home-events", "calendar-home-empty", "calendar-home-error", "calendar-settings-status", "calendar-settings-error", "mac-sound-no-access", "mac-sound-silent", "mac-sound-ready", "spinner-retina", "hint-disabled"]
 def render(spec):
     index, name, theme, width, height, zoom = spec
     actual_width = 760 if name == "narrow-settings" and zoom == 1.0 else width
@@ -446,6 +452,7 @@ specs = [(index,name,theme,width,height,zoom)
     for width,height,zoom in [(1280,800,1.0),(960,640,1.0),(960,640,1.5)]
     for index,name in enumerate(names) if not args.screens or name in args.screens
     for theme in ("light","dark")]
+specs += [(81,"spinner-retina",theme,1280,800,2.0) for theme in ("light","dark") if not args.screens or "spinner-retina" in args.screens]
 # Isolated fixture libraries let software rendering run concurrently without shared data writes.
 with ThreadPoolExecutor(max_workers=3) as executor:
     list(executor.map(render,specs))

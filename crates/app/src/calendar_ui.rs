@@ -371,7 +371,7 @@ pub fn home(
         }
         if model.loading {
             ui.horizontal(|ui| {
-                ui.spinner();
+                crate::theme::spinner(ui);
                 ui.label("Загружаем календарь…");
             });
         } else if count == 0 {

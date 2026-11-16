@@ -513,7 +513,7 @@ impl Panel {
                     self.refresh(ui.ctx(), &state.settings);
                 }
                 if self.receiver.is_some() {
-                    ui.spinner();
+                    crate::theme::spinner(ui);
                 }
             });
         });

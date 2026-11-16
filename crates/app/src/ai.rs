@@ -463,7 +463,7 @@ fn busy_row(ui: &mut egui::Ui, card: &Card) {
         return;
     }
     ui.horizontal_wrapped(|ui| {
-        ui.spinner();
+        crate::theme::spinner(ui);
         if card.signing_in {
             ui.label("Жду вход в браузере, затем проверю подключение…");
             if crate::theme::button(ui, "Отмена", crate::theme::ButtonStyle::Ghost).clicked()
@@ -510,7 +510,7 @@ fn cli_setup(
             );
             if installing {
                 ui.horizontal(|ui| {
-                    ui.spinner();
+                    crate::theme::spinner(ui);
                     ui.label(format!("Устанавливаю {name}. Это займёт пару минут."));
                 });
                 return;

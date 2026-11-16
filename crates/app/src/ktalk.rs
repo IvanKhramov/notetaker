@@ -1142,7 +1142,7 @@ pub fn settings_ui(ui: &mut eframe::egui::Ui, state: &mut State) -> Option<Job> 
                 job = Some(Job::Check(settings.clone()));
             }
             if state.busy {
-                ui.spinner();
+                crate::theme::spinner(ui);
             }
             let (text, style) = if let Err(error) = &valid
                 && !state.address.is_empty()
@@ -1371,7 +1371,7 @@ pub fn windows(ctx: &eframe::egui::Context, state: &mut crate::state::AppState) 
                 ctx,
                 |ui| {
                     if state.ktalk.busy {
-                        ui.spinner();
+                        crate::theme::spinner(ui);
                         ui.weak("Сопоставляю запись…");
                     }
                     if let Some((task, outcome)) = &state.ktalk.preview {

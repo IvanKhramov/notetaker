@@ -17,6 +17,7 @@ pub enum Status {
     #[default]
     Missing,
     Error(String),
+    Warning(String),
 }
 #[derive(Clone, Debug, Default)]
 pub struct Models {
@@ -161,7 +162,7 @@ pub fn model_status(ui: &mut egui::Ui, state: &mut AppState) {
             .filter(|id| state.quickstart.models.get(id) == &Status::Ready)
             .count();
         ui.horizontal_wrapped(|ui| {
-            ui.spinner();
+            crate::theme::spinner(ui);
             ui.weak(format!("Подготовка к записи: скачиваю {} из 3…", ready + 1));
         });
     } else if let Some(error) = state.quickstart.download_error.clone() {
@@ -250,7 +251,14 @@ impl Panel {
             match receiver.try_recv() {
                 Ok(ProbeEvent::Done(result)) => {
                     self.probe_status = Some(result.unwrap_or_else(|error| {
-                        [Status::Error(error.clone()), Status::Error(error)]
+                        [
+                            Status::Error(error.clone()),
+                            if cfg!(target_os = "macos") {
+                                sound_status(0, true, true)
+                            } else {
+                                Status::Error(error)
+                            },
+                        ]
                     }));
                     state.quickstart.probe_busy = false;
                 }
@@ -319,15 +327,8 @@ impl Panel {
                             ui.label("Проверим звук?");
                             ui.label("Говорите и включите звук на компьютере. Проверка займёт 5 секунд, аудио не сохраняется.");
                             for (index, title) in ["Микрофон", "Системный звук"].into_iter().enumerate() {
-                                let status = self.probe_status.as_ref().map(|s| &s[index]);
-                                match status {
-                                    Some(Status::Ready) => { ui.label(format!("✓ {title}: работает")); }
-                                    Some(Status::Error(error)) => { ui.colored_label(Palette::of(ui).red, format!("{title}: {error}")); }
-                                    _ => { ui.weak(format!("{title}: {}", if state.quickstart.probe_busy { "проверяю…" } else { "не проверен" })); }
-                                }
+                                probe_line(ui, title, self.probe_status.as_ref().map(|s| &s[index]), index == 1 && cfg!(target_os = "macos"), state.quickstart.probe_busy);
                             }
-                            #[cfg(target_os = "macos")]
-                            ui.small("macOS: Настройки системы → Конфиденциальность и безопасность → Microphone и System Audio Recording. Разрешите доступ для notetaker.");
                             #[cfg(windows)]
                             ui.small("Если нет доступа: Параметры → Конфиденциальность → Микрофон. Разрешите доступ приложениям.");
                             #[cfg(not(any(windows, target_os = "macos")))]
@@ -453,15 +454,62 @@ fn probe() -> anyhow::Result<[Status; 2]> {
         }
     }
     result?;
-    Ok(meters.each_ref().map(|meter| {
-        if meter.levels().samples == 0 {
-            Status::Error("Нет доступа к звуку".into())
-        } else if meter.levels().is_silent(-60.0) {
-            Status::Error("Тишина. Включите звук и повторите проверку".into())
-        } else {
-            Status::Ready
-        }
+    Ok(std::array::from_fn(|index| {
+        let levels = meters[index].levels();
+        sound_status(
+            levels.samples,
+            levels.is_silent(-60.0),
+            index == 1 && cfg!(target_os = "macos"),
+        )
     }))
+}
+
+pub fn sound_status(samples: u64, silent: bool, mac_system: bool) -> Status {
+    if samples > 0 && !silent {
+        Status::Ready
+    } else if mac_system {
+        Status::Warning("нет звука или доступа. Включите звук и проверьте разрешение на запись системного звука".into())
+    } else {
+        Status::Warning("тишина. Включите любой звук и повторите проверку".into())
+    }
+}
+pub fn probe_line(
+    ui: &mut egui::Ui,
+    title: &str,
+    status: Option<&Status>,
+    mac_system: bool,
+    busy: bool,
+) {
+    match status {
+        Some(Status::Ready) => {
+            ui.label(format!("✓ {title}: работает"));
+        }
+        Some(Status::Warning(reason)) => {
+            ui.colored_label(Palette::of(ui).warning, format!("{title}: {reason}"));
+        }
+        Some(Status::Error(reason)) => {
+            ui.colored_label(Palette::of(ui).red, format!("{title}: {reason}"));
+        }
+        _ => {
+            ui.weak(format!(
+                "{title}: {}",
+                if busy {
+                    "проверяю…"
+                } else {
+                    "не проверен"
+                }
+            ));
+        }
+    }
+    if mac_system && matches!(status, Some(Status::Warning(_) | Status::Error(_))) {
+        ui.small("Настройки системы → Конфиденциальность и безопасность → Запись экрана и системного звука. Разрешите доступ для notetaker.");
+        if theme::button(ui, "Открыть настройки", theme::ButtonStyle::Ghost).clicked()
+        {
+            ui.ctx().open_url(egui::OpenUrl::new_tab(
+                "x-apple.systempreferences:com.apple.preference.security",
+            ));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -510,5 +558,18 @@ mod tests {
         assert!(panel.open);
         assert_eq!(panel.step, 0);
         assert_eq!(state.settings_draft.user_name, "After");
+    }
+}
+
+#[cfg(test)]
+mod sound_regression_tests {
+    #[test]
+    fn tap_without_samples_and_silent_tap_are_honestly_ambiguous() {
+        for (samples, silent) in [(0, true), (100, true)] {
+            assert!(
+                matches!(super::sound_status(samples, silent, true), super::Status::Warning(text) if text.contains("нет звука или доступа"))
+            );
+        }
+        assert_eq!(super::sound_status(100, false, true), super::Status::Ready);
     }
 }

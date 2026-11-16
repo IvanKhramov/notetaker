@@ -2760,3 +2760,45 @@ pub fn recording_status(
         }
     });
 }
+
+/// A constant 270 degree sweep stays legible at every animation phase and DPI.
+pub fn spinner(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
+    if ui.is_rect_visible(rect) {
+        ui.ctx().request_repaint();
+        let phase = ui.input(|input| input.time) as f32 * std::f32::consts::TAU;
+        let points = (0..=32)
+            .map(|index| {
+                let angle = phase + index as f32 / 32.0 * std::f32::consts::TAU * 0.75;
+                rect.center() + egui::vec2(angle.cos(), angle.sin()) * 7.0
+            })
+            .collect();
+        ui.painter().circle_stroke(
+            rect.center(),
+            7.0,
+            egui::Stroke::new(1.0, Palette::of(ui).border),
+        );
+        ui.painter().add(egui::Shape::line(
+            points,
+            egui::Stroke::new(2.0, Palette::of(ui).muted),
+        ));
+    }
+    response
+}
+
+#[cfg(test)]
+mod spinner_regression_tests {
+    #[test]
+    fn visible_spinner_requests_animation_at_both_pixel_scales() {
+        let ctx = eframe::egui::Context::default();
+        super::install(&ctx);
+        for scale in [1.0, 2.0] {
+            ctx.set_pixels_per_point(scale);
+            crate::test_ui::frame(&ctx, vec![], &mut |ui| {
+                super::spinner(ui);
+                assert!(ui.ctx().has_requested_repaint());
+            })
+            .drop_without_applying_deltas();
+        }
+    }
+}
