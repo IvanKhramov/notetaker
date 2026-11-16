@@ -46,7 +46,7 @@ fn waveform(path: &Path) -> Result<Vec<f32>> {
 
 pub(crate) fn extractor_config(threads: i32) -> Result<SpeakerEmbeddingExtractorConfig> {
     let root = models::models_dir()?;
-    let path = models::installed(&root, &models::ERES2NET)?.join(models::ERES2NET.files[0]);
+    let path = models::installed(&root, &models::ERES2NET)?.join(models::ERES2NET.files[0].0);
     Ok(SpeakerEmbeddingExtractorConfig {
         model: Some(path.to_string_lossy().into()),
         num_threads: threads,

@@ -10,39 +10,43 @@ fn check(root: &Path, model: &str) -> bool {
         .status
         .success()
 }
+fn legacy_install(root: &Path, model: &str, files: &[(&str, u64)]) {
+    let path = root.join(model);
+    fs::create_dir(&path).unwrap();
+    for (name, size) in files {
+        fs::File::create(path.join(name))
+            .unwrap()
+            .set_len(*size)
+            .unwrap();
+    }
+    assert!(!path.join("FILES").exists());
+    assert!(!path.join("SHA256").exists());
+}
 
 #[test]
 fn model_check_requires_complete_asr_and_vad_installation() {
     let root = tempfile::tempdir().unwrap();
     assert!(!check(root.path(), "gigaam-v3"));
-    let asr = root.path().join("gigaam-v3");
-    fs::create_dir(&asr).unwrap();
-    for file in [
-        "encoder.int8.onnx",
-        "decoder.onnx",
-        "joiner.onnx",
-        "tokens.txt",
-    ] {
-        fs::write(asr.join(file), [1]).unwrap();
-    }
-    fs::write(
-        asr.join("FILES"),
-        "encoder.int8.onnx\t1\ndecoder.onnx\t1\njoiner.onnx\t1\ntokens.txt\t1\n",
-    )
-    .unwrap();
-    fs::write(
-        asr.join("SHA256"),
-        "f9620a0099019c6afcee26525ef9ed3297fa50dd5691c1902af0c948fc1a470b",
-    )
-    .unwrap();
+    legacy_install(
+        root.path(),
+        "gigaam-v3",
+        &[
+            ("encoder.int8.onnx", 224_570_820),
+            ("decoder.onnx", 4_600_132),
+            ("joiner.onnx", 2_712_896),
+            ("tokens.txt", 13_354),
+        ],
+    );
     assert!(!check(root.path(), "gigaam-v3"));
-    let vad = root.path().join("silero-vad");
-    fs::create_dir(&vad).unwrap();
-    let file = fs::File::create(vad.join("silero_vad.onnx")).unwrap();
-    file.set_len(643_854).unwrap();
-    // Synthetic weights prove that check-model only reads integrity metadata.
+    legacy_install(root.path(), "silero-vad", &[("silero_vad.onnx", 643_854)]);
+    // Sparse synthetic weights prove check-model only reads sizes, not ONNX data.
     assert!(check(root.path(), "gigaam-v3"));
-    file.set_len(1).unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(root.path().join("silero-vad/silero_vad.onnx"))
+        .unwrap()
+        .set_len(1)
+        .unwrap();
     assert!(!check(root.path(), "gigaam-v3"));
     assert!(!check(root.path(), "parakeet-v3"));
     assert!(!check(root.path(), "../gigaam-v3"));
@@ -52,30 +56,21 @@ fn model_check_requires_complete_asr_and_vad_installation() {
 fn diarization_check_needs_both_models_and_no_asr_or_vad() {
     let root = tempfile::tempdir().unwrap();
     assert!(!check(root.path(), "diarization"));
-    let segmentation = root.path().join("pyannote-3.0");
-    fs::create_dir(&segmentation).unwrap();
-    for file in ["model.int8.onnx", "LICENSE"] {
-        fs::write(segmentation.join(file), [1]).unwrap();
-    }
-    fs::write(
-        segmentation.join("FILES"),
-        "model.int8.onnx\t1\nLICENSE\t1\n",
-    )
-    .unwrap();
-    fs::write(
-        segmentation.join("SHA256"),
-        "24615ee884c897d9d2ba09bb4d30da6bb1b15e685065962db5b02e76e4996488",
-    )
-    .unwrap();
+    legacy_install(
+        root.path(),
+        "pyannote-3.0",
+        &[("model.int8.onnx", 1_540_506), ("LICENSE", 1_061)],
+    );
     assert!(!check(root.path(), "diarization"));
-    let embedding = root.path().join("eres2net-base");
-    fs::create_dir(&embedding).unwrap();
-    let file = fs::File::create(
-        embedding.join("3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"),
-    )
-    .unwrap();
-    file.set_len(39_593_761).unwrap();
+    legacy_install(
+        root.path(),
+        "eres2net-base",
+        &[(
+            "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
+            39_593_761,
+        )],
+    );
     assert!(check(root.path(), "diarization"));
-    fs::write(segmentation.join("model.int8.onnx"), []).unwrap();
+    fs::write(root.path().join("pyannote-3.0/model.int8.onnx"), []).unwrap();
     assert!(!check(root.path(), "diarization"));
 }

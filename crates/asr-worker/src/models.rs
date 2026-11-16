@@ -17,7 +17,8 @@ pub struct ModelManifest {
     pub sha256: &'static str,
     pub size: u64,
     pub directory: &'static str,
-    pub files: &'static [&'static str],
+    /// Required installed files and their pinned, unpacked byte lengths.
+    pub files: &'static [(&'static str, u64)],
 }
 
 pub const GIGAAM: ModelManifest = ModelManifest {
@@ -27,12 +28,14 @@ pub const GIGAAM: ModelManifest = ModelManifest {
     size: 170_197_019,
     directory: "sherpa-onnx-nemo-transducer-punct-giga-am-v3-russian-2025-12-16",
     files: &[
-        "encoder.int8.onnx",
-        "decoder.onnx",
-        "joiner.onnx",
-        "tokens.txt",
+        ("encoder.int8.onnx", 224_570_820),
+        ("decoder.onnx", 4_600_132),
+        ("joiner.onnx", 2_712_896),
+        ("tokens.txt", 13_354),
     ],
 };
+// The upstream asset was replaced on 2026-11-07. Keep the original archive pin;
+// unpacked lengths come from a legacy installation of that pinned archive.
 pub const PARAKEET: ModelManifest = ModelManifest {
     id: "parakeet-v3",
     url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2",
@@ -40,10 +43,10 @@ pub const PARAKEET: ModelManifest = ModelManifest {
     size: 487_170_055,
     directory: "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8",
     files: &[
-        "encoder.int8.onnx",
-        "decoder.int8.onnx",
-        "joiner.int8.onnx",
-        "tokens.txt",
+        ("encoder.int8.onnx", 652_184_281),
+        ("decoder.int8.onnx", 11_845_275),
+        ("joiner.int8.onnx", 6_355_277),
+        ("tokens.txt", 93_939),
     ],
 };
 pub const SILERO: ModelManifest = ModelManifest {
@@ -52,7 +55,7 @@ pub const SILERO: ModelManifest = ModelManifest {
     sha256: "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
     size: 643_854,
     directory: "",
-    files: &["silero_vad.onnx"],
+    files: &[("silero_vad.onnx", 643_854)],
 };
 
 /// Multilingual tiny, not tiny.en. Only int8 weights are retained after download.
@@ -62,7 +65,10 @@ pub const WHISPER_TINY: ModelManifest = ModelManifest {
     sha256: "c46116994e539aa165266d96b325252728429c12535eb9d8b6a2b10f129e66b1",
     size: 116_204_861,
     directory: "sherpa-onnx-whisper-tiny",
-    files: &["tiny-encoder.int8.onnx", "tiny-decoder.int8.onnx"],
+    files: &[
+        ("tiny-encoder.int8.onnx", 12_937_772),
+        ("tiny-decoder.int8.onnx", 89_855_401),
+    ],
 };
 
 pub const PYANNOTE: ModelManifest = ModelManifest {
@@ -71,7 +77,7 @@ pub const PYANNOTE: ModelManifest = ModelManifest {
     sha256: "24615ee884c897d9d2ba09bb4d30da6bb1b15e685065962db5b02e76e4996488",
     size: 6_958_444,
     directory: "sherpa-onnx-pyannote-segmentation-3-0",
-    files: &["model.int8.onnx", "LICENSE"],
+    files: &[("model.int8.onnx", 1_540_506), ("LICENSE", 1_061)],
 };
 pub const ERES2NET: ModelManifest = ModelManifest {
     id: "eres2net-base",
@@ -79,7 +85,10 @@ pub const ERES2NET: ModelManifest = ModelManifest {
     sha256: "1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b",
     size: 39_593_761,
     directory: "",
-    files: &["3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"],
+    files: &[(
+        "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
+        39_593_761,
+    )],
 };
 
 pub fn check(id: &str) -> Result<()> {
@@ -127,35 +136,11 @@ pub fn models_dir() -> Result<PathBuf> {
 
 pub fn installed(root: &Path, model: &ModelManifest) -> Result<PathBuf> {
     let path = root.join(model.id);
-    let sizes: std::collections::BTreeMap<String, u64> = if model.directory.is_empty() {
-        ensure!(
-            model.files.len() == 1,
-            "Некорректный манифест одиночной модели"
-        );
-        [(model.files[0].to_owned(), model.size)].into()
-    } else {
-        ensure!(
-            fs::read_to_string(path.join("SHA256"))? == model.sha256,
-            "Версия модели не совпадает"
-        );
-        let entries = fs::read_to_string(path.join("FILES"))?;
-        let sizes: std::collections::BTreeMap<String, u64> = entries
-            .lines()
-            .map(|line| -> Result<_> {
-                let (name, size) = line
-                    .split_once('\t')
-                    .context("Некорректный список размеров модели")?;
-                Ok((name.to_owned(), size.parse()?))
-            })
-            .collect::<Result<_>>()?;
-        ensure!(
-            sizes.len() == model.files.len(),
-            "Некорректный список файлов модели"
-        );
-        sizes
-    };
-    for file in model.files {
-        let expected = sizes.get(*file).context("Нет размера файла модели")?;
+    check_files(&path, model)?;
+    Ok(path)
+}
+fn check_files(path: &Path, model: &ModelManifest) -> Result<()> {
+    for (file, expected) in model.files {
         let metadata = fs::metadata(path.join(file))?;
         ensure!(
             metadata.is_file() && *expected > 0 && metadata.len() == *expected,
@@ -164,7 +149,7 @@ pub fn installed(root: &Path, model: &ModelManifest) -> Result<PathBuf> {
             model.id
         );
     }
-    Ok(path)
+    Ok(())
 }
 
 fn verify(mut reader: impl Read, model: &ModelManifest) -> Result<()> {
@@ -212,7 +197,7 @@ fn unpack_archive(archive: impl Read, extracted: &Path, model: &ModelManifest) -
             if !model
                 .files
                 .iter()
-                .any(|name| path == Path::new(model.directory).join(name))
+                .any(|(name, _)| path == Path::new(model.directory).join(name))
             {
                 continue;
             }
@@ -245,21 +230,12 @@ fn download_one(root: &Path, model: &ModelManifest) -> Result<()> {
     fs::create_dir(&extracted)?;
     if model.directory.is_empty() {
         // The installed inode must never have been open as a writable partial.
-        fs::copy(&archive, extracted.join(model.files[0]))?;
+        fs::copy(&archive, extracted.join(model.files[0].0))?;
     } else {
         unpack_archive(File::open(&archive)?, &extracted, model)?;
     }
     let source = extracted.join(model.directory);
-    let mut sizes = String::new();
-    for name in model.files {
-        let metadata = fs::metadata(source.join(name))?;
-        ensure!(
-            metadata.is_file() && metadata.len() > 0,
-            "В архиве нет файла {name}"
-        );
-        sizes.push_str(&format!("{name}\t{}\n", metadata.len()));
-    }
-    fs::write(source.join("FILES"), sizes)?;
+    check_files(&source, model)?;
     fs::write(source.join("SHA256"), model.sha256)?;
     if root.join(model.id).exists() {
         fs::remove_dir_all(root.join(model.id))?;
@@ -342,7 +318,7 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         unpack_archive(compressed.as_slice(), temporary.path(), &WHISPER_TINY).unwrap();
         let installed = temporary.path().join(WHISPER_TINY.directory);
-        for name in WHISPER_TINY.files {
+        for (name, _) in WHISPER_TINY.files {
             assert_eq!(fs::read(installed.join(name)).unwrap(), b"abc");
         }
         assert!(!installed.join("tiny-encoder.onnx").exists());
@@ -383,7 +359,7 @@ mod installation_tests {
             sha256: Box::leak(format!("{:x}", Sha256::digest(b"abcdef")).into_boxed_str()),
             size: 6,
             directory: "",
-            files: &["model.bin"],
+            files: &[("model.bin", 6)],
         }
     }
     fn headers(stream: &mut std::net::TcpStream) {
@@ -524,22 +500,79 @@ mod installation_tests {
         assert!(!root.path().join(".neutral.staging").exists());
     }
     #[test]
-    fn archive_install_requires_recorded_verified_sizes() {
+    fn archive_install_does_not_require_or_trust_local_markers() {
         let root = tempfile::tempdir().unwrap();
         let manifest = ModelManifest {
             id: "archive",
             directory: "archive-root",
-            files: &["encoder.onnx"],
+            files: &[("encoder.onnx", 3)],
             ..model(String::new())
         };
         let path = root.path().join(manifest.id);
         fs::create_dir(&path).unwrap();
         fs::write(path.join("encoder.onnx"), b"abc").unwrap();
-        fs::write(path.join("SHA256"), manifest.sha256).unwrap();
-        assert!(installed(root.path(), &manifest).is_err());
-        fs::write(path.join("FILES"), "encoder.onnx\t3\n").unwrap();
+        assert!(installed(root.path(), &manifest).is_ok());
+        fs::write(path.join("SHA256"), "old marker").unwrap();
+        fs::write(path.join("FILES"), "encoder.onnx\t1\n").unwrap();
         assert!(installed(root.path(), &manifest).is_ok());
         fs::write(path.join("encoder.onnx"), b"a").unwrap();
         assert!(installed(root.path(), &manifest).is_err());
+    }
+    #[test]
+    fn every_released_model_is_ready_without_markers_or_a_download() {
+        for model in [
+            &GIGAAM,
+            &PARAKEET,
+            &SILERO,
+            &WHISPER_TINY,
+            &PYANNOTE,
+            &ERES2NET,
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join(model.id);
+            fs::create_dir(&path).unwrap();
+            for (name, size) in model.files {
+                fs::File::create(path.join(name))
+                    .unwrap()
+                    .set_len(*size)
+                    .unwrap();
+            }
+            assert!(installed(root.path(), model).is_ok(), "{}", model.id);
+            let offline = ModelManifest {
+                id: model.id,
+                url: "http://127.0.0.1:1/must-not-download",
+                sha256: model.sha256,
+                size: model.size,
+                directory: model.directory,
+                files: model.files,
+            };
+            download_one(root.path(), &offline).unwrap();
+            assert!(!path.join("FILES").exists());
+            assert!(!path.join("SHA256").exists());
+            for (name, size) in model.files {
+                fs::OpenOptions::new()
+                    .write(true)
+                    .open(path.join(name))
+                    .unwrap()
+                    .set_len(size - 1)
+                    .unwrap();
+                assert!(
+                    installed(root.path(), model).is_err(),
+                    "{} / {name}: truncated",
+                    model.id
+                );
+                fs::remove_file(path.join(name)).unwrap();
+                assert!(
+                    installed(root.path(), model).is_err(),
+                    "{} / {name}: missing",
+                    model.id
+                );
+                fs::File::create(path.join(name))
+                    .unwrap()
+                    .set_len(*size)
+                    .unwrap();
+                assert!(installed(root.path(), model).is_ok());
+            }
+        }
     }
 }

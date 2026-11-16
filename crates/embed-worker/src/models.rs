@@ -21,6 +21,9 @@ const FILES: &[(&str, &str, u64, &str)] = &[
 ];
 pub fn check() -> Result<()> {
     let dir = notetaker_core::embedding::model_dir()?;
+    check_directory(&dir)
+}
+fn check_directory(dir: &std::path::Path) -> Result<()> {
     for (_, name, size, _) in FILES {
         ensure!(
             fs::metadata(dir.join(name)).map(|m| m.len()).unwrap_or(0) == *size,
@@ -29,6 +32,7 @@ pub fn check() -> Result<()> {
     }
     Ok(())
 }
+
 pub fn download_plan() -> Result<()> {
     let ready = check().is_ok();
     for (_, name, size, _) in FILES {
@@ -90,4 +94,37 @@ pub fn download() -> Result<()> {
     }
     eprintln!("Поиск по смыслу: модель установлена");
     Ok(())
+}
+
+#[cfg(test)]
+mod legacy_install_tests {
+    use super::*;
+    #[test]
+    fn released_embedding_model_needs_no_markers_and_rejects_each_bad_file() {
+        let root = tempfile::tempdir().unwrap();
+        for (_, name, size, _) in FILES {
+            fs::File::create(root.path().join(name))
+                .unwrap()
+                .set_len(*size)
+                .unwrap();
+        }
+        assert!(check_directory(root.path()).is_ok());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), FILES.len());
+        for (_, name, size, _) in FILES {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(root.path().join(name))
+                .unwrap()
+                .set_len(size - 1)
+                .unwrap();
+            assert!(check_directory(root.path()).is_err());
+            fs::remove_file(root.path().join(name)).unwrap();
+            assert!(check_directory(root.path()).is_err());
+            fs::File::create(root.path().join(name))
+                .unwrap()
+                .set_len(*size)
+                .unwrap();
+            assert!(check_directory(root.path()).is_ok());
+        }
+    }
 }
