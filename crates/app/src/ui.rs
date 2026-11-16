@@ -728,6 +728,11 @@ impl NotetakerApp {
                 if self.state.permissions.recording_help(&self.state.recording) {
                     crate::permissions::open_settings(ui);
                 }
+                if let Some(next) = self.state.next_meeting(chrono::Utc::now())
+                    && crate::calendar_ui::next_meeting(ui, &next)
+                {
+                    self.state.dismiss_calendar_reminder();
+                }
             }
             ui.horizontal(|ui| {
                 let phase = self.state.recording.phase;
@@ -2672,7 +2677,7 @@ impl NotetakerApp {
         if self.interaction_blocked(ctx) {
             return;
         }
-        let event = self.state.calendar_reminder().cloned();
+        let event = self.state.idle_calendar_reminder().cloned();
         let ending = match self.state.call_prompt {
             Some(CallPrompt::Stop { countdown, .. }) => Some(countdown.remaining),
             _ => None,
@@ -2691,7 +2696,8 @@ impl NotetakerApp {
             .show(ctx, |ui| {
                 ui.set_width(width);
                 if let Some(remaining) = ending {
-                    ending_action = crate::detection::stop_card(ui, remaining);
+                    // The recording status row below already shows the next meeting.
+                    ending_action = crate::detection::stop_card(ui, remaining, None);
                 } else if let Some(event) = &event {
                     action = crate::calendar_ui::reminder(ui, event, self.recording_reason());
                 }
@@ -2703,6 +2709,7 @@ impl NotetakerApp {
         match action {
             crate::detection::StopAction::Stop => self.state.accept_call(),
             crate::detection::StopAction::Continue => self.state.dismiss_call(),
+            crate::detection::StopAction::DismissNext => self.state.dismiss_calendar_reminder(),
             crate::detection::StopAction::None => {}
         }
     }
@@ -2732,7 +2739,7 @@ impl NotetakerApp {
         )
     }
     fn call_notification(&mut self, ctx: &egui::Context) {
-        let calendar = self.state.calendar_reminder().cloned().filter(|_| {
+        let calendar = self.state.idle_calendar_reminder().cloned().filter(|_| {
             !self.interaction_blocked(ctx)
                 && ctx.input(|i| {
                     !i.viewport().focused.unwrap_or(true) || i.viewport().minimized.unwrap_or(false)
@@ -2754,6 +2761,10 @@ impl NotetakerApp {
         }
         let mut ending_action = crate::detection::StopAction::None;
         let ending = matches!(prompt, Some(CallPrompt::Stop { .. }));
+        // The countdown hides the recording indicator, so it shows its line.
+        let next = ending
+            .then(|| self.state.next_meeting(chrono::Utc::now()))
+            .flatten();
         let mut accept = false;
         let mut dismiss = false;
         let builder = egui::ViewportBuilder::default();
@@ -2764,7 +2775,7 @@ impl NotetakerApp {
             egui::ViewportId::from_hash_of("call-notification"),
             builder
                 .with_title("notetaker · звонок")
-                .with_inner_size([340.0, 140.0])
+                .with_inner_size([340.0, if next.is_some() { 168.0 } else { 140.0 }])
                 .with_resizable(false)
                 .with_decorations(false)
                 .with_transparent(false)
@@ -2774,7 +2785,8 @@ impl NotetakerApp {
                 ui.painter()
                     .rect_filled(ui.max_rect(), 0.0, Palette::of(ui).card);
                 if let Some(CallPrompt::Stop { countdown, .. }) = &prompt {
-                    ending_action = crate::detection::stop_card(ui, countdown.remaining);
+                    ending_action =
+                        crate::detection::stop_card(ui, countdown.remaining, next.as_ref());
                 } else if let Some(event) = &calendar {
                     match crate::calendar_ui::reminder(ui, event, self.recording_reason()) {
                         crate::calendar_ui::Action::Start => accept = true,
@@ -2827,12 +2839,14 @@ impl NotetakerApp {
         }
     }
     fn indicator(&mut self, ctx: &egui::Context) {
+        let next = self.state.next_meeting(chrono::Utc::now());
         let show = ctx.input(|input| {
             indicator_visible(
                 self.state.recording.phase,
                 input.viewport().minimized.unwrap_or(false),
                 input.viewport().focused.unwrap_or(false),
                 matches!(self.state.call_prompt, Some(CallPrompt::Stop { .. })),
+                next.is_some(),
             )
         });
         if !show {
@@ -2841,6 +2855,7 @@ impl NotetakerApp {
         }
         let mut stop = false;
         let mut open = false;
+        let mut dismiss = false;
         let mut builder = egui::ViewportBuilder::default();
         if let Some(position) = self.indicator.spawn {
             builder = builder.with_position(position);
@@ -2850,20 +2865,29 @@ impl NotetakerApp {
             egui::ViewportId::from_hash_of("recording-indicator"),
             builder
                 .with_title("notetaker · запись")
-                .with_inner_size([240.0, 64.0])
-                .with_min_inner_size([240.0, 64.0])
-                .with_max_inner_size([240.0, 64.0])
+                .with_inner_size(if next.is_some() {
+                    [320.0, 94.0]
+                } else {
+                    [240.0, 54.0]
+                })
                 .with_resizable(false)
                 .with_decorations(false)
-                .with_transparent(true)
+                .with_transparent(false)
                 .with_window_level(egui::WindowLevel::AlwaysOnTop)
                 .with_active(false),
             |ui, _| {
-                (open, stop) = recording_pill(
+                ui.painter()
+                    .rect_filled(ui.max_rect(), 0.0, Palette::of(ui).card);
+                let size;
+                (open, stop, dismiss, size) = recording_pill(
                     ui,
                     self.state.recording.elapsed(),
                     self.state.recording.level(),
+                    self.state.recording.phase,
+                    next.as_ref(),
                 );
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
                 ui.input(|input| {
                     if let Some(rect) = input.viewport().outer_rect
                         && !input.pointer.primary_down()
@@ -2882,6 +2906,9 @@ impl NotetakerApp {
         }
         if stop {
             self.state.toggle_recording();
+        }
+        if dismiss {
+            self.state.dismiss_calendar_reminder();
         }
     }
     #[cfg(any(windows, target_os = "macos"))]
@@ -3412,6 +3439,7 @@ fn next_state_wake_at(
     for event in &state.calendar_events {
         for time in [
             event.start - chrono::Duration::minutes(5),
+            event.start - chrono::Duration::minutes(1),
             event.start,
             event.end,
         ] {
@@ -3431,8 +3459,14 @@ fn next_state_wake_at(
         .map(|delay| delay.max(Duration::from_millis(16)))
 }
 
-/// A click opens the main window; dragging any part except Stop moves the pill.
-fn recording_pill(ui: &mut egui::Ui, elapsed: Duration, level: f32) -> (bool, bool) {
+/// Clicking free space opens the main window; dragging it moves the indicator.
+fn recording_pill(
+    ui: &mut egui::Ui,
+    elapsed: Duration,
+    level: f32,
+    phase: Phase,
+    next: Option<&crate::calendar_ui::NextMeeting>,
+) -> (bool, bool, bool, egui::Vec2) {
     let p = Palette::of(ui);
     let background = ui.interact(
         ui.max_rect(),
@@ -3443,12 +3477,31 @@ fn recording_pill(ui: &mut egui::Ui, elapsed: Duration, level: f32) -> (bool, bo
         ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
     }
     let mut stop = false;
-    theme::bar(p)
+    let mut dismiss = false;
+    let frame = theme::bar(p)
         .corner_radius(12)
         .inner_margin(10)
         .show(ui, |ui| {
-            ui.set_min_width(218.0);
+            ui.set_width(
+                (if next.is_some() { 298.0_f32 } else { 218.0_f32 }).min(ui.available_width()),
+            );
             ui.horizontal(|ui| {
+                if phase != Phase::Recording {
+                    theme::spinner(ui);
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(if phase == Phase::Starting {
+                                "Начинаю запись"
+                            } else {
+                                "Распознаю запись"
+                            })
+                            .font(theme::medium(theme::SMALL))
+                            .color(p.muted),
+                        )
+                        .truncate(),
+                    );
+                    return;
+                }
                 let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
                 ui.painter().circle_filled(dot.center(), 3.0, p.red);
                 theme::waveform(ui, level);
@@ -3459,8 +3512,16 @@ fn recording_pill(ui: &mut egui::Ui, elapsed: Duration, level: f32) -> (bool, bo
                 ui.add_space(16.0);
                 stop = theme::button(ui, "Стоп", ButtonStyle::Secondary).clicked();
             });
+            if let Some(next) = next {
+                dismiss = crate::calendar_ui::next_meeting(ui, next);
+            }
         });
-    (background.clicked(), stop)
+    (
+        background.clicked(),
+        stop,
+        dismiss,
+        frame.response.rect.size(),
+    )
 }
 
 pub(crate) fn template_name(root: &std::path::Path, id: &str) -> String {
@@ -3898,8 +3959,16 @@ fn parse_position(text: &str) -> Option<egui::Pos2> {
     };
     (x.is_finite() && y.is_finite()).then(|| egui::pos2(x, y))
 }
-fn indicator_visible(phase: Phase, minimized: bool, focused: bool, countdown: bool) -> bool {
-    phase == Phase::Recording && (minimized || !focused) && !countdown
+fn indicator_visible(
+    phase: Phase,
+    minimized: bool,
+    focused: bool,
+    countdown: bool,
+    next: bool,
+) -> bool {
+    (phase == Phase::Recording || next && phase != Phase::Idle)
+        && (minimized || !focused)
+        && !countdown
 }
 fn visible_main_rect(
     main: Option<egui::Rect>,
@@ -5272,8 +5341,16 @@ mod tests {
                     egui::CentralPanel::default()
                         .frame(egui::Frame::NONE)
                         .show(root, |ui| {
-                            result =
-                                super::recording_pill(ui, std::time::Duration::from_secs(48), 0.3);
+                            result = {
+                                let response = super::recording_pill(
+                                    ui,
+                                    std::time::Duration::from_secs(48),
+                                    0.3,
+                                    super::Phase::Recording,
+                                    None,
+                                );
+                                (response.0, response.1)
+                            };
                         });
                 },
             );
@@ -5556,12 +5633,36 @@ mod tests {
     }
     #[test]
     fn indicator_only_shows_during_recording_outside_main_window() {
-        assert!(!indicator_visible(Phase::Recording, false, true, false));
-        assert!(indicator_visible(Phase::Recording, true, true, false));
-        assert!(indicator_visible(Phase::Recording, false, false, false));
-        assert!(!indicator_visible(Phase::Recording, true, false, true));
+        assert!(!indicator_visible(
+            Phase::Recording,
+            false,
+            true,
+            false,
+            false
+        ));
+        assert!(indicator_visible(
+            Phase::Recording,
+            true,
+            true,
+            false,
+            false
+        ));
+        assert!(indicator_visible(
+            Phase::Recording,
+            false,
+            false,
+            false,
+            false
+        ));
+        assert!(!indicator_visible(
+            Phase::Recording,
+            true,
+            false,
+            true,
+            false
+        ));
         for phase in [Phase::Idle, Phase::Starting, Phase::Finalizing] {
-            assert!(!indicator_visible(phase, true, false, false));
+            assert!(!indicator_visible(phase, true, false, false, false));
         }
     }
     #[test]
@@ -7360,5 +7461,112 @@ mod shutdown_tests {
             "Выйти сейчас",
         );
         assert!(app.state.can_exit());
+    }
+}
+
+#[cfg(test)]
+mod recording_next_tests {
+    use super::*;
+    fn app(phase: Phase) -> NotetakerApp {
+        let (mut state, _commands, _events) = crate::test_ui::state();
+        state.ready = true;
+        state.recording.phase = phase;
+        let now = chrono::Utc::now();
+        state.calendar_events = vec![notetaker_core::calendar::CalendarEvent {
+            link: notetaker_core::calendar::EventLink {
+                uid: "next-ui".into(),
+                title: "Синтетическая следующая встреча".into(),
+                attendees: Vec::new(),
+                call_url: Some("https://space.ktalk.ru/neutral".into()),
+            },
+            start: now + chrono::Duration::seconds(30),
+            end: now + chrono::Duration::minutes(30),
+            all_day: false,
+            organizer: None,
+        }];
+        state.update_calendar_reminder(now);
+        NotetakerApp::with_state(state)
+    }
+    #[test]
+    fn busy_recording_suppresses_both_reminders_and_shows_next_in_status() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        for phase in [Phase::Starting, Phase::Recording, Phase::Finalizing] {
+            let mut app = app(phase);
+            for _ in 0..2 {
+                let output = crate::test_ui::frame(&ctx, vec![], &mut |ui| {
+                    let bounds = ui.max_rect();
+                    app.calendar_reminder_overlay(ui.ctx(), bounds);
+                    app.call_notification(ui.ctx());
+                });
+                assert!(
+                    !output
+                        .viewport_output
+                        .contains_key(&egui::ViewportId::from_hash_of("call-notification"))
+                );
+                assert!(!output.shapes.iter().any(|s| matches!(&s.shape, egui::epaint::Shape::Text(t) if t.galley.text().contains("Синтетическая"))));
+                output.drop_without_applying_deltas();
+            }
+            let output = crate::test_ui::frame(&ctx, vec![], &mut |ui| app.bottom_bar(ui));
+            crate::test_ui::text_rect(&output.shapes, "Далее: Синтетическая следующая встреча");
+            crate::test_ui::text_rect(&output.shapes, "· через 1 мин");
+            assert!(!output.shapes.iter().any(|s| matches!(&s.shape, egui::epaint::Shape::Text(t) if t.galley.text().contains("Завершить и записать"))));
+            output.drop_without_applying_deltas();
+            assert!(indicator_visible(phase, true, false, false, true));
+        }
+    }
+    #[test]
+    fn floating_indicator_adds_one_row_and_dismiss_does_not_open_or_stop() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut app = app(Phase::Recording);
+        let next = app.state.next_meeting(chrono::Utc::now()).unwrap();
+        let mut result = (false, false, false, egui::Vec2::ZERO);
+        let mut render = |ui: &mut egui::Ui| {
+            ui.set_width(320.0);
+            result = recording_pill(
+                ui,
+                Duration::from_secs(120),
+                0.3,
+                Phase::Recording,
+                Some(&next),
+            );
+        };
+        for _ in 0..3 {
+            crate::test_ui::frame(&ctx, vec![], &mut render).drop_without_applying_deltas();
+        }
+        drop(render);
+        // A 54 point pill plus one standard 32 point row and its 8 point gap.
+        assert!(result.3.x <= 320.1 && result.3.y <= 94.1, "{:?}", result.3);
+        let pos = egui::pos2(result.3.x - 25.0, result.3.y - 25.0);
+        for pressed in [true, false] {
+            crate::test_ui::frame(
+                &ctx,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                &mut |ui| {
+                    ui.set_width(320.0);
+                    result = recording_pill(
+                        ui,
+                        Duration::from_secs(120),
+                        0.3,
+                        Phase::Recording,
+                        Some(&next),
+                    );
+                },
+            )
+            .drop_without_applying_deltas();
+        }
+        assert_eq!((result.0, result.1, result.2), (false, false, true));
+        app.state.dismiss_calendar_reminder();
+        app.state.update_calendar_reminder(chrono::Utc::now());
+        assert!(app.state.next_meeting(chrono::Utc::now()).is_none());
     }
 }

@@ -1143,11 +1143,28 @@ impl AppState {
         }));
     }
     pub fn calendar_reminder(&self) -> Option<&notetaker_core::calendar::CalendarEvent> {
+        self.calendar_reminder_at(chrono::Utc::now())
+    }
+    pub fn calendar_reminder_at(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<&notetaker_core::calendar::CalendarEvent> {
         let (uid, start) = self.calendar_reminder.as_ref()?;
         self.calendar_events
             .iter()
             .find(|event| &event.link.uid == uid && &event.start == start)
-            .filter(|event| crate::calendar_ui::eligible(event, chrono::Utc::now()))
+            .filter(|event| crate::calendar_ui::eligible(event, now))
+    }
+    pub fn idle_calendar_reminder(&self) -> Option<&notetaker_core::calendar::CalendarEvent> {
+        self.calendar_reminder().filter(|_| !self.recording.busy())
+    }
+    pub fn next_meeting(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<crate::calendar_ui::NextMeeting> {
+        self.calendar_reminder_at(now)
+            .filter(|_| self.recording.busy())
+            .map(|event| crate::calendar_ui::NextMeeting::new(event, now))
     }
     pub fn dismiss_calendar_reminder(&mut self) {
         if let Some(key) = self.calendar_reminder.take() {
@@ -1155,25 +1172,33 @@ impl AppState {
         }
     }
     pub fn update_calendar_reminder(&mut self, now: chrono::DateTime<chrono::Utc>) {
-        if self.calendar_reminder.as_ref().is_some_and(|(uid, start)| {
-            !self.calendar_events.iter().any(|event| {
-                &event.link.uid == uid
-                    && &event.start == start
+        let previous = self.calendar_reminder.take();
+        self.calendar_reminder = self
+            .calendar_events
+            .iter()
+            .filter(|event| crate::calendar_ui::eligible(event, now))
+            .filter(|event| {
+                let key = (event.link.uid.clone(), event.start);
+                previous.as_ref() == Some(&key) || !self.reminded_events.contains(&key)
+            })
+            .min_by(|a, b| {
+                a.start
+                    .cmp(&b.start)
+                    .then_with(|| a.link.uid.cmp(&b.link.uid))
+            })
+            .map(|event| (event.link.uid.clone(), event.start));
+        if previous != self.calendar_reminder
+            && let Some(key) = previous
+            && self.calendar_events.iter().any(|event| {
+                (event.link.uid.clone(), event.start) == key
                     && crate::calendar_ui::eligible(event, now)
             })
-        }) {
-            self.calendar_reminder = None;
+        {
+            // A newly discovered earlier event postpones the other, not dismisses it.
+            self.reminded_events.remove(&key);
         }
-        if self.calendar_reminder.is_none() {
-            for event in &self.calendar_events {
-                let key = (event.link.uid.clone(), event.start);
-                if crate::calendar_ui::eligible(event, now)
-                    && self.reminded_events.insert(key.clone())
-                {
-                    self.calendar_reminder = Some(key);
-                    break;
-                }
-            }
+        if let Some(key) = &self.calendar_reminder {
+            self.reminded_events.insert(key.clone());
         }
     }
     fn recording_event_started(&mut self, event: &notetaker_core::calendar::CalendarEvent) {
@@ -5558,5 +5583,129 @@ mod calendar_settings_retention_tests {
         state.apply(Event::SettingsSaved(Ok((settings, llm)), false));
         assert!(state.calendar_reports.is_empty());
         assert!(state.calendar_events.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod next_meeting_tests {
+    use super::*;
+    use chrono::{Duration as Delta, Utc};
+    fn event(
+        now: chrono::DateTime<Utc>,
+        id: &str,
+        minutes: i64,
+    ) -> notetaker_core::calendar::CalendarEvent {
+        notetaker_core::calendar::CalendarEvent {
+            link: notetaker_core::calendar::EventLink {
+                uid: id.into(),
+                title: format!("Синтетическая встреча {id}"),
+                attendees: Vec::new(),
+                call_url: Some("https://space.ktalk.ru/neutral".into()),
+            },
+            start: now + Delta::minutes(minutes),
+            end: now + Delta::minutes(minutes + 30),
+            all_day: false,
+            organizer: None,
+        }
+    }
+    #[test]
+    fn next_line_uses_the_reminder_window_and_dismissal_for_every_busy_phase() {
+        let now = Utc::now();
+        for phase in [Phase::Starting, Phase::Recording, Phase::Finalizing] {
+            let (mut state, _commands, _events) = crate::test_ui::state();
+            state.recording.phase = phase;
+            state.calendar_events = vec![event(now, "next", 6)];
+            state.update_calendar_reminder(now);
+            assert!(state.next_meeting(now).is_none());
+            state.update_calendar_reminder(now + Delta::minutes(1));
+            let next = state.next_meeting(now + Delta::minutes(1)).unwrap();
+            assert!(next.text().ends_with("через 5 мин"));
+            assert!(state.idle_calendar_reminder().is_none());
+            let after_start = now + Delta::minutes(8);
+            assert!(
+                state
+                    .next_meeting(after_start)
+                    .unwrap()
+                    .text()
+                    .ends_with("началась 2 мин назад")
+            );
+            state.dismiss_calendar_reminder();
+            state.update_calendar_reminder(after_start);
+            assert!(state.next_meeting(after_start).is_none());
+            state.calendar_events[0].start += Delta::seconds(1);
+            state.update_calendar_reminder(after_start);
+            assert!(state.next_meeting(after_start).is_some());
+            let end = state.calendar_events[0].end;
+            state.update_calendar_reminder(end);
+            assert!(state.next_meeting(end).is_none());
+        }
+    }
+    #[test]
+    fn earlier_event_wins_even_after_a_refresh_and_other_event_is_postponed() {
+        let now = Utc::now();
+        let (mut state, _commands, _events) = crate::test_ui::state();
+        state.recording.phase = Phase::Recording;
+        let later = event(now, "later", 4);
+        let mut earlier = event(now, "earlier", 2);
+        earlier.end = now + Delta::minutes(3);
+        state.calendar_events = vec![later.clone()];
+        state.update_calendar_reminder(now);
+        assert_eq!(state.calendar_reminder_at(now).unwrap().link.uid, "later");
+        state.calendar_events.push(earlier.clone());
+        state.update_calendar_reminder(now);
+        assert_eq!(state.calendar_reminder_at(now).unwrap().link.uid, "earlier");
+        state.update_calendar_reminder(earlier.end);
+        assert_eq!(
+            state.calendar_reminder_at(earlier.end).unwrap().link.uid,
+            "later"
+        );
+        state.dismiss_calendar_reminder();
+        state.update_calendar_reminder(earlier.end);
+        assert!(state.calendar_reminder_at(earlier.end).is_none());
+    }
+    #[test]
+    fn next_recording_waits_for_the_normal_stop_and_final_pass_then_uses_event_entry() {
+        let now = Utc::now();
+        let (mut state, commands, _events) = crate::test_ui::state();
+        state.ready = true;
+        state.quickstart.models.set(
+            &state.settings.model.clone(),
+            crate::quickstart::Status::Ready,
+        );
+        let next = event(now, "next", 0);
+        state.calendar_events = vec![next.clone()];
+        state.recording.phase = Phase::Recording;
+        state.update_calendar_reminder(now);
+        assert!(
+            state
+                .next_meeting(now)
+                .unwrap()
+                .tooltip
+                .contains("финального распознавания")
+        );
+        state.toggle_recording();
+        assert!(state.recording.stop_requested);
+        state.recording.apply(&PipelineEvent::FinalPassProgress {
+            completed: 0,
+            total: 5,
+        });
+        state.start_event(next.clone());
+        assert!(
+            !commands
+                .try_iter()
+                .any(|command| matches!(command, Command::Record(_)))
+        );
+        state.apply(Event::RecordDone {
+            source_issue: None,
+            path: None,
+            document: None,
+            error: None,
+        });
+        assert!(state.idle_calendar_reminder().is_some());
+        state.start_event(next.clone());
+        let sent: Vec<_> = commands.try_iter().collect();
+        assert!(sent.iter().any(|command| matches!(command, Command::Record(request) if request.event.as_ref().is_some_and(|event| event.link.uid == next.link.uid))));
+        assert!(sent.iter().any(|command| matches!(command, Command::OpenCall(url) if url == "https://space.ktalk.ru/neutral")));
+        assert!(state.calendar_reminder.is_none());
     }
 }

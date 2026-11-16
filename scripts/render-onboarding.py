@@ -111,6 +111,7 @@ impl Panel { pub fn fixture(&mut self,state:&AppState) {
 impl NotetakerApp {
     pub fn fixture(state: AppState, screen: usize) -> Self {
         let scene=screen;
+        let screen=match screen {97|98=>45,99|100=>3,_=>screen};
         let screen=match screen {95|96=>3,_=>screen};
         let screen=match screen {92=>3,93=>3,94=>10,_=>screen};
         let screen=match screen {89=>3,90=>19,91=>7,_=>screen};
@@ -119,6 +120,10 @@ impl NotetakerApp {
         let screen = if (78..=80).contains(&screen) {0} else {screen};
         let screen = match screen {59=>5,60=>4,61=>11,62=>23,63=>24,64=>4,65=>5,66=>7,67=>3,68=>7,69=>7,70=>5,71=>5,72=>5,_=>screen};
         let mut app = Self::with_state(state);
+        if (97..=100).contains(&scene) {
+            app.state.recording.phase=Phase::Recording;app.state.recording.path=app.state.selected.clone();app.state.recording.started=Some(Instant::now()-Duration::from_secs(123));
+            let now=chrono::Utc::now();let event=notetaker_core::calendar::CalendarEvent {link:notetaker_core::calendar::EventLink {uid:"next-preview".into(),title:"Синтетическая следующая встреча с командой".into(),attendees:Vec::new(),call_url:Some("https://space.ktalk.ru/neutral".into())},start:now+chrono::Duration::seconds(if scene==97 {300}else if scene==100 {-120}else{30}),end:now+chrono::Duration::minutes(30),all_day:false,organizer:None};app.state.calendar_events=vec![event];app.state.update_calendar_reminder(now);
+        }
         if scene==95 || scene==96 {app.state.exit_requested=true;app.state.shutdown.request(Instant::now()-Duration::from_secs(if scene==96 {12}else{0}));app.state.recording.phase=Phase::Finalizing;app.state.recording.progress=Some((2,5));}
         if scene==92 || scene==93 {
             app.state.quickstart.models.set(&app.state.settings.model.clone(),crate::quickstart::Status::Ready);
@@ -321,7 +326,8 @@ impl NotetakerApp {
         app
     }
     pub fn fixture_jump_settled(&self) -> bool { self.state.selected.as_ref().and_then(|path| self.state.documents.get(path)).is_none_or(|document| document.speaker_ui.scroll_to.is_none()) }
-    pub fn pill(ui: &mut egui::Ui) { recording_pill(ui, Duration::from_secs(123), 0.3); }
+    pub fn pill(ui: &mut egui::Ui) { recording_pill(ui, Duration::from_secs(123), 0.3, Phase::Recording, None); }
+    pub fn next_pill(&self, ui: &mut egui::Ui) { ui.set_width(320.0);let next=self.state.next_meeting(chrono::Utc::now());recording_pill(ui,Duration::from_secs(123),0.3,Phase::Recording,next.as_ref()); }
 }
 '''
     if args.source_ref or path.stem in {"ui", "state", "quickstart", "people", "organization", "maintenance", "trackers", "theme", "calendar_ui", "speakers", "settings"}:
@@ -346,6 +352,7 @@ impl eframe::App for Preview {
             ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("fixture-recording-settings-offset"),240.0_f32));
         }
         self.app.ui(ui, frame);
+        if self.screen==99 || self.screen==100 {egui::Window::new("Индикатор записи").show(ui.ctx(),|ui|self.app.next_pill(ui));}
         if self.screen==81 {egui::Window::new("Загрузка").show(ui.ctx(), |ui| {crate::theme::spinner(ui);});}
         if self.screen==82 {egui::Window::new("Подсказка звонка").show(ui.ctx(), |ui| {crate::detection::start_card(ui,"Chrome",None,Some("Дождитесь проверки звука"));});}
         if self.screen==33 {
@@ -467,7 +474,7 @@ if shutil.disk_usage(root).free < 2 * 1024**3:
 # Resolve the derived harness root against the copied workspace lock before its locked build.
 subprocess.run(["cargo", "metadata", "--offline", "--format-version", "1", "--manifest-path", str(harness / "Cargo.toml")], cwd=root, env=env, check=True, stdout=subprocess.DEVNULL)
 subprocess.run(["cargo", "build", "--locked", "--manifest-path", str(harness / "Cargo.toml")], cwd=root, env=env, check=True)
-names = ["welcome", "name", "connections", "home", "note", "transcript", "general", "recording", "calendars", "ai", "search", "storage", "recording-pill", "connections-expanded", "delete-confirm", "meeting-menu", "toast", "empty-library", "narrow-settings", "recording-bar", "chat", "tasks", "people", "person", "series", "digest", "folders", "diagnostics", "tracker-preview", "new-recording", "rename", "regenerate", "capture-warning", "widgets", "update-card", "folder-delete", "merge-people", "folders-advanced", "ai-expanded", "performance-transcript", "performance-meetings", "performance-live", "chat-meeting-empty", "chat-library-empty", "chat-recipes", "chat-recording", "recording-silence", "recording-final-pass", "recording-ready", "recording-not-ready", "summary-skipped", "calendar-reminder-link", "calendar-reminder-no-link", "calendar-upcoming", "calendar-help", "direct-task-checkboxes", "direct-template-bar", "direct-template-picker", "direct-speaker-menu", "compact-transcript", "compact-summary", "compact-storage", "compact-person", "compact-series", "one-step-bar", "one-step-countdown", "one-step-settings", "one-step-auto-title", "ktalk-settings-empty", "ktalk-settings-connected", "ktalk-preview", "ktalk-transcript", "ktalk-success", "calendar-home-events", "calendar-home-empty", "calendar-home-error", "calendar-settings-status", "calendar-settings-error", "mac-sound-no-access", "mac-sound-silent", "mac-sound-ready", "spinner-retina", "hint-disabled", "calendar-recording-blocked", "model-byte-progress", "model-download-stalled", "calendar-partial-success", "welcome-download-progress", "profile-list-hints", "permission-home", "permission-recording", "permission-settings", "recording-ready-speech-only", "optional-speaker-download", "optional-search-failure", "quit-wait", "quit-force"]
+names = ["welcome", "name", "connections", "home", "note", "transcript", "general", "recording", "calendars", "ai", "search", "storage", "recording-pill", "connections-expanded", "delete-confirm", "meeting-menu", "toast", "empty-library", "narrow-settings", "recording-bar", "chat", "tasks", "people", "person", "series", "digest", "folders", "diagnostics", "tracker-preview", "new-recording", "rename", "regenerate", "capture-warning", "widgets", "update-card", "folder-delete", "merge-people", "folders-advanced", "ai-expanded", "performance-transcript", "performance-meetings", "performance-live", "chat-meeting-empty", "chat-library-empty", "chat-recipes", "chat-recording", "recording-silence", "recording-final-pass", "recording-ready", "recording-not-ready", "summary-skipped", "calendar-reminder-link", "calendar-reminder-no-link", "calendar-upcoming", "calendar-help", "direct-task-checkboxes", "direct-template-bar", "direct-template-picker", "direct-speaker-menu", "compact-transcript", "compact-summary", "compact-storage", "compact-person", "compact-series", "one-step-bar", "one-step-countdown", "one-step-settings", "one-step-auto-title", "ktalk-settings-empty", "ktalk-settings-connected", "ktalk-preview", "ktalk-transcript", "ktalk-success", "calendar-home-events", "calendar-home-empty", "calendar-home-error", "calendar-settings-status", "calendar-settings-error", "mac-sound-no-access", "mac-sound-silent", "mac-sound-ready", "spinner-retina", "hint-disabled", "calendar-recording-blocked", "model-byte-progress", "model-download-stalled", "calendar-partial-success", "welcome-download-progress", "profile-list-hints", "permission-home", "permission-recording", "permission-settings", "recording-ready-speech-only", "optional-speaker-download", "optional-search-failure", "quit-wait", "quit-force", "recording-next-meeting", "recording-next-soon", "indicator-next-meeting", "indicator-next-started"]
 def render(spec):
     index, name, theme, width, height, zoom = spec
     actual_width = 760 if name == "narrow-settings" and zoom == 1.0 else width

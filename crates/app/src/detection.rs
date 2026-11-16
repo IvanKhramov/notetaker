@@ -92,8 +92,16 @@ pub enum StopAction {
     None,
     Stop,
     Continue,
+    /// The next-meeting line inside the card was dismissed.
+    DismissNext,
 }
-pub fn stop_card(ui: &mut eframe::egui::Ui, remaining: Duration) -> StopAction {
+/// The card replaces the recording indicator while it counts down, so it
+/// carries the indicator's next-meeting line too.
+pub fn stop_card(
+    ui: &mut eframe::egui::Ui,
+    remaining: Duration,
+    next: Option<&crate::calendar_ui::NextMeeting>,
+) -> StopAction {
     use crate::theme::{self, ButtonStyle};
     let mut action = StopAction::None;
     let frame = eframe::egui::Frame::popup(ui.style());
@@ -109,6 +117,11 @@ pub fn stop_card(ui: &mut eframe::egui::Ui, remaining: Duration) -> StopAction {
             ))
             .font(theme::medium(theme::BODY)),
         );
+        if let Some(next) = next
+            && crate::calendar_ui::next_meeting(ui, next)
+        {
+            action = StopAction::DismissNext;
+        }
         theme::footer(ui, |ui| {
             if theme::button(ui, "Продолжить запись", ButtonStyle::Ghost).clicked()
             {
