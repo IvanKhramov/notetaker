@@ -4,32 +4,16 @@ use anyhow::{Context, Result, ensure};
 use sha2::{Digest, Sha256};
 use std::{fs, io::Read, time::Duration};
 
-const ROOT: &str = "https://huggingface.co/Xenova/multilingual-e5-small/resolve/761b726dd34fb83930e26aab4e9ac3899aa1fa78";
-const FILES: &[(&str, &str, u64, &str)] = &[
-    (
-        "onnx/model_quantized.onnx",
-        "model.onnx",
-        118_308_185,
-        "f80102d3f2a1229f387d3c81909990d8945513e347b0eab049f7de3c6f98c193",
-    ),
-    (
-        "tokenizer.json",
-        "tokenizer.json",
-        17_082_730,
-        "0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39",
-    ),
-];
+use notetaker_core::embedding::{MODEL_FILES as FILES, MODEL_ROOT as ROOT};
 pub fn check() -> Result<()> {
     let dir = notetaker_core::embedding::model_dir()?;
     check_directory(&dir)
 }
 fn check_directory(dir: &std::path::Path) -> Result<()> {
-    for (_, name, size, _) in FILES {
-        ensure!(
-            fs::metadata(dir.join(name)).map(|m| m.len()).unwrap_or(0) == *size,
-            "Модель отсутствует или повреждена: notetaker-embed download"
-        );
-    }
+    ensure!(
+        notetaker_core::embedding::installed_at(dir),
+        "Модель отсутствует или повреждена: notetaker-embed download"
+    );
     Ok(())
 }
 

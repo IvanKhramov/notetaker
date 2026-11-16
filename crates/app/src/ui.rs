@@ -201,6 +201,8 @@ pub struct NotetakerApp {
     toasts: VecDeque<Toast>,
     toast_anchor: Option<egui::Pos2>,
     main_rect: Option<egui::Rect>,
+    main_hidden: bool,
+    main_focused: bool,
     /// Where the recording pill is now, and where the next one opens.
     indicator: IndicatorPosition,
     home: bool,
@@ -272,6 +274,8 @@ impl NotetakerApp {
             toasts: VecDeque::new(),
             toast_anchor: None,
             main_rect: None,
+            main_hidden: false,
+            main_focused: false,
             home: true,
             applied_zoom: None,
             chat_page: false,
@@ -2565,6 +2569,38 @@ impl NotetakerApp {
             self.state.record_dialog_requested = false;
         }
     }
+    fn set_main_visible(&mut self, ctx: &egui::Context, visible: bool) {
+        self.main_hidden = !visible;
+        if !visible {
+            self.main_rect = None;
+        }
+        ctx.send_viewport_cmd_to(
+            egui::ViewportId::ROOT,
+            egui::ViewportCommand::Visible(visible),
+        );
+    }
+    fn update_main_rect(&mut self, viewport: &egui::ViewportInfo) {
+        let focused = viewport.focused.unwrap_or(false);
+        if focused && !self.main_focused {
+            self.main_hidden = false;
+        }
+        self.main_focused = focused;
+        self.main_rect = visible_main_rect(
+            viewport.outer_rect,
+            self.main_hidden,
+            viewport.minimized.unwrap_or(false),
+        );
+    }
+    fn show_main(&mut self, ctx: &egui::Context, focus: bool) {
+        self.set_main_visible(ctx, true);
+        ctx.send_viewport_cmd_to(
+            egui::ViewportId::ROOT,
+            egui::ViewportCommand::Minimized(false),
+        );
+        if focus {
+            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
+        }
+    }
     fn exit(&mut self) {
         self.settings_panel.blur(&mut self.state);
         self.quickstart.blur(&mut self.state);
@@ -2679,14 +2715,7 @@ impl NotetakerApp {
                 self.home = false;
                 self.state.start_event(event);
                 if self.state.recording.phase == Phase::Starting {
-                    ctx.send_viewport_cmd_to(
-                        egui::ViewportId::ROOT,
-                        egui::ViewportCommand::Visible(true),
-                    );
-                    ctx.send_viewport_cmd_to(
-                        egui::ViewportId::ROOT,
-                        egui::ViewportCommand::Minimized(false),
-                    );
+                    self.show_main(ctx, false);
                 }
             }
             crate::calendar_ui::Action::Dismiss => self.state.dismiss_calendar_reminder(),
@@ -2727,10 +2756,10 @@ impl NotetakerApp {
         let ending = matches!(prompt, Some(CallPrompt::Stop { .. }));
         let mut accept = false;
         let mut dismiss = false;
-        let mut builder = egui::ViewportBuilder::default();
-        if let Some(rect) = self.main_rect {
-            builder = builder.with_position(notification_position(rect));
-        }
+        let builder = egui::ViewportBuilder::default();
+        let main = self.main_rect;
+        let hidden = self.main_hidden;
+        let minimized = ctx.input(|input| input.viewport().minimized.unwrap_or(false));
         ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("call-notification"),
             builder
@@ -2764,12 +2793,13 @@ impl NotetakerApp {
                     );
                     accept = response.0;
                     dismiss = response.1;
-                    ui.ctx()
-                        .send_viewport_cmd(egui::ViewportCommand::InnerSize(response.2));
                 }
-                if calendar.is_some() {
+                let size = ui.min_size();
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+                if let Some(position) = notification_position(main, hidden, minimized, size) {
                     ui.ctx()
-                        .send_viewport_cmd(egui::ViewportCommand::InnerSize(ui.min_size()));
+                        .send_viewport_cmd(egui::ViewportCommand::OuterPosition(position));
                 }
                 if ui.input(|input| input.viewport().close_requested()) {
                     dismiss = !ending;
@@ -2848,12 +2878,7 @@ impl NotetakerApp {
             },
         );
         if open {
-            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Visible(true));
-            ctx.send_viewport_cmd_to(
-                egui::ViewportId::ROOT,
-                egui::ViewportCommand::Minimized(false),
-            );
-            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
+            self.show_main(ctx, true);
         }
         if stop {
             self.state.toggle_recording();
@@ -2894,9 +2919,7 @@ impl NotetakerApp {
             for action in desktop.poll() {
                 match action {
                     Action::Show => {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                        self.show_main(ctx, true);
                     }
                     Action::Toggle => self.state.toggle_recording(),
                     Action::Quit => self.exit(),
@@ -2952,13 +2975,7 @@ impl eframe::App for NotetakerApp {
         {
             self.state.save_preferences();
         }
-        ctx.input(|input| {
-            if !input.viewport().minimized.unwrap_or(false)
-                && let Some(rect) = input.viewport().outer_rect
-            {
-                self.main_rect = Some(rect);
-            }
-        });
+        ctx.input(|input| self.update_main_rect(input.viewport()));
         #[cfg(any(windows, target_os = "macos"))]
         self.desktop(ctx);
         if ctx.input(|input| input.viewport().close_requested()) && !self.state.can_exit() {
@@ -2967,7 +2984,7 @@ impl eframe::App for NotetakerApp {
             if self.desktop.is_some() && !self.state.exit_requested {
                 self.settings_panel.blur(&mut self.state);
                 self.quickstart.blur(&mut self.state);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                self.set_main_visible(ctx, false);
             } else {
                 self.exit();
             }
@@ -2975,16 +2992,14 @@ impl eframe::App for NotetakerApp {
             self.exit();
         }
         if self.state.record_dialog_requested {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            self.show_main(ctx, false);
         }
         if self.state.can_exit() {
             #[cfg(not(test))]
             notetaker_runtime::process::terminate_all();
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         } else if self.state.exit_requested {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            self.show_main(ctx, false);
             ctx.request_repaint_after(Duration::from_millis(100));
         }
         if self.state.shutdown.deadline_passed(Instant::now()) {
@@ -3023,12 +3038,7 @@ impl NotetakerApp {
             return;
         }
         if std::mem::take(&mut self.state.permissions.show_requested) {
-            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Visible(true));
-            ctx.send_viewport_cmd_to(
-                egui::ViewportId::ROOT,
-                egui::ViewportCommand::Minimized(false),
-            );
-            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
+            self.show_main(&ctx, true);
         }
         if cfg!(any(target_os = "macos", windows)) {
             self.state.permissions.on_focus(
@@ -3891,10 +3901,29 @@ fn parse_position(text: &str) -> Option<egui::Pos2> {
 fn indicator_visible(phase: Phase, minimized: bool, focused: bool, countdown: bool) -> bool {
     phase == Phase::Recording && (minimized || !focused) && !countdown
 }
-/// egui supplies monitor size but no monitor origin. Keep notifications on the
-/// main window's screen by using its absolute outer rectangle for every card.
-fn notification_position(main: egui::Rect) -> egui::Pos2 {
-    main.right_bottom() - egui::vec2(360.0, 210.0)
+fn visible_main_rect(
+    main: Option<egui::Rect>,
+    hidden: bool,
+    minimized: bool,
+) -> Option<egui::Rect> {
+    main.filter(|rect| {
+        !hidden && !minimized && rect.is_finite() && rect.width() > 0.0 && rect.height() > 0.0
+    })
+}
+// egui 0.37 has no monitor origin; a partly off-screen main window is outside this placement guarantee.
+fn notification_position(
+    main: Option<egui::Rect>,
+    hidden: bool,
+    minimized: bool,
+    size: egui::Vec2,
+) -> Option<egui::Pos2> {
+    let inside = visible_main_rect(main, hidden, minimized)?.shrink(theme::SPACE[3]);
+    (size.is_finite()
+        && size.x > 0.0
+        && size.y > 0.0
+        && inside.width() >= size.x
+        && inside.height() >= size.y)
+        .then(|| inside.right_bottom() - size)
 }
 fn day_label(date: chrono::NaiveDate, today: chrono::NaiveDate) -> String {
     if date == today {
@@ -5536,22 +5565,63 @@ mod tests {
         }
     }
     #[test]
-    fn notification_position_preserves_a_nonzero_or_negative_screen_origin() {
-        let first = egui::Rect::from_min_size(egui::pos2(80.0, 100.0), egui::vec2(1120.0, 760.0));
-        let reference = notification_position(first);
-        for origin in [1920.0, -1920.0] {
-            let main = first.translate(egui::vec2(origin, 0.0));
-            let position = notification_position(main);
-            assert_eq!(position, reference + egui::vec2(origin, 0.0));
-            assert!(main.contains(position));
+    fn notification_position_is_inside_visible_main_and_never_reuses_hidden_geometry() {
+        let size = egui::vec2(340.0, 140.0);
+        for origin in [80.0, 3100.0, -1840.0] {
+            let main =
+                egui::Rect::from_min_size(egui::pos2(origin, 100.0), egui::vec2(1120.0, 760.0));
+            let position = notification_position(Some(main), false, false, size).unwrap();
+            let card = egui::Rect::from_min_size(position, size);
+            assert!(main.shrink(theme::SPACE[3]).contains_rect(card));
+            assert_eq!(
+                position,
+                main.right_bottom() - egui::vec2(theme::SPACE[3], theme::SPACE[3]) - size
+            );
+            assert_eq!(notification_position(Some(main), true, false, size), None);
+            assert_eq!(notification_position(Some(main), false, true, size), None);
         }
-        let mut indicator = IndicatorPosition {
-            spawn: Some(egui::pos2(2200.0, 300.0)),
-            current: None,
+        assert_eq!(notification_position(None, false, false, size), None);
+        assert_eq!(
+            notification_position(Some(egui::Rect::NOTHING), false, false, size),
+            None
+        );
+        let tiny = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(100.0, 100.0));
+        assert_eq!(notification_position(Some(tiny), false, false, size), None);
+        let (state, _commands, _events) = crate::test_ui::state();
+        let mut app = NotetakerApp::with_state(state);
+        let mut viewport = egui::ViewportInfo {
+            outer_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(3100.0, 100.0),
+                egui::vec2(1120.0, 760.0),
+            )),
+            focused: Some(true),
+            ..Default::default()
         };
-        indicator.moved(egui::pos2(2500.0, 400.0));
-        indicator.closed();
-        assert_eq!(indicator.spawn, Some(egui::pos2(2500.0, 400.0)));
+        app.update_main_rect(&viewport);
+        let ctx = egui::Context::default();
+        app.set_main_visible(&ctx, false);
+        assert!(app.main_hidden);
+        assert!(app.main_rect.is_none());
+        app.update_main_rect(&viewport);
+        assert!(
+            app.main_hidden && app.main_rect.is_none(),
+            "stale focus does not undo hide"
+        );
+        viewport.focused = Some(false);
+        app.update_main_rect(&viewport);
+        viewport.focused = Some(true);
+        app.update_main_rect(&viewport);
+        assert!(
+            !app.main_hidden && app.main_rect.is_some(),
+            "native reopen accepts fresh geometry"
+        );
+        viewport.minimized = Some(true);
+        app.update_main_rect(&viewport);
+        assert!(app.main_rect.is_none());
+        app.set_main_visible(&ctx, false);
+        app.show_main(&ctx, true);
+        assert!(!app.main_hidden);
+        assert!(app.main_rect.is_none(), "show waits for a fresh outer rect");
     }
     #[test]
     fn groups_by_local_calendar_day_including_year_boundary() {

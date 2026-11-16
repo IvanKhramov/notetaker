@@ -5,7 +5,7 @@ use notetaker_runtime::process::{Child, Kind};
 use serde::{Deserialize, Serialize};
 use std::{
     io::{BufRead, BufReader, Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{ChildStdin, Command, Stdio},
     sync::mpsc::{self, Receiver},
     time::Duration,
@@ -13,6 +13,21 @@ use std::{
 
 pub const MODEL_ID: &str = "multilingual-e5-small-int8-761b726-mean-v1";
 pub const MODEL_DIRECTORY: &str = "multilingual-e5-small";
+pub const MODEL_ROOT: &str = "https://huggingface.co/Xenova/multilingual-e5-small/resolve/761b726dd34fb83930e26aab4e9ac3899aa1fa78";
+pub const MODEL_FILES: &[(&str, &str, u64, &str)] = &[
+    (
+        "onnx/model_quantized.onnx",
+        "model.onnx",
+        118_308_185,
+        "f80102d3f2a1229f387d3c81909990d8945513e347b0eab049f7de3c6f98c193",
+    ),
+    (
+        "tokenizer.json",
+        "tokenizer.json",
+        17_082_730,
+        "0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39",
+    ),
+];
 #[derive(Serialize, Deserialize)]
 pub struct EmbedRequest {
     pub text: String,
@@ -78,7 +93,14 @@ pub fn worker_path() -> PathBuf {
         .unwrap_or_else(|| name.into())
 }
 pub fn installed() -> bool {
-    model_dir().is_ok_and(|p| p.join("model.onnx").is_file() && p.join("tokenizer.json").is_file())
+    model_dir().is_ok_and(|dir| installed_at(&dir))
+}
+/// The GUI and the worker use the same size check without loading ONNX weights.
+pub fn installed_at(dir: &Path) -> bool {
+    MODEL_FILES.iter().all(|(_, name, size, _)| {
+        std::fs::metadata(dir.join(name))
+            .is_ok_and(|metadata| metadata.is_file() && metadata.len() == *size)
+    })
 }
 pub struct LocalEmbedder {
     child: Child,
@@ -208,5 +230,40 @@ mod shutdown_tests {
             notetaker_runtime::process::spawn(&mut Command::new("/bin/sh"), Kind::Embedding)
                 .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod manifest_tests {
+    use super::*;
+    #[test]
+    fn installed_embedding_model_rejects_truncated_missing_or_non_file_entries() {
+        let root = tempfile::tempdir().unwrap();
+        for (_, name, size, _) in MODEL_FILES {
+            std::fs::File::create(root.path().join(name))
+                .unwrap()
+                .set_len(*size)
+                .unwrap();
+        }
+        assert!(installed_at(root.path()));
+        for (_, name, size, _) in MODEL_FILES {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(root.path().join(name))
+                .unwrap()
+                .set_len(size - 1)
+                .unwrap();
+            assert!(!installed_at(root.path()), "truncated {name}");
+            std::fs::remove_file(root.path().join(name)).unwrap();
+            assert!(!installed_at(root.path()), "missing {name}");
+            std::fs::create_dir(root.path().join(name)).unwrap();
+            assert!(!installed_at(root.path()), "directory {name}");
+            std::fs::remove_dir(root.path().join(name)).unwrap();
+            std::fs::File::create(root.path().join(name))
+                .unwrap()
+                .set_len(*size)
+                .unwrap();
+            assert!(installed_at(root.path()));
+        }
     }
 }

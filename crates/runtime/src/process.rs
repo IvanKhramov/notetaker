@@ -28,61 +28,48 @@ fn registry() -> &'static Mutex<Registry> {
 }
 struct State {
     child: SystemChild,
-    reaped: bool,
 }
 struct Inner {
     state: Mutex<State>,
     kind: Kind,
     id: u64,
     #[cfg(windows)]
-    job: Job,
+    _job: Option<Job>,
+}
+impl State {
+    fn terminate_with(&mut self, signal: impl FnOnce(u32) -> io::Result<()>) -> io::Result<()> {
+        // Keep the child unreaped between the liveness check and the signal.
+        // Even if it exits in this interval, its PID cannot be reused yet.
+        if self.child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        signal(self.child.id())?;
+        self.child.wait()?;
+        Ok(())
+    }
 }
 impl Inner {
     fn kill(&self) -> io::Result<()> {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.reaped {
-            return Ok(());
-        }
-        #[cfg(unix)]
-        {
-            terminate_tree(state.child.id());
-            state.child.kill()?;
-        }
-        #[cfg(windows)]
-        {
-            self.job.terminate()?;
-        }
-        if state.child.try_wait()?.is_some() {
-            state.reaped = true;
-        }
-        Ok(())
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .terminate_with(terminate_tree)
     }
     fn try_wait(&self) -> io::Result<Option<ExitStatus>> {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let status = state.child.try_wait()?;
-        if status.is_some() && !state.reaped {
-            terminate_tree(
-                state.child.id(),
-                #[cfg(windows)]
-                &self.job,
-            );
-            state.reaped = true;
-        }
-        Ok(status)
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .child
+            .try_wait()
     }
 }
 impl Drop for Inner {
     fn drop(&mut self) {
-        let state = self.state.get_mut().unwrap_or_else(|e| e.into_inner());
-        if !state.reaped {
-            terminate_tree(
-                state.child.id(),
-                #[cfg(windows)]
-                &self.job,
-            );
-            let _ = state.child.kill();
-            let _ = state.child.wait();
-        }
+        let _ = self
+            .state
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .terminate_with(terminate_tree);
     }
 }
 /// A cancellation token keeps a weak reference, never a reusable PID.
@@ -176,27 +163,19 @@ pub fn spawn(command: &mut Command, kind: Kind) -> io::Result<Child> {
     }
     let mut child = command.spawn()?;
     #[cfg(windows)]
-    let job = match Job::new(&child) {
-        Ok(job) => job,
-        Err(error) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error);
-        }
-    };
+    // A job is only a crash backstop: a grandchild started before assignment can
+    // escape it; explicit taskkill /T /F covers that process tree on shutdown.
+    let job = Job::new(&child).ok();
     let stdin = child.stdin.take();
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     registry.next += 1;
     let inner = Arc::new(Inner {
-        state: Mutex::new(State {
-            child,
-            reaped: false,
-        }),
+        state: Mutex::new(State { child }),
         kind,
         id: registry.next,
         #[cfg(windows)]
-        job,
+        _job: job,
     });
     registry.children.retain(|child| child.strong_count() > 0);
     registry.children.push(Arc::downgrade(&inner));
@@ -247,20 +226,34 @@ pub fn terminate_kind(kind: Kind) {
 
 // Same process-group termination as CLI sign-in, shared by every worker.
 #[cfg(unix)]
-fn terminate_tree(pid: u32) {
-    // SAFETY: managed children start in their own process group; its id is the child pid.
+fn terminate_tree(pid: u32) -> io::Result<()> {
+    // SAFETY: managed children start in their own process group and are unreaped.
     #[allow(unsafe_code)]
-    unsafe {
-        libc::kill(-(pid as i32), libc::SIGKILL);
+    if unsafe { libc::kill(-(pid as i32), libc::SIGKILL) } != 0 {
+        return Err(io::Error::last_os_error());
     }
+    Ok(())
 }
 #[cfg(windows)]
-fn terminate_tree(_: u32, job: &Job) {
-    let _ = job.terminate();
+fn terminate_tree(pid: u32) -> io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    let status = Command::new("taskkill.exe")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(0x0800_0000)
+        .status()?;
+    if !status.success() {
+        return Err(io::Error::other(format!("taskkill failed: {status}")));
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
-struct Job(std::os::windows::io::OwnedHandle);
+struct Job {
+    _handle: std::os::windows::io::OwnedHandle,
+}
 #[cfg(windows)]
 impl Job {
     // https://learn.microsoft.com/windows/win32/procthread/job-objects
@@ -274,7 +267,9 @@ impl Job {
         // SAFETY: unnamed job, owned handle, initialized limits and a live process handle.
         unsafe {
             let handle = CreateJobObjectW(None, PCWSTR::null()).map_err(io::Error::other)?;
-            let job = Self(std::os::windows::io::OwnedHandle::from_raw_handle(handle.0));
+            let job = Self {
+                _handle: std::os::windows::io::OwnedHandle::from_raw_handle(handle.0),
+            };
             let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
             limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
             SetInformationJobObject(
@@ -289,16 +284,59 @@ impl Job {
             Ok(job)
         }
     }
-    #[allow(unsafe_code)]
-    fn terminate(&self) -> io::Result<()> {
-        use std::os::windows::io::AsRawHandle;
-        // SAFETY: the owned job handle stays live for this call.
-        unsafe {
-            windows::Win32::System::JobObjects::TerminateJobObject(
-                windows::Win32::Foundation::HANDLE(self.0.as_raw_handle()),
-                1,
-            )
-        }
-        .map_err(io::Error::other)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    #[test]
+    fn terminating_an_already_finished_child_never_signals_its_pid() {
+        let mut state = State {
+            child: Command::new("/bin/sh")
+                .args(["-c", "exit 0"])
+                .spawn()
+                .unwrap(),
+        };
+        assert!(state.child.wait().unwrap().success());
+        let mut signals = 0;
+        state
+            .terminate_with(|_| {
+                signals += 1;
+                Ok(())
+            })
+            .unwrap();
+        state
+            .terminate_with(|_| {
+                signals += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(signals, 0);
+    }
+    #[test]
+    fn terminating_a_running_child_signals_once_and_reaps_before_returning() {
+        use std::os::unix::process::CommandExt;
+        let mut state = State {
+            child: Command::new("/bin/sh")
+                .args(["-c", "exec sleep 60"])
+                .process_group(0)
+                .spawn()
+                .unwrap(),
+        };
+        let mut signals = 0;
+        state
+            .terminate_with(|pid| {
+                signals += 1;
+                terminate_tree(pid)
+            })
+            .unwrap();
+        assert!(state.child.try_wait().unwrap().is_some());
+        state
+            .terminate_with(|_| {
+                signals += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(signals, 1);
     }
 }
