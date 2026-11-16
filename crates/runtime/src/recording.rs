@@ -48,7 +48,7 @@ pub fn check_space(path: &Path) -> io::Result<()> {
 
 pub struct SleepGuard {
     #[cfg(target_os = "macos")]
-    child: std::process::Child,
+    child: crate::process::Child,
     // Windows execution state belongs to the thread that acquired it.
     _thread: std::marker::PhantomData<std::rc::Rc<()>>,
 }
@@ -67,12 +67,14 @@ impl SleepGuard {
         }
         Ok(Self {
             #[cfg(target_os = "macos")]
-            child: std::process::Command::new("/usr/bin/caffeinate")
-                .args(["-i", "-w", &std::process::id().to_string()])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()?,
+            child: crate::process::spawn(
+                std::process::Command::new("/usr/bin/caffeinate")
+                    .args(["-i", "-w", &std::process::id().to_string()])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null()),
+                crate::process::Kind::Asr,
+            )?,
             _thread: std::marker::PhantomData,
         })
     }

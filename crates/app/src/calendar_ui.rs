@@ -27,7 +27,7 @@ pub enum Action {
     Start,
     Dismiss,
 }
-pub fn reminder(ui: &mut egui::Ui, event: &CalendarEvent, enabled: bool) -> Action {
+pub fn reminder(ui: &mut egui::Ui, event: &CalendarEvent, reason: Option<&str>) -> Action {
     let mut action = Action::None;
     let frame = egui::Frame::popup(ui.style());
     let p = theme::Palette::of(ui);
@@ -67,18 +67,23 @@ pub fn reminder(ui: &mut egui::Ui, event: &CalendarEvent, enabled: bool) -> Acti
             }
             if ui
                 .add_enabled(
-                    enabled,
+                    reason.is_none(),
                     theme::styled_button(
                         theme::Palette::of(ui),
                         action_label(event),
                         ButtonStyle::Primary,
                     ),
                 )
+                .on_disabled_hover_text(reason.unwrap_or_default())
                 .clicked()
             {
                 action = Action::Start;
             }
         });
+        if let Some(reason) = reason {
+            ui.weak(reason);
+        }
+        crate::permissions::blocked_action(ui, reason);
     });
     action
 }
@@ -141,7 +146,7 @@ mod tests {
         let output = crate::test_ui::frame(&ctx, vec![], &mut |ui| {
             ui.add(theme::text_field(&mut value).id(field))
                 .request_focus();
-            reminder(ui, &event, true);
+            reminder(ui, &event, None);
         });
         crate::test_ui::text_rect(&output.shapes, "Начать запись");
         assert!(ctx.memory(|m| m.has_focus(field)));
@@ -150,7 +155,7 @@ mod tests {
         crate::test_ui::click(
             &ctx,
             &mut |ui| {
-                let action = reminder(ui, &event, true);
+                let action = reminder(ui, &event, None);
                 if action != Action::None {
                     chosen = action;
                 }
@@ -291,6 +296,7 @@ impl HomeRows {
                 })
                 .map(|(i, _)| i),
         );
+        self.rows.sort_by_key(|index| events[*index].start);
         self.key = Some((revision, today));
     }
 }
@@ -316,7 +322,7 @@ pub struct Home<'a> {
     pub error: Option<&'a str>,
     pub loading: bool,
     pub now: DateTime<Utc>,
-    pub can_record: bool,
+    pub reason: Option<&'a str>,
 }
 #[derive(Default)]
 pub enum HomeAction {
@@ -357,21 +363,16 @@ pub fn home(
             .or_else(|| model.reports.iter().find_map(|r| r.error.as_deref()));
         let skipped = model.reports.iter().map(|r| r.skipped.len()).sum::<usize>();
         if let Some(issue) = issue {
-            ui.add(egui::Label::new(egui::RichText::new(issue).color(p.red)).wrap());
-        } else if skipped > 0 {
-            ui.colored_label(
-                p.warning,
-                format!("Пропущено событий: {skipped}. Часть календаря не поддерживается."),
-            );
+            ui.add(egui::Label::new(egui::RichText::new(issue).color(p.warning)).wrap());
         }
-        if (issue.is_some() || skipped > 0)
+        if issue.is_some()
             && theme::button(ui, "Открыть настройки календаря", ButtonStyle::Ghost).clicked()
         {
             action = HomeAction::Settings;
         }
         if model.loading {
             ui.horizontal(|ui| {
-                ui.spinner();
+                crate::theme::spinner(ui);
                 ui.label("Загружаем календарь…");
             });
         } else if count == 0 {
@@ -427,9 +428,10 @@ pub fn home(
                     && event.start <= model.now + chrono::Duration::minutes(5)
                     && ui
                         .add_enabled(
-                            model.can_record,
+                            model.reason.is_none(),
                             theme::styled_button(p, action_label(event), ButtonStyle::Secondary),
                         )
+                        .on_disabled_hover_text(model.reason.unwrap_or_default())
                         .clicked()
                 {
                     action = HomeAction::Start(event.clone());
@@ -449,6 +451,18 @@ pub fn home(
             .clicked()
         {
             *expanded = !*expanded;
+        }
+        if issue.is_none() && skipped > 0 {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("Не показано событий: {skipped} ·"))
+                        .small()
+                        .color(p.muted),
+                );
+                if theme::button(ui, "Подробнее", ButtonStyle::Ghost).clicked() {
+                    action = HomeAction::Settings;
+                }
+            });
         }
     });
     ui.add_space(theme::SPACE[2]);

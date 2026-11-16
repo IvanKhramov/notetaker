@@ -153,6 +153,11 @@ impl AudioSource for LiveSource {
                             capture_system(&enumerator, options, &clock, stop, sender, healthy)
                         }
                     };
+                    // E_ACCESSDENIED: preserve the definite access failure before recovery retries.
+                    // https://learn.microsoft.com/windows/win32/seccrypto/common-hresult-values
+                    if channel == Channel::Mic && matches!(result.as_ref().err().and_then(|error| error.downcast_ref::<wasapi::WasapiError>()), Some(wasapi::WasapiError::Windows(error)) if error.code().0 == 0x80070005u32 as i32) {
+                        send(sender, stop, CaptureMessage::Event(CaptureEvent::PermissionDenied {channel}));
+                    }
                     if stop.load(Ordering::Relaxed) {
                         Ok(())
                     } else {

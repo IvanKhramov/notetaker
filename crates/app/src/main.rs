@@ -19,9 +19,11 @@ mod macos;
 mod maintenance;
 mod organization;
 mod people;
+mod permissions;
 mod quickstart;
 mod recording_options;
 mod settings;
+mod shutdown;
 mod speakers;
 mod state;
 #[cfg(test)]
@@ -111,6 +113,7 @@ fn main() -> eframe::Result {
             Ok(Box::new(ui::NotetakerApp::new()))
         }),
     );
+    notetaker_runtime::process::terminate_all();
     notetaker_runtime::diagnostics::event(if result.is_ok() {
         "app exit"
     } else {

@@ -1,11 +1,6 @@
 //! All config.toml writers share ownership rules and an inter-process lock.
 use anyhow::{Context, Result};
-use std::{
-    fs,
-    io::Write,
-    path::Path,
-    time::{Duration, Instant},
-};
+use std::{fs, io::Write, path::Path, time::Duration};
 
 pub enum Section {
     Ai,
@@ -15,22 +10,8 @@ pub fn save(path: &Path, section: Section, value: toml::Value) -> Result<()> {
     let parent = path.parent().context("Нет каталога конфигурации")?;
     fs::create_dir_all(parent)?;
     let lock_path = path.with_extension("toml.lock");
-    let lock = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)?;
-    let started = Instant::now();
-    loop {
-        match lock.try_lock() {
-            Ok(()) => break,
-            Err(fs::TryLockError::WouldBlock) if started.elapsed() < Duration::from_secs(5) => {
-                std::thread::sleep(Duration::from_millis(25))
-            }
-            Err(error) => anyhow::bail!("Не удалось заблокировать {}: {error}", path.display()),
-        }
-    }
+    let _lock = notetaker_runtime::file_lock::exclusive(&lock_path, Duration::from_secs(5))
+        .with_context(|| format!("Не удалось заблокировать {}", path.display()))?;
     let mut root: toml::Table = match fs::read_to_string(path) {
         Ok(text) => toml::from_str(&text).map_err(|_| {
             anyhow::anyhow!("Некорректный TOML в {}; файл не изменён", path.display())

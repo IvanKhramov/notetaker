@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     thread,
@@ -12,20 +12,89 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use notetaker_core::Mode;
+use notetaker_runtime::process::{Child, Handle, Kind};
 
 use crate::{CompletionRequest, Provider, ProviderConfig, ProviderKind};
 
 #[derive(Clone, Default)]
-pub struct Cancellation(Arc<AtomicBool>);
+pub struct Cancellation(Arc<CancelState>);
+#[derive(Default)]
+struct CancelState {
+    cancelled: AtomicBool,
+    processes: Mutex<Vec<Handle>>,
+}
+/// Keeps a child registered until its owner has reaped it.
+pub struct ProcessLease {
+    cancel: Cancellation,
+    id: u64,
+}
+impl Drop for ProcessLease {
+    fn drop(&mut self) {
+        self.cancel
+            .0
+            .processes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|handle| handle.id() != self.id);
+    }
+}
 impl Cancellation {
     pub fn cancel(&self) {
-        self.0.store(true, Ordering::Relaxed);
+        self.0.cancelled.store(true, Ordering::Relaxed);
+        for handle in self
+            .0
+            .processes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+        {
+            handle.terminate();
+        }
     }
     pub fn is_cancelled(&self) -> bool {
         self.cancelled()
     }
     fn cancelled(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
+        self.0.cancelled.load(Ordering::Relaxed)
+    }
+    /// Spawn and registration share the lock with cancellation: no orphan race.
+    pub fn spawn(&self, command: &mut Command) -> Result<(Child, ProcessLease)> {
+        let mut processes = self.0.processes.lock().unwrap_or_else(|e| e.into_inner());
+        ensure!(!self.cancelled(), "Операция отменена");
+        let child = notetaker_runtime::process::spawn(command, Kind::Background)?;
+        let handle = child.handle();
+        let id = handle.id();
+        processes.push(handle);
+        Ok((
+            child,
+            ProcessLease {
+                cancel: self.clone(),
+                id,
+            },
+        ))
+    }
+    /// Abandon an HTTP read without waiting for its transport timeout. The task
+    /// must only return data; durable writes belong after this cancellation gate.
+    pub fn wait<T: Send + 'static>(
+        &self,
+        work: impl FnOnce() -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        ensure!(!self.cancelled(), "Операция отменена");
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        thread::spawn(move || {
+            let _ = tx.send(work());
+        });
+        loop {
+            ensure!(!self.cancelled(), "Операция отменена");
+            match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(result) => {
+                    ensure!(!self.cancelled(), "Операция отменена");
+                    return result;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
 }
 
@@ -189,13 +258,8 @@ fn run(
         .stdin(File::open(input_path)?)
         .stdout(File::create(&output_path)?)
         .stderr(File::create(&error_path)?);
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
-    let mut child = command
-        .spawn()
+    let (mut child, lease) = cancel
+        .spawn(&mut command)
         .context("Не удалось запустить CLI; проверьте установку")?;
     let started = Instant::now();
     let status = loop {
@@ -214,6 +278,7 @@ fn run(
         }
         thread::sleep(Duration::from_millis(50));
     };
+    drop(lease);
     if !status.success() {
         // The CLI's own words name the cause: no sign-in, a missing
         // prerequisite, an unknown model. The answer goes to stdout when the
@@ -262,21 +327,7 @@ fn failure_tail(output: &str) -> String {
     tail.chars().take(300).collect()
 }
 
-fn terminate(child: &mut std::process::Child) {
-    #[cfg(windows)]
-    {
-        let _ = background(Path::new("taskkill.exe"))
-            .args(["/PID", &child.id().to_string(), "/T", "/F"])
-            .status();
-    }
-    #[cfg(unix)]
-    {
-        // Each request starts a fresh process group, including npm wrapper children.
-        #[allow(unsafe_code)]
-        unsafe {
-            libc::kill(-(child.id() as i32), libc::SIGKILL);
-        }
-    }
+fn terminate(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -464,26 +515,31 @@ fn install_command(kind: ProviderKind) -> Command {
 }
 
 /// Runs an installer without a terminal and returns the end of its output on failure.
-fn run_installer(mut command: Command, timeout: Duration) -> Result<()> {
+fn run_installer(mut command: Command, timeout: Duration, cancel: &Cancellation) -> Result<()> {
     let output = tempfile::tempfile().context("Не удалось создать временный файл")?;
-    let mut child = command
+    command
         .stdin(Stdio::null())
         .stdout(output.try_clone()?)
-        .stderr(output.try_clone()?)
-        .spawn()
+        .stderr(output.try_clone()?);
+    let (mut child, lease) = cancel
+        .spawn(&mut command)
         .context("Не удалось запустить установщик")?;
     let started = Instant::now();
     let status = loop {
+        if cancel.is_cancelled() {
+            terminate(&mut child);
+            anyhow::bail!("Установка отменена");
+        }
         if let Some(status) = child.try_wait()? {
             break status;
         }
         if started.elapsed() > timeout {
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate(&mut child);
             anyhow::bail!("Установка не завершилась за {} мин", timeout.as_secs() / 60);
         }
         thread::sleep(Duration::from_millis(200));
     };
+    drop(lease);
     if status.success() {
         return Ok(());
     }
@@ -504,8 +560,8 @@ fn run_installer(mut command: Command, timeout: Duration) -> Result<()> {
 }
 
 /// Installs the CLI with its vendor's installer and confirms it can be found.
-pub fn install_cli(kind: ProviderKind) -> Result<()> {
-    run_installer(install_command(kind), Duration::from_secs(600))?;
+pub fn install_cli(kind: ProviderKind, cancel: &Cancellation) -> Result<()> {
+    run_installer(install_command(kind), Duration::from_secs(600), cancel)?;
     ensure!(
         find_cli(kind).is_some(),
         "Установка завершилась, но программа не найдена. Перезапустите notetaker и нажмите «Проверить снова»."
@@ -523,17 +579,13 @@ pub fn login(kind: ProviderKind, cancel: &Cancellation) -> Result<()> {
 }
 
 fn wait_login(mut command: Command, timeout: Duration, cancel: &Cancellation) -> Result<()> {
+    ensure!(!cancel.is_cancelled(), "Вход отменён");
     let dir = tempfile::tempdir()?;
     let output_path = dir.path().join("login.txt");
     let output = File::create(&output_path)?;
     command.stdout(output.try_clone()?).stderr(output);
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
-    let mut child = command
-        .spawn()
+    let (mut child, lease) = cancel
+        .spawn(&mut command)
         .context("Не удалось запустить вход; проверьте установку CLI")?;
     let started = Instant::now();
     let status = loop {
@@ -555,6 +607,7 @@ fn wait_login(mut command: Command, timeout: Duration, cancel: &Cancellation) ->
         }
         thread::sleep(Duration::from_millis(100));
     };
+    drop(lease);
     if !status.success() {
         let said = failure_tail(&file_tail(&output_path));
         anyhow::bail!(
@@ -802,16 +855,16 @@ mod login_tests {
         }
         let mut ok = Command::new("/bin/sh");
         ok.args(["-c", "echo done"]);
-        run_installer(ok, Duration::from_secs(10)).unwrap();
+        run_installer(ok, Duration::from_secs(10), &Cancellation::default()).unwrap();
         let mut failing = Command::new("/bin/sh");
         failing.args(["-c", "echo first; echo; echo 'network is down' >&2; exit 3"]);
-        let error = run_installer(failing, Duration::from_secs(10))
+        let error = run_installer(failing, Duration::from_secs(10), &Cancellation::default())
             .unwrap_err()
             .to_string();
         assert!(error.contains("first network is down"), "{error}");
         let mut slow = Command::new("/bin/sh");
         slow.args(["-c", "sleep 30"]);
-        assert!(run_installer(slow, Duration::from_millis(300)).is_err());
+        assert!(run_installer(slow, Duration::from_millis(300), &Cancellation::default()).is_err());
     }
 
     #[test]
@@ -857,5 +910,56 @@ mod login_tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("5 минут"));
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    #[test]
+    fn cancelled_wait_does_not_wait_for_a_stalled_network_task() {
+        let cancel = Cancellation::default();
+        let copy = cancel.clone();
+        let (started, ready) = std::sync::mpsc::channel();
+        let (finish, blocked) = std::sync::mpsc::channel();
+        let task = thread::spawn(move || {
+            copy.wait(move || {
+                started.send(()).unwrap();
+                let _ = blocked.recv();
+                Ok(())
+            })
+        });
+        ready.recv_timeout(Duration::from_secs(3)).unwrap();
+        cancel.cancel();
+        assert!(task.join().unwrap().is_err());
+        let _ = finish.send(());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_kills_descendants_and_prevents_later_spawns() {
+        let root = tempfile::tempdir().unwrap();
+        let marker = root.path().join("late-write");
+        let ready = root.path().join("ready");
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "(sleep 1; printf late > \"$1\") & printf ready > \"$2\"; wait",
+                "sh",
+            ])
+            .arg(&marker)
+            .arg(&ready);
+        let cancel = Cancellation::default();
+        let (mut child, _lease) = cancel.spawn(&mut command).unwrap();
+        let until = Instant::now() + Duration::from_secs(3);
+        while !ready.is_file() {
+            assert!(Instant::now() < until);
+            thread::sleep(Duration::from_millis(10));
+        }
+        cancel.cancel();
+        assert!(!child.wait().unwrap().success());
+        assert!(cancel.spawn(&mut Command::new("/bin/sh")).is_err());
+        thread::sleep(Duration::from_millis(1100));
+        assert!(!marker.exists(), "the descendant survived cancellation");
     }
 }

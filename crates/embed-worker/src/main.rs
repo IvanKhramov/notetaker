@@ -78,6 +78,7 @@ impl Engine {
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
+        Some("download-plan") => return models::download_plan(),
         Some("download") => return models::download(),
         Some("check-model") => return models::check(),
         Some("serve") => {}

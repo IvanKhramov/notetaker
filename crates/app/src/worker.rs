@@ -181,6 +181,7 @@ pub enum Command {
     RememberRecording(notetaker_core::app_config::RecordingOptions),
     SemanticIndex {
         root: PathBuf,
+        cancel: notetaker_llm::Cancellation,
     },
     BookmarkLabel {
         meeting: Meeting,
@@ -219,6 +220,7 @@ pub enum Command {
         subscriptions: Vec<notetaker_llm::calendar::Subscription>,
         timezone: String,
         generation: u64,
+        cancel: notetaker_llm::Cancellation,
     },
     Chat {
         root: PathBuf,
@@ -242,6 +244,7 @@ pub enum Command {
         text: String,
     },
     List {
+        cancel: notetaker_llm::Cancellation,
         root: PathBuf,
         query: String,
         semantic: bool,
@@ -294,7 +297,7 @@ pub enum Command {
         automatic: bool,
     },
     CheckModels,
-    Download(String),
+    Download(String, notetaker_llm::Cancellation),
     Voices {
         root: PathBuf,
         delete: Option<VoiceDelete>,
@@ -426,6 +429,7 @@ pub enum Event {
     },
     Voices(Result<notetaker_core::VoiceLibrary, String>),
     Models(crate::quickstart::Models),
+    ModelStatus(String, crate::quickstart::Status),
     DownloadProgress(String),
     Downloaded(Result<(), String>, crate::quickstart::Models),
     SettingsSaved(Result<(Settings, LlmSettings), String>, bool),
@@ -527,7 +531,7 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                         let _ = events.send(Event::Ktalk(message));
                     }));
                 }
-                Command::SemanticIndex { root } => {
+                Command::SemanticIndex { root, cancel } => {
                     let events = events.clone();
                     thread::spawn(move || {
                         let result = (|| -> Result<_> {
@@ -537,6 +541,7 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                                 &library,
                                 false,
                                 config.as_ref(),
+                                &cancel,
                                 &mut |progress| {
                                     let _ = events.send(Event::SemanticProgress {
                                         root: root.clone(),
@@ -648,6 +653,7 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                     subscriptions,
                     timezone,
                     generation,
+                    cancel,
                 } => {
                     let events = events.clone();
                     thread::spawn(move || {
@@ -656,6 +662,7 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                             &timezone,
                             Utc::now(),
                             &OsCredentialStore,
+                            &cancel,
                         )
                         .map_err(error_text);
                         let _ = events.send(Event::Calendar { generation, result });
@@ -780,6 +787,7 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                     ));
                 }
                 Command::List {
+                    cancel,
                     root,
                     query,
                     semantic,
@@ -787,7 +795,8 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                     request,
                 } => {
                     let templates = templates(&root);
-                    let result = list_mode(&root, &query, semantic, &filter)
+                    let result = cancel
+                        .wait(move || list_mode(&root, &query, semantic, &filter))
                         .map(|(rows, note)| {
                             let _ = events.send(Event::SearchNote { request, note });
                             rows
@@ -1030,12 +1039,16 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                 Command::CheckModels => {
                     let _ = events.send(Event::Models(crate::quickstart::check_models()));
                 }
-                Command::Download(model) => {
+                Command::Download(model, cancel) => {
                     let events = events.clone();
                     thread::spawn(move || {
-                        let result = download(&model, &events).map_err(error_text);
-                        let _ = events
-                            .send(Event::Downloaded(result, crate::quickstart::check_models()));
+                        let result = download(&model, &events, &cancel).map_err(error_text);
+                        let models = if cancel.is_cancelled() {
+                            Default::default()
+                        } else {
+                            crate::quickstart::check_models()
+                        };
+                        let _ = events.send(Event::Downloaded(result, models));
                     });
                 }
                 Command::Settings {
@@ -1601,15 +1614,57 @@ pub fn asr_binary() -> Result<PathBuf> {
     );
     Ok(path)
 }
-fn ensure_embed_worker(events: &Events) -> Result<()> {
-    if background_process(&notetaker_core::embedding::worker_path())
-        .arg("--help")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
-    {
+fn download_output(
+    command: &mut Process,
+    cancel: &notetaker_llm::Cancellation,
+) -> Result<std::process::Output> {
+    use std::io::{Read, Seek};
+    let mut stdout = tempfile::tempfile()?;
+    let mut stderr = tempfile::tempfile()?;
+    command
+        .stdout(stdout.try_clone()?)
+        .stderr(stderr.try_clone()?);
+    let (mut child, lease) = cancel.spawn(command)?;
+    let start = std::time::Instant::now();
+    let status = loop {
+        if cancel.is_cancelled() {
+            let _ = child.wait();
+            anyhow::bail!("Загрузка отменена");
+        }
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            cancel.cancel();
+            let _ = child.wait();
+            anyhow::bail!(
+                "Воркер поиска не ответил за 5 с. Переустановите полный пакет приложения."
+            );
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    drop(lease);
+    stdout.rewind()?;
+    stderr.rewind()?;
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    stdout.take(65536).read_to_end(&mut out)?;
+    stderr.take(65536).read_to_end(&mut err)?;
+    Ok(std::process::Output {
+        status,
+        stdout: out,
+        stderr: err,
+    })
+}
+fn ensure_embed_worker(events: &Events, cancel: &notetaker_llm::Cancellation) -> Result<()> {
+    let binary = notetaker_core::embedding::worker_path();
+    if binary.is_file() {
+        ensure!(
+            download_output(background_process(&binary).arg("--help"), cancel)?
+                .status
+                .success(),
+            "Воркер поиска не запускается. Переустановите полный пакет приложения."
+        );
         return Ok(());
     }
     #[cfg(not(windows))]
@@ -1670,48 +1725,101 @@ fn ensure_embed_worker(events: &Events) -> Result<()> {
     }
 }
 
-fn download(model: &str, events: &Events) -> Result<()> {
+fn download(model: &str, events: &Events, cancel: &notetaker_llm::Cancellation) -> Result<()> {
     let binary = if model == "semantic" {
-        ensure_embed_worker(events)?;
+        ensure_embed_worker(events, cancel)?;
         notetaker_core::embedding::worker_path()
     } else {
         asr_binary()?
     };
     if model == "semantic"
-        && background_process(&binary)
-            .arg("check-model")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
+        && download_output(background_process(&binary).arg("check-model"), cancel)?
+            .status
+            .success()
     {
         return Ok(());
     }
+    let mut plan = background_process(&binary);
+    plan.arg("download-plan");
+    if model != "semantic" {
+        plan.arg(model);
+    }
+    let output = download_output(&mut plan, cancel)?;
+    ensure!(
+        output.status.success(),
+        "Не удалось получить размеры моделей: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let plan = String::from_utf8(output.stdout)?;
+    ensure!(
+        !plan.trim().is_empty()
+            && plan
+                .lines()
+                .all(|line| line.starts_with("NOTETAKER_DOWNLOAD_PLAN ")),
+        "Воркер не поддерживает план загрузки. Обновите полный пакет приложения."
+    );
+    for line in plan.lines() {
+        let _ = events.send(Event::DownloadProgress(line.into()));
+    }
+    let _ = events.send(Event::DownloadProgress(
+        "NOTETAKER_DOWNLOAD_PLAN_END 1".into(),
+    ));
     let mut command = background_process(&binary);
     command.arg("download");
     if model != "semantic" {
         command.arg(model);
     }
-    let mut process = command
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    let (mut process, lease) = cancel.spawn(&mut command)?;
     let stderr = process.stderr.take().context("Нет stderr загрузчика")?;
-    let read_result = (|| -> Result<()> {
+    let (tx, lines) = mpsc::channel();
+    let reader = thread::spawn(move || {
         for line in BufReader::new(stderr).lines() {
-            let line = line?;
-            notetaker_runtime::diagnostics::worker_stderr(&line);
-            let _ = events.send(Event::DownloadProgress(line));
+            if tx.send(line).is_err() {
+                break;
+            }
         }
-        Ok(())
-    })();
+    });
+    let mut last_message = String::new();
+    let read_result = loop {
+        if cancel.is_cancelled() {
+            break Err(anyhow::anyhow!("Загрузка отменена для повтора"));
+        }
+        match lines.recv_timeout(Duration::from_millis(100)) {
+            Ok(Ok(line)) => {
+                if line.starts_with("NOTETAKER_MODEL_INSTALLED ")
+                    && !crate::quickstart::optional(model)
+                {
+                    let _ = events.send(Event::ModelStatus(
+                        model.into(),
+                        crate::quickstart::check_speech(model),
+                    ));
+                }
+                if !line.starts_with("NOTETAKER_DOWNLOAD ") {
+                    notetaker_runtime::diagnostics::worker_stderr(&line);
+                    last_message = line.clone();
+                }
+                let _ = events.send(Event::DownloadProgress(line));
+            }
+            Ok(Err(error)) => break Err(error.into()),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break Ok(()),
+        }
+    };
+    if read_result.is_err() {
+        let _ = process.kill();
+    }
     let status = process.wait()?;
+    drop(lease);
+    drop(lines);
+    let _ = reader.join();
     read_result?;
     ensure!(
         status.success(),
-        "Загрузка завершилась с ошибкой ({status}); подробности выше"
+        "Загрузка завершилась с ошибкой ({status}): {last_message}"
     );
     Ok(())
 }

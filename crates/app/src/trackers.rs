@@ -109,7 +109,7 @@ impl Panel {
             .default_width(680.0)
             .show(ctx, |ui| {
                 if self.receiver.is_some() {
-                    ui.spinner();
+                    crate::theme::spinner(ui);
                 }
                 ui.scope(|ui| {
                     for p in &self.previews {

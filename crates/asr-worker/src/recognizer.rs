@@ -218,9 +218,9 @@ fn transducer_config(
     model: &ModelManifest,
 ) -> Result<OfflineTransducerModelConfig> {
     Ok(OfflineTransducerModelConfig {
-        encoder: Some(native_path(&directory.join(model.files[0]))?),
-        decoder: Some(native_path(&directory.join(model.files[1]))?),
-        joiner: Some(native_path(&directory.join(model.files[2]))?),
+        encoder: Some(native_path(&directory.join(model.files[0].0))?),
+        decoder: Some(native_path(&directory.join(model.files[1].0))?),
+        joiner: Some(native_path(&directory.join(model.files[2].0))?),
     })
 }
 

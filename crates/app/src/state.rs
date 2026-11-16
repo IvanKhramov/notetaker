@@ -78,7 +78,7 @@ impl Recording {
     pub fn level(&self) -> f32 {
         self.levels[0].max(self.levels[1])
     }
-    fn silent_channels(&self) -> [bool; 2] {
+    pub(crate) fn silent_channels(&self) -> [bool; 2] {
         [0, 1].map(|i| {
             self.silent_since[i].is_some_and(|since| {
                 since.elapsed() >= Duration::from_secs(if i == 0 { 20 } else { 120 })
@@ -188,7 +188,9 @@ impl Recording {
                 }
             }
             PipelineEvent::CaptureEvent(
-                CaptureEvent::Error { channel, .. } | CaptureEvent::Stopped { channel },
+                CaptureEvent::Error { channel, .. }
+                | CaptureEvent::Stopped { channel }
+                | CaptureEvent::PermissionDenied { channel },
             ) => {
                 if self.phase == Phase::Recording {
                     let index = if *channel == notetaker_capture::Channel::Mic {
@@ -419,6 +421,7 @@ pub struct AppState {
     pub tab: Tab,
     pub recording: Recording,
     pub call_prompt: Option<CallPrompt>,
+    pub permissions: crate::permissions::Access,
     detector: Monitor,
     pub inventory: Inventory,
     pub inventory_pending: bool,
@@ -447,13 +450,16 @@ pub struct AppState {
     pub exported: VecDeque<PathBuf>,
     pub status: String,
     pub exit_requested: bool,
+    pub shutdown: crate::shutdown::Shutdown,
     tx: Sender<Command>,
     rx: Receiver<Event>,
 }
 impl AppState {
     #[cfg(test)]
     pub(crate) fn test_channels(tx: Sender<Command>, rx: Receiver<Event>) -> Self {
-        Self::with_channels(tx, rx)
+        let mut state = Self::with_channels(tx, rx);
+        state.permissions.query = || [notetaker_capture::Permission::Unknown; 2];
+        state
     }
     pub fn new() -> Self {
         let (tx, rx) = worker::spawn();
@@ -510,7 +516,7 @@ impl AppState {
             pending_ai: Default::default(),
             rows: Vec::new(),
             query: String::new(),
-            semantic_enabled: true,
+            semantic_enabled: false,
             semantic_ready: false,
             semantic_running: false,
             semantic_dirty: false,
@@ -527,6 +533,7 @@ impl AppState {
             tab: Tab::Enhanced,
             recording: Recording::default(),
             call_prompt: None,
+            permissions: Default::default(),
             detector: Monitor::default(),
             inventory: Inventory::default(),
             inventory_pending: false,
@@ -555,6 +562,7 @@ impl AppState {
             exported: VecDeque::new(),
             status: "Открываем библиотеку…".into(),
             exit_requested: false,
+            shutdown: Default::default(),
             tx,
             rx,
         }
@@ -613,6 +621,12 @@ impl AppState {
         }
     }
     pub fn start_semantic_index(&mut self) {
+        if self.exit_requested {
+            return;
+        }
+        if !self.settings.semantic_search && self.llm.embeddings.provider.is_empty() {
+            return;
+        }
         if self.semantic_running {
             self.semantic_dirty = true;
             return;
@@ -623,6 +637,7 @@ impl AppState {
             self.semantic_running = true;
             self.send(Command::SemanticIndex {
                 root: self.settings.library.clone(),
+                cancel: self.shutdown.cancel.clone(),
             });
         }
     }
@@ -642,10 +657,14 @@ impl AppState {
         self.refresh_results();
     }
     pub fn refresh_results(&mut self) {
+        if self.exit_requested {
+            return;
+        }
         self.request += 1;
         self.listing = true;
         self.query_changed = None;
         self.send(Command::List {
+            cancel: self.shutdown.cancel.clone(),
             root: self.settings.library.clone(),
             query: self.query.clone(),
             semantic: self.semantic_enabled && self.semantic_ready,
@@ -803,7 +822,14 @@ impl AppState {
         }
     }
     pub fn can_prepare_recording(&self) -> bool {
+        self.can_prepare_audio(true)
+    }
+    pub fn can_prepare_import(&self) -> bool {
+        self.can_prepare_audio(false)
+    }
+    fn can_prepare_audio(&self, microphone: bool) -> bool {
         self.ready
+            && (!microphone || self.permissions.blocked().is_none())
             && !self.recording.busy()
             && !self.settings_pending
             && !self.exit_requested
@@ -1016,6 +1042,12 @@ impl AppState {
         }
     }
     fn start_recording_with_app(&mut self, call_override: Option<notetaker_detect::DetectedCall>) {
+        self.permissions.refresh();
+        if let Some(reason) = self.permissions.blocked() {
+            self.error = Some(reason.into());
+            self.permissions.show_requested = true;
+            return;
+        }
         if !self.can_prepare_recording() || !self.quickstart.models.speech_ready(&self.record_model)
         {
             return;
@@ -1032,6 +1064,12 @@ impl AppState {
                 .map(|s| s.exe.clone().unwrap_or_else(|| s.name.clone()))
         });
         let settings = self.recording_settings();
+        if self.settings.diarize && !settings.diarize {
+            self.notices.push((
+                crate::theme::ToastLevel::Info,
+                "Запись без разделения собеседников: модель ещё не готова.".into(),
+            ));
+        }
         let event = self.recording_event();
         self.selected_event = None;
         let brief = self.recording_brief(event.as_ref());
@@ -1153,7 +1191,6 @@ impl AppState {
                 .any(|doc| doc.speaker_ui.recalculating)
             || self.recording.busy()
             || self.recording.assist.bookmarks_pending > 0
-            || self.downloading
             || self.quickstart.probe_busy
             || self.settings_pending
             || self.exit_requested
@@ -1310,13 +1347,14 @@ impl AppState {
         }
     }
     pub fn refresh_calendar(&mut self) {
-        if self.calendar_busy {
+        if self.calendar_busy || self.exit_requested {
             return;
         }
         self.calendar_busy = true;
         self.calendar_checked = Some(Instant::now());
         self.calendar_generation += 1;
         self.send(Command::Calendar {
+            cancel: self.shutdown.cancel.clone(),
             subscriptions: self.settings.calendars.clone(),
             timezone: self.settings.calendar_timezone.clone(),
             generation: self.calendar_generation,
@@ -1448,11 +1486,15 @@ impl AppState {
         self.send(Command::Retranscribe { settings, meeting });
     }
     pub fn toggle_recording(&mut self) {
+        self.permissions.refresh();
         if self.recording.busy() {
             self.recording.request_stop();
             if self.selected == self.recording.path {
                 self.tab = Tab::Enhanced;
             }
+        } else if let Some(reason) = self.permissions.blocked() {
+            self.error = Some(reason.into());
+            self.permissions.show_requested = true;
         } else {
             self.start_quick_recording();
         }
@@ -1460,6 +1502,10 @@ impl AppState {
     fn recording_settings(&self) -> Settings {
         let mut settings = self.settings.clone();
         settings.model = self.record_model.clone();
+        if self.quickstart.models.diarization != crate::quickstart::Status::Ready {
+            settings.diarize = false;
+            settings.voice_library = false;
+        }
         settings.mode = self.record_mode;
         settings.folder_mode_override = self.record_mode_edited.then_some(self.record_mode);
         settings.folder = self.folder_filter.clone().filter(|s| !s.is_empty());
@@ -1593,11 +1639,20 @@ impl AppState {
     pub fn generation_cancellable(&self) -> bool {
         self.enhancing.is_some() && self.generation_is_cli
     }
+    pub fn retry_download(&mut self) {
+        if self.downloading {
+            self.quickstart.retry_requested = true;
+            self.quickstart.cancel.cancel();
+        } else {
+            self.quickstart.retry_at = None;
+        }
+    }
     pub fn download(&mut self, model: String) {
         if self.downloading || self.recording.busy() {
             return;
         }
         self.downloading = true;
+        self.quickstart.transfer = Some(crate::quickstart::Transfer::waiting(Instant::now()));
         self.quickstart.download_model = Some(model.clone());
         self.quickstart.download_error = None;
         self.download_messages.clear();
@@ -1609,21 +1664,22 @@ impl AppState {
                 &model
             }
         ));
-        self.send(Command::Download(model));
+        self.quickstart.cancel = Default::default();
+        self.send(Command::Download(model, self.quickstart.cancel.clone()));
     }
     pub fn can_save_settings(&self) -> bool {
-        if self.ktalk.busy {
+        if self.ktalk.busy && !self.exit_requested {
             return false;
         }
         self.ready
             && !self.recording.busy()
             && self.recording.assist.bookmarks_pending == 0
-            && self.enhancing.is_none()
-            && !self.chat.busy
-            && !self.draft_busy
+            && (self.exit_requested
+                || (self.enhancing.is_none() && !self.chat.busy && !self.draft_busy))
             && !self.unsaved()
             && !self.settings_pending
-            && (self.settings.models_path() == self.settings_draft.models_path()
+            && (self.exit_requested
+                || self.settings.models_path() == self.settings_draft.models_path()
                 || (!self.downloading && !self.semantic_running))
     }
     pub fn save_settings(&mut self) {
@@ -1725,12 +1781,24 @@ impl AppState {
         self.send(command);
     }
     pub fn exit(&mut self) {
+        self.exit_at(Instant::now());
+    }
+    pub fn exit_at(&mut self, now: Instant) {
+        self.shutdown.request(now);
+        if self.exit_requested {
+            self.flush();
+            return;
+        }
         self.connections.blur();
         if self.settings_autosave.pending {
             self.settings_autosave
                 .edit(Instant::now(), false, self.settings_autosave.llm);
         }
         self.exit_requested = true;
+        self.shutdown.cancel.cancel();
+        self.quickstart.cancel.cancel();
+        notetaker_core::embedding::shutdown_workers();
+        self.generation_cancel.cancel();
         self.chat.cancel.cancel();
         self.draft_cancel.cancel();
         self.connections.cancel_all();
@@ -1743,20 +1811,16 @@ impl AppState {
         self.poll_settings(Instant::now());
     }
     pub fn can_exit(&self) -> bool {
-        self.pending_ai.is_empty() && !self.ktalk.busy
-            // A cancelled sign-in reports back once its process is gone.
-            && !self.connections.busy()
-            && (!self.settings_autosave.pending || self.settings_autosave.error.is_some())
-            && self.exit_requested
-            && !self.recording.busy()
-            && self.recording.assist.bookmarks_pending == 0
-            && self.enhancing.is_none()
-            && !self.chat.busy
-            && !self.draft_busy
-            && !self.downloading
-            && !self.quickstart.probe_busy
-            && !self.unsaved()
-            && !self.settings_pending
+        self.exit_requested
+            && (self.shutdown.forced()
+                || (self.pending_ai.is_empty()
+                    && !self.ktalk.busy
+                    && !self.connections.busy()
+                    && !self.settings_autosave.pending
+                    && !self.recording.busy()
+                    && self.recording.assist.bookmarks_pending == 0
+                    && !self.unsaved()
+                    && !self.settings_pending))
     }
     pub fn poll(&mut self) {
         // Bound one UI update even if ASR/LLM produced a burst.
@@ -1942,7 +2006,6 @@ impl AppState {
                     }
                     Err(error) => {
                         self.error = Some(error);
-                        self.exit_requested = false;
                     }
                 }
             }
@@ -2140,6 +2203,8 @@ impl AppState {
             } => {
                 self.llm_configured = llm_configured;
                 self.quickstart.models = models;
+                self.semantic_enabled =
+                    settings.semantic_search || !llm.embeddings.provider.is_empty();
                 self.settings = settings.clone();
                 self.settings_draft = settings.clone();
                 self.connections.load(&llm);
@@ -2225,7 +2290,6 @@ impl AppState {
                     if !result.errors.is_empty() {
                         doc.changed_at = Instant::now();
                         self.error = Some(result.errors.join("\n"));
-                        self.exit_requested = false;
                     }
                 }
                 self.start_semantic_index();
@@ -2250,7 +2314,6 @@ impl AppState {
                     }
                     if let Err(error) = result {
                         self.error = Some(error);
-                        self.exit_requested = false;
                     }
                 }
                 self.refresh();
@@ -2281,7 +2344,6 @@ impl AppState {
                         }
                         Err(error) => {
                             self.error = Some(error.clone());
-                            self.exit_requested = false;
                         }
                     }
                 }
@@ -2417,11 +2479,68 @@ impl AppState {
                 self.refresh();
             }
             Event::Pipeline(event) => {
+                if cfg!(any(target_os = "macos", windows)) {
+                    match &event {
+                        PipelineEvent::CaptureEvent(CaptureEvent::PermissionDenied { channel }) => {
+                            let index = if *channel == notetaker_capture::Channel::Mic {
+                                0
+                            } else {
+                                1
+                            };
+                            self.permissions.channels[index] =
+                                notetaker_capture::Permission::Denied;
+                            self.permissions.failed[index] = true;
+                            if index == 0 {
+                                self.permissions.show_requested = true;
+                                self.error = Some(crate::permissions::MICROPHONE_DENIED.into());
+                            }
+                        }
+                        PipelineEvent::CaptureEvent(CaptureEvent::Error { channel, .. }) => {
+                            if cfg!(target_os = "macos")
+                                || *channel == notetaker_capture::Channel::Mic
+                            {
+                                self.permissions.capture_failed(
+                                    if *channel == notetaker_capture::Channel::Mic {
+                                        0
+                                    } else {
+                                        1
+                                    },
+                                );
+                            }
+                        }
+                        PipelineEvent::Levels { mic, system } => {
+                            if *mic > 0.0005 {
+                                self.permissions.audio_received(0);
+                            }
+                            if *system > 0.0005 {
+                                self.permissions.audio_received(1);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 if matches!(&event,PipelineEvent::Levels {system,..} if *system > 0.0005)
                     && matches!(self.call_prompt, Some(CallPrompt::Stop { .. }))
                 {
                     self.call_prompt = None;
                     self.recording.call_end_suppressed = true;
+                }
+                if cfg!(any(target_os = "macos", windows))
+                    && !self.recording.importing
+                    && self.permissions.blocked().is_some()
+                    && matches!(
+                        &event,
+                        PipelineEvent::CaptureEvent(
+                            CaptureEvent::Error {
+                                channel: notetaker_capture::Channel::Mic,
+                                ..
+                            } | CaptureEvent::PermissionDenied {
+                                channel: notetaker_capture::Channel::Mic
+                            }
+                        )
+                    )
+                {
+                    self.recording.request_stop();
                 }
                 let previous = self.recording.phase;
                 self.recording.apply(&event);
@@ -2435,7 +2554,22 @@ impl AppState {
                 if let PipelineEvent::Error(message)
                 | PipelineEvent::CaptureEvent(CaptureEvent::Error { message, .. }) = &event
                 {
-                    self.error = Some(message.clone());
+                    let permission_reason = if matches!(
+                        &event,
+                        PipelineEvent::CaptureEvent(CaptureEvent::Error {
+                            channel: notetaker_capture::Channel::Mic,
+                            ..
+                        })
+                    ) {
+                        self.permissions.blocked()
+                    } else {
+                        None
+                    };
+                    if permission_reason.is_some() {
+                        self.permissions.show_requested = true;
+                    }
+                    self.error =
+                        Some(permission_reason.map_or_else(|| message.clone(), str::to_owned));
                 }
                 if previous != Phase::Finalizing
                     && self.recording.phase == Phase::Finalizing
@@ -2520,7 +2654,6 @@ impl AppState {
                 self.recording.stop = None;
                 if let Some(error) = error {
                     self.error = Some(error);
-                    self.exit_requested = false;
                 }
                 if let Some(reason) = source_issue {
                     self.record_options_pending = None;
@@ -2574,7 +2707,6 @@ impl AppState {
                         }
                         Err(error) => {
                             self.error = Some(error);
-                            self.exit_requested = false;
                         }
                     }
                 }
@@ -2589,23 +2721,55 @@ impl AppState {
                 Ok(voices) => self.voices = voices,
                 Err(error) => self.error = Some(error),
             },
+            Event::ModelStatus(model, status) => {
+                self.quickstart.models.set(&model, status);
+            }
             Event::Models(models) => {
                 self.quickstart.models = models;
             }
             Event::DownloadProgress(message) => {
+                if let Some(transfer) = &mut self.quickstart.transfer {
+                    transfer.update(&message, Instant::now());
+                }
                 if self.download_messages.len() == 8 {
                     self.download_messages.pop_front();
                 }
                 self.download_messages.push_back(message);
             }
             Event::Downloaded(result, models) => {
-                self.quickstart.download_error = result.as_ref().err().cloned();
+                let optional = self
+                    .quickstart
+                    .download_model
+                    .as_deref()
+                    .is_some_and(crate::quickstart::optional);
+                if optional
+                    && !self.quickstart.retry_requested
+                    && let Some(error) = result.as_ref().err()
+                    && let Some(model) = &self.quickstart.download_model
+                {
+                    self.quickstart
+                        .optional_errors
+                        .insert(model.clone(), error.clone());
+                }
+                self.quickstart.download_error = if optional {
+                    None
+                } else {
+                    result.as_ref().err().cloned()
+                };
                 self.quickstart.retry_at = result
                     .as_ref()
                     .err()
                     .map(|_| Instant::now() + Duration::from_secs(60));
                 self.downloading = false;
-                self.quickstart.models = models;
+                if self.quickstart.retry_requested {
+                    self.quickstart.retry_requested = false;
+                    self.quickstart.retry_at = None;
+                    self.quickstart.download_error = None;
+                }
+                // Cancelled workers do not carry a fresh readiness snapshot.
+                if !self.quickstart.cancel.is_cancelled() {
+                    self.quickstart.models = models;
+                }
                 match result {
                     Ok(()) => {
                         self.start_semantic_index();
@@ -2672,6 +2836,8 @@ impl AppState {
                         self.settings_draft.last_recording = settings.last_recording.clone();
                         self.record_model = settings.model.clone();
                         self.record_mode = settings.mode;
+                        self.semantic_enabled =
+                            settings.semantic_search || !llm.embeddings.provider.is_empty();
                         self.settings = settings;
                         self.connections.load(&llm);
                         self.llm = llm;
@@ -2763,6 +2929,116 @@ pub fn edit_segment(transcript: &mut Transcript, id: Uuid, text: String) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn exit_guards_cover_only_durable_work_and_force_overrides_them() {
+        type Block = fn(&mut AppState, &PathBuf);
+        let cases: &[(&str, Block)] = &[
+            ("starting", |s, _| s.recording.phase = Phase::Starting),
+            ("recording", |s, _| s.recording.phase = Phase::Recording),
+            ("final pass", |s, _| s.recording.phase = Phase::Finalizing),
+            ("bookmark", |s, _| s.recording.assist.bookmarks_pending = 1),
+            ("Tolk commit", |s, _| s.ktalk.busy = true),
+            ("settings write", |s, _| s.settings_pending = true),
+            ("settings pending", |s, _| {
+                s.settings_autosave.pending = true
+            }),
+            ("settings error", |s, _| {
+                s.settings_autosave.pending = true;
+                s.settings_autosave.error = Some("invalid".into());
+            }),
+            ("notes", |s, p| {
+                s.documents.get_mut(p).unwrap().dirty.notes = true
+            }),
+            ("transcript", |s, p| {
+                s.documents.get_mut(p).unwrap().dirty.transcript = true
+            }),
+            ("summary", |s, p| {
+                s.documents.get_mut(p).unwrap().dirty.enhanced = true
+            }),
+            ("saving", |s, p| {
+                s.documents.get_mut(p).unwrap().saving = true
+            }),
+            ("speaker edit", |s, p| {
+                s.documents.get_mut(p).unwrap().speaker_ui.busy = true
+            }),
+            ("attachment", |s, p| {
+                s.documents.get_mut(p).unwrap().attachments_pending = 1
+            }),
+            ("AI save queue", |s, _| {
+                s.pending_ai.push_back(crate::ai::Action {
+                    index: 3,
+                    operation: crate::ai::Operation::Save,
+                    provider: Default::default(),
+                    key: String::new(),
+                    cancel: Default::default(),
+                    verified: false,
+                })
+            }),
+        ];
+        for (name, block) in cases {
+            let (mut state, _commands, _root, path) = fixture();
+            assert!(!state.can_exit());
+            state.exit_requested = true;
+            assert!(state.can_exit(), "baseline {name}");
+            block(&mut state, &path);
+            assert!(!state.can_exit(), "{name}");
+            let at = Instant::now();
+            state.shutdown.request(at);
+            assert!(state.shutdown.force(at + Duration::from_secs(10)));
+            assert!(state.can_exit(), "forced {name}");
+        }
+    }
+    #[test]
+    fn abandoned_reads_and_downloads_do_not_gate_exit() {
+        let (mut state, _commands, _root, path) = fixture();
+        state.exit_requested = true;
+        state.downloading = true;
+        state.quickstart.probe_busy = true;
+        state.semantic_running = true;
+        state.calendar_busy = true;
+        state.chat.busy = true;
+        state.draft_busy = true;
+        state.enhancing = Some(path);
+        assert!(state.can_exit());
+    }
+    #[test]
+    fn exit_cancels_calendar_and_search_requests_with_their_shared_token() {
+        let (mut state, commands, _events) = crate::test_ui::state();
+        state.refresh_results();
+        state.refresh_calendar();
+        state.exit();
+        let mut seen = 0;
+        for command in commands.try_iter() {
+            if let Command::List { cancel, .. } | Command::Calendar { cancel, .. } = command {
+                assert!(cancel.is_cancelled());
+                seen += 1;
+            }
+        }
+        assert_eq!(seen, 2);
+        assert!(state.can_exit());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn quit_kills_download_without_waiting_for_its_completion_event_and_keeps_partial() {
+        let (mut state, _commands, _events) = crate::test_ui::state();
+        let root = tempfile::tempdir().unwrap();
+        let part = root.path().join("model.part");
+        std::fs::write(&part, b"partial model").unwrap();
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "sleep 60 & wait"]);
+        let (mut child, _lease) = state.quickstart.cancel.spawn(&mut command).unwrap();
+        state.downloading = true;
+        state.exit();
+        assert!(state.quickstart.cancel.is_cancelled());
+        assert!(state.downloading, "no Downloaded event was needed");
+        assert!(state.can_exit());
+        let until = Instant::now() + Duration::from_secs(3);
+        while child.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(std::fs::read(part).unwrap(), b"partial model");
+    }
     use notetaker_core::{Segment, Source, SpeakerId};
     #[test]
     fn quick_button_and_hotkey_use_saved_options_after_fresh_inventory() {
@@ -3444,7 +3720,7 @@ mod tests {
         state.quickstart.models = Default::default();
         let model = state.settings.model.clone();
         crate::quickstart::auto_download(&mut state);
-        assert!(matches!(commands.try_recv().unwrap(), Command::Download(id) if id == model));
+        assert!(matches!(commands.try_recv().unwrap(), Command::Download(id, _) if id == model));
         crate::quickstart::auto_download(&mut state);
         assert!(commands.try_recv().is_err());
         state.apply(Event::Downloaded(
@@ -3455,7 +3731,7 @@ mod tests {
         assert!(commands.try_recv().is_err());
         state.quickstart.retry_at = Some(Instant::now());
         crate::quickstart::auto_download(&mut state);
-        assert!(matches!(commands.try_recv().unwrap(), Command::Download(id) if id == model));
+        assert!(matches!(commands.try_recv().unwrap(), Command::Download(id, _) if id == model));
         state.downloading = false;
         state.quickstart.models.gigaam = crate::quickstart::Status::Ready;
         state.quickstart.models.parakeet = crate::quickstart::Status::Ready;
@@ -3465,12 +3741,17 @@ mod tests {
         state.recording.phase = Phase::Idle;
         crate::quickstart::auto_download(&mut state);
         assert!(
-            matches!(commands.try_recv().unwrap(), Command::Download(id) if id == "diarization")
+            matches!(commands.try_recv().unwrap(), Command::Download(id, _) if id == "diarization")
         );
         state.downloading = false;
         state.quickstart.models.diarization = crate::quickstart::Status::Ready;
         crate::quickstart::auto_download(&mut state);
-        assert!(matches!(commands.try_recv().unwrap(), Command::Download(id) if id == "semantic"));
+        assert!(commands.try_recv().is_err());
+        state.settings.semantic_search = true;
+        crate::quickstart::auto_download(&mut state);
+        assert!(
+            matches!(commands.try_recv().unwrap(), Command::Download(id, _) if id == "semantic")
+        );
     }
     #[test]
     fn model_folder_change_waits_for_downloads_and_indexing() {
@@ -3702,6 +3983,8 @@ mod tests {
     #[test]
     fn semantic_hit_selects_anchor_and_ready_results_refresh_without_reindex_loop() {
         let (mut state, commands, _root, path) = fixture();
+        state.settings.semantic_search = true;
+        state.semantic_enabled = true;
         state.settings.library = path.parent().unwrap().to_owned();
         let meeting = state.documents[&path].data.meeting.clone();
         state.select_anchor(meeting, Some(notetaker_core::Anchor::Notes { line: 3 }));
@@ -4087,7 +4370,7 @@ mod tests {
                 ..worker::SaveResult::default()
             },
         });
-        assert!(!state.exit_requested);
+        assert!(state.exit_requested);
         assert!(state.documents[&path].dirty.notes);
         assert_eq!(state.documents[&path].data.notes, "latest notes");
         state.exit();
@@ -4960,7 +5243,7 @@ mod calendar_tests {
         crate::test_ui::click(
             &ctx,
             &mut |ui| {
-                if crate::calendar_ui::reminder(ui, &event, true)
+                if crate::calendar_ui::reminder(ui, &event, None)
                     == crate::calendar_ui::Action::Start
                 {
                     state.start_event(event.clone());

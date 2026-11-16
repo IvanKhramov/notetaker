@@ -12,6 +12,7 @@ name = "notetaker-embed"
 path = "src/main.rs"
 
 [dependencies]
+notetaker-runtime = { path = "../runtime" }
 anyhow = "1"
 notetaker-core = { path = "../core" }
 serde = { version = "1", features = ["derive"] }

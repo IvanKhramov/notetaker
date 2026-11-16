@@ -756,7 +756,7 @@ impl Panel {
     fn folder_advanced(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
         if self.receiver.is_some() || self.destinations_rx.is_some() {
-            ui.spinner();
+            crate::theme::spinner(ui);
             return;
         }
         let width = ui.available_width();

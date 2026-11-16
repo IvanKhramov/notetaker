@@ -28,6 +28,22 @@ pub use windows::{LiveSource, inventory, live_sources};
 use serde::Serialize;
 use std::time::Duration;
 
+/// A public authorization query is not available for every channel/platform.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Permission {
+    Granted,
+    Denied,
+    NotAsked,
+    #[default]
+    Unknown,
+}
+#[cfg(target_os = "macos")]
+pub use macos::permissions;
+#[cfg(not(target_os = "macos"))]
+pub fn permissions() -> [Permission; 2] {
+    [Permission::Unknown; 2]
+}
+
 pub const SAMPLE_RATE: u32 = 16_000;
 pub const FRAME_SAMPLES: usize = 320;
 
@@ -48,6 +64,9 @@ pub struct AudioFrame {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CaptureEvent {
+    PermissionDenied {
+        channel: Channel,
+    },
     Recovery {
         channel: Channel,
         restored: bool,
