@@ -7,6 +7,9 @@ use notetaker_capture::Channel;
 /// `start` must dispose of any old worker before starting its replacement.
 /// Results already include `offset_ms`, just like the wire protocol.
 pub trait Asr: Send + 'static {
+    fn live_embedding_config(&self) -> Option<AsrConfig> {
+        None
+    }
     fn start(&mut self) -> Result<()>;
     fn set_timeout(&mut self, _timeout: Duration) {}
     fn take_notice(&mut self) -> Option<String> {
@@ -182,6 +185,9 @@ impl WorkerAsr {
 }
 
 impl Asr for WorkerAsr {
+    fn live_embedding_config(&self) -> Option<AsrConfig> {
+        Some(self.config.clone())
+    }
     fn take_notice(&mut self) -> Option<String> {
         self.notice.take()
     }

@@ -259,6 +259,7 @@ pub enum Command {
         speakers: Option<u32>,
     },
     EditSpeakers {
+        live: bool,
         meeting: Meeting,
         expected: Transcript,
         edit: notetaker_core::SpeakerEdit,
@@ -893,10 +894,27 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                     });
                 }
                 Command::EditSpeakers {
+                    live,
                     meeting,
                     expected,
                     edit,
                 } => {
+                    if live {
+                        let result = notetaker_pipeline::live_speakers::edit(&meeting, edit)
+                            .map(|_| notetaker_core::SpeakerEditResult {
+                                undo: None,
+                                renamed_meetings: Vec::new(),
+                                voice_status: String::new(),
+                            })
+                            .map_err(|e| e.to_string());
+                        let data = DocumentData::read(meeting.clone()).ok().map(Box::new);
+                        let _ = events.send(Event::SpeakersEdited {
+                            path: meeting.path().into(),
+                            result,
+                            data,
+                        });
+                        continue;
+                    }
                     let library = Library::open(meeting.path().parent().expect("meeting parent"));
                     let result = library
                         .as_ref()
@@ -1250,6 +1268,9 @@ struct AppAsr {
     notice: Option<String>,
 }
 impl Asr for AppAsr {
+    fn live_embedding_config(&self) -> Option<AsrConfig> {
+        Some(self.config.clone())
+    }
     fn take_notice(&mut self) -> Option<String> {
         self.notice.take()
     }

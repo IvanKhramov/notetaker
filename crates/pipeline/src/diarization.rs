@@ -171,6 +171,7 @@ pub(crate) fn final_pass(
     mic: Option<&Path>,
     config: &DiarizationConfig,
     events: &Sender<PipelineEvent>,
+    live: Option<(&crate::live_speakers::Clusters, &Transcript)>,
 ) {
     if !config.enabled {
         return;
@@ -180,7 +181,11 @@ pub(crate) fn final_pass(
             "Разделение собеседников: {error:#}"
         )));
     };
-    let mut result = match asr.diarize(system, config.speakers, config.voice_library) {
+    let mut result = match asr.diarize(
+        system,
+        config.speakers,
+        config.voice_library || live.is_some_and(|(clusters, t)| clusters.has_named(t)),
+    ) {
         Ok(result) => result,
         Err(error) => {
             warning(error);
@@ -230,7 +235,35 @@ pub(crate) fn final_pass(
         }
     }
     if let Err(error) = meeting.update_transcript(|transcript| {
+        transcript
+            .speaker_names
+            .retain(|id, _| !id.starts_with("live-"));
+        transcript
+            .voice_recognitions
+            .retain(|id, _| !id.starts_with("live-"));
+        transcript
+            .speaker_suggestions
+            .retain(|id, _| !id.starts_with("live-"));
+        transcript
+            .speaker_voice_ids
+            .retain(|id, _| !id.starts_with("live-"));
+        transcript
+            .voice_rejected
+            .retain(|id| !id.starts_with("live-"));
+        if transcript
+            .self_speaker
+            .as_ref()
+            .is_some_and(|id| id.starts_with("live-"))
+        {
+            transcript.self_speaker = None;
+        }
         assign(transcript, &result);
+        if let Some((clusters, before)) = live {
+            for id in clusters.rejected_matches(before, &result.embeddings) {
+                transcript.voice_rejected.insert(id.clone());
+                transcript.voice_recognitions.remove(&id);
+            }
+        }
         for (id, name) in &suggestions {
             if !transcript.speaker_names.contains_key(id) {
                 transcript
@@ -250,6 +283,29 @@ pub(crate) fn final_pass(
         }
     }) {
         warning(error.into());
+    }
+    if let Some((clusters, before)) = live {
+        let transfer = (|| -> Result<()> {
+            let library = Library::open(meeting.path().parent().context("Нет библиотеки")?)?;
+            for edit in clusters.transfer(before, &result.embeddings) {
+                let expected = meeting.read_transcript()?;
+                let outcome = library.edit_speakers_owned(
+                    meeting,
+                    &expected,
+                    edit,
+                    config.voice_library,
+                    false,
+                    None,
+                )?;
+                if !outcome.voice_status.is_empty() {
+                    let _ = events.send(PipelineEvent::Warning(outcome.voice_status));
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = transfer {
+            warning(error);
+        }
     }
 }
 
@@ -486,6 +542,7 @@ mod tests {
             None,
             &DiarizationConfig::default(),
             &tx,
+            None,
         );
         assert_eq!(meeting.read_transcript().unwrap(), transcript);
         assert!(matches!(rx.try_recv().unwrap(), PipelineEvent::Warning(_)));
@@ -496,6 +553,7 @@ mod tests {
             None,
             &DiarizationConfig::default(),
             &tx,
+            None,
         );
         assert_eq!(
             meeting.read_transcript().unwrap().segments[0].speaker.0,
@@ -549,6 +607,7 @@ mod tests {
                 ..Default::default()
             },
             &tx,
+            None,
         );
         let loaded = meeting.read_transcript().unwrap();
         assert_eq!(loaded.segments[0].speaker.0, "s1");

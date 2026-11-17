@@ -33,6 +33,9 @@ pub enum ClientError {
 #[derive(Clone, Default)]
 pub struct CancellationHandle(Arc<AtomicBool>);
 impl CancellationHandle {
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
     pub fn cancel(&self) {
         self.0.store(true, Ordering::Release);
     }

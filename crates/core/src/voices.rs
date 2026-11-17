@@ -657,6 +657,9 @@ mod storage_tests {
 
 #[derive(Clone, Debug)]
 pub enum SpeakerEdit {
+    ClearName {
+        speaker: String,
+    },
     RejectVoice {
         speaker: String,
     },
@@ -889,6 +892,16 @@ impl Library {
                 }
                 // A manually assembled cluster has no trustworthy acoustic centroid.
                 // Existing voice links are retained, but this action never enrolls it.
+            }
+            SpeakerEdit::ClearName { speaker } => {
+                transcript.speaker_names.remove(&speaker);
+                transcript.voice_recognitions.remove(&speaker);
+                transcript.speaker_suggestions.remove(&speaker);
+                transcript.speaker_voice_ids.remove(&speaker);
+                transcript.voice_rejected.insert(speaker.clone());
+                if transcript.self_speaker.as_ref() == Some(&speaker) {
+                    transcript.self_speaker = None;
+                }
             }
             SpeakerEdit::Rename {
                 speaker,

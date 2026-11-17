@@ -215,7 +215,9 @@ impl Recording {
             }
             // Finished means the pipeline is done; RecordDone follows wait() and
             // the final reload. Keep editing locked until that reload arrives.
-            PipelineEvent::Finished { .. } | PipelineEvent::LiveSegments(_) => {}
+            PipelineEvent::Finished { .. }
+            | PipelineEvent::LiveSegments(_)
+            | PipelineEvent::LiveSpeakers(_) => {}
         }
     }
     pub fn request_stop(&mut self) {
@@ -755,6 +757,39 @@ impl AppState {
         let Some(path) = self.selected.clone() else {
             return;
         };
+        if self.recording.phase == Phase::Recording && self.recording.path.as_ref() == Some(&path) {
+            if let Some(document) = self.documents.get_mut(&path) {
+                if document.speaker_ui.busy {
+                    return;
+                }
+                let mut updated = document.data.transcript.clone();
+                if !notetaker_pipeline::live_speakers::apply_edit(&mut updated, &edit) {
+                    return;
+                }
+                if !self
+                    .recording
+                    .stop
+                    .as_ref()
+                    .is_some_and(|stop| stop.name_live(edit.clone()))
+                {
+                    self.error =
+                        Some("Запись завершается. Назовите говорящего после распознавания.".into());
+                    return;
+                }
+                document.data.transcript = updated;
+                document.changed();
+                document.speaker_ui.invalidate_transcript();
+                document.speaker_ui.busy = true;
+                let command = Command::EditSpeakers {
+                    live: true,
+                    meeting: document.data.meeting.clone(),
+                    expected: document.data.transcript.clone(),
+                    edit,
+                };
+                self.send(command);
+            }
+            return;
+        }
         if self.ktalk.editing(&path) {
             return;
         }
@@ -792,6 +827,7 @@ impl AppState {
             return;
         }
         let command = Command::EditSpeakers {
+            live: false,
             meeting: document.data.meeting.clone(),
             expected: document.data.transcript.clone(),
             edit,
@@ -2611,6 +2647,47 @@ impl AppState {
                         .and_then(|p| self.documents.get_mut(p))
                 {
                     doc.data.meta.capture_issues.push(issue.clone());
+                }
+                if let PipelineEvent::LiveSpeakers(ref live) = event
+                    && let Some(doc) = self
+                        .recording
+                        .path
+                        .as_ref()
+                        .and_then(|path| self.documents.get_mut(path))
+                {
+                    for segment in &live.segments {
+                        if let Some(own) = doc
+                            .data
+                            .transcript
+                            .segments
+                            .iter_mut()
+                            .find(|own| own.id == segment.id)
+                        {
+                            own.speaker = segment.speaker.clone();
+                        }
+                    }
+                    for (id, mark) in &live.voice_recognitions {
+                        if !doc.data.transcript.speaker_names.contains_key(id)
+                            && !doc.data.transcript.voice_rejected.contains(id)
+                        {
+                            doc.data
+                                .transcript
+                                .voice_recognitions
+                                .insert(id.clone(), mark.clone());
+                        }
+                    }
+                    for (id, name) in &live.speaker_suggestions {
+                        if !doc.data.transcript.speaker_names.contains_key(id)
+                            && !doc.data.transcript.voice_rejected.contains(id)
+                        {
+                            doc.data
+                                .transcript
+                                .speaker_suggestions
+                                .insert(id.clone(), name.clone());
+                        }
+                    }
+                    doc.speaker_ui.invalidate_transcript();
+                    doc.changed();
                 }
                 if let PipelineEvent::LiveSegments(segments) = event
                     && let Some(doc) = self

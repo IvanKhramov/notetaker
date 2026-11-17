@@ -79,6 +79,17 @@ impl SpeakerUi {
     }
 }
 
+pub fn display_name(transcript: &Transcript, id: &str) -> String {
+    if transcript.speaker_identity(id).is_some() {
+        transcript.speaker_name(id).into()
+    } else if let Some(number) = id.strip_prefix("live-") {
+        format!("Собеседник {number}")
+    } else if id == "them" {
+        "Собеседник".into()
+    } else {
+        id.into()
+    }
+}
 pub fn voice_note(ui: &mut egui::Ui, transcript: &Transcript, id: &str) {
     if let Some(notetaker_core::SpeakerIdentity {
         source: notetaker_core::SpeakerNameSource::Voice { similarity_milli },
@@ -101,6 +112,10 @@ pub fn rename_menu(
     anchor: (&egui::Response, bool),
 ) -> Option<SpeakerEdit> {
     let (anchor, show_actions) = anchor;
+    let live = transcript
+        .segments
+        .iter()
+        .any(|segment| segment.speaker.0 == id && segment.source == notetaker_core::Source::Live);
     let mut edit = None;
     // Quiet, frameless: a framed 32px button outweighed the speaker name.
     let more = crate::theme::icon_button_visible(
@@ -134,7 +149,7 @@ pub fn rename_menu(
                 .unwrap_or(false);
             let mut name = ui
                 .data_mut(|data| data.get_temp::<String>(name_key))
-                .unwrap_or_else(|| transcript.speaker_name(id).into());
+                .unwrap_or_else(|| display_name(transcript, id));
             let mut everywhere = ui
                 .data_mut(|data| data.get_temp::<bool>(all_key))
                 .unwrap_or(false);
@@ -146,7 +161,7 @@ pub fn rename_menu(
                     input.consume_key(egui::Modifiers::NONE, egui::Key::Space);
                 });
                 renaming = true;
-                name = transcript.speaker_name(id).into();
+                name = display_name(transcript, id);
                 ui.data_mut(|data| data.insert_temp(form_key.with("focus"), true));
             }
             let focus = ui
@@ -175,6 +190,13 @@ pub fn rename_menu(
                     ui.close();
                 }
             }
+            if !renaming
+                && transcript.speaker_names.contains_key(id)
+                && crate::theme::menu_item(ui, "", "Снять имя", false, false).clicked()
+            {
+                edit = Some(SpeakerEdit::ClearName { speaker: id.into() });
+                ui.close();
+            }
             if !renaming {
                 if let Some(voice) = transcript
                     .speaker_identity(id)
@@ -192,18 +214,20 @@ pub fn rename_menu(
                     );
                     ui.close();
                 }
-                if voices.is_some_and(|voices| {
-                    transcript
-                        .speaker_identity(id)
-                        .and_then(|identity| identity.voice_id)
-                        .or_else(|| transcript.speaker_voice_ids.get(id).map(String::as_str))
-                        .is_some_and(|linked| {
-                            voices
-                                .voices
-                                .iter()
-                                .any(|voice| voice.id.as_deref() == Some(linked))
-                        })
-                }) {
+                if !live
+                    && voices.is_some_and(|voices| {
+                        transcript
+                            .speaker_identity(id)
+                            .and_then(|identity| identity.voice_id)
+                            .or_else(|| transcript.speaker_voice_ids.get(id).map(String::as_str))
+                            .is_some_and(|linked| {
+                                voices
+                                    .voices
+                                    .iter()
+                                    .any(|voice| voice.id.as_deref() == Some(linked))
+                            })
+                    })
+                {
                     ui.add_enabled(
                         global_allowed,
                         crate::theme::Checkbox::new(
@@ -222,7 +246,8 @@ pub fn rename_menu(
             if !global_allowed {
                 everywhere = false;
             }
-            if transcript.voice_rejected.contains(id)
+            if !live
+                && transcript.voice_rejected.contains(id)
                 && let Some(bank) = voices
             {
                 crate::theme::disclosure("Выбрать голос").show(ui, |ui| {
@@ -305,7 +330,7 @@ pub fn rename_menu(
                 });
                 if cancel {
                     renaming = false;
-                    name = transcript.speaker_name(id).into();
+                    name = display_name(transcript, id);
                     ui.close();
                 } else if (enter || apply) && !name.trim().is_empty() {
                     renaming = false;
@@ -370,7 +395,10 @@ fn remote_count(transcript: &Transcript) -> usize {
     transcript
         .segments
         .iter()
-        .filter(|s| s.channel == notetaker_core::Channel::System)
+        .filter(|s| {
+            s.channel == notetaker_core::Channel::System
+                && !(s.source == notetaker_core::Source::Live && s.speaker.0 == "them")
+        })
         .map(|s| &s.speaker.0)
         .collect::<BTreeSet<_>>()
         .len()
@@ -683,6 +711,51 @@ mod tests {
 #[cfg(test)]
 mod direct_rename_tests {
     use super::*;
+    #[test]
+    fn live_name_menu_opens_the_existing_focused_form() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut transcript = Transcript::default();
+        for id in ["live-1", "live-2", "them"] {
+            transcript.segments.push(notetaker_core::Segment {
+                id: Uuid::now_v7(),
+                speaker: notetaker_core::SpeakerId(id.into()),
+                channel: notetaker_core::Channel::System,
+                start_ms: 0,
+                end_ms: 3000,
+                text: "Синтетическая реплика".into(),
+                source: notetaker_core::Source::Live,
+                edited: false,
+                lang: None,
+            });
+        }
+        assert_eq!(remote_count(&transcript), 2);
+        assert_eq!(display_name(&transcript, "them"), "Собеседник");
+        assert_eq!(display_name(&transcript, "live-1"), "Собеседник 1");
+        let meta = MeetingMeta::new("Синтетическая встреча", chrono::Utc::now());
+        let bank = notetaker_core::VoiceLibrary::default();
+        let mut draw = |ui: &mut egui::Ui| {
+            let anchor = ui.add(
+                egui::Label::new(display_name(&transcript, "live-1")).sense(egui::Sense::click()),
+            );
+            rename_menu(
+                ui,
+                &transcript,
+                &meta,
+                "live-1",
+                Some(&bank),
+                false,
+                (&anchor, false),
+            );
+        };
+        crate::test_ui::click(&ctx, &mut draw, "Собеседник 1");
+        let output = crate::test_ui::frame(&ctx, vec![], &mut draw);
+        crate::test_ui::text_rect(&output.shapes, "Это я");
+        output.drop_without_applying_deltas();
+        crate::test_ui::click(&ctx, &mut draw, "Переименовать");
+        let focus = ctx.memory(|m| m.focused()).expect("live rename focused");
+        assert!(egui::TextEdit::load_state(&ctx, focus).is_some());
+    }
     #[test]
     fn voice_menu_shows_source_and_emits_confirmation_and_rejection() {
         for label in ["Верно", "Это не он"] {

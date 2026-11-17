@@ -86,6 +86,7 @@ pub(crate) fn run(
             wav_of(Channel::Mic),
             &config.diarization,
             events,
+            None,
         );
     }
     let mut meta = meeting.read_meta()?;
