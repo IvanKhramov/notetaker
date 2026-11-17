@@ -827,6 +827,82 @@ pub(crate) mod tests {
             }
         }
     }
+    struct SplitAsr;
+    impl crate::Asr for SplitAsr {
+        fn start(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn transcribe(
+            &mut self,
+            _: notetaker_asr_proto::AudioInput,
+            _: notetaker_capture::Channel,
+            _: u64,
+        ) -> Result<Vec<notetaker_asr_proto::Segment>> {
+            Ok(Vec::new())
+        }
+        fn diarize(
+            &mut self,
+            _: &std::path::Path,
+            _: Option<u32>,
+            _: bool,
+        ) -> Result<notetaker_asr_proto::Diarization> {
+            let turn = |start_ms, end_ms, speaker: &str| notetaker_asr_proto::SpeakerTurn {
+                start_ms,
+                end_ms,
+                speaker: speaker.into(),
+            };
+            Ok(notetaker_asr_proto::Diarization {
+                turns: vec![turn(0, 1000, "system-0"), turn(1000, 10000, "system-1")],
+                embeddings: BTreeMap::from([
+                    ("system-0".into(), vec![1.0, 0.0]),
+                    ("system-1".into(), vec![0.0, 1.0]),
+                ]),
+            })
+        }
+    }
+    #[test]
+    fn final_cluster_without_segments_does_not_block_other_name_transfers() {
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open(root.path()).unwrap();
+        let meeting = library
+            .create_meeting(MeetingMeta::new(
+                "Синтетическая встреча",
+                chrono::Utc::now(),
+            ))
+            .unwrap();
+        let mut clusters = Clusters::default();
+        clusters.assign(0, 3000, Some(vec![1.0, 0.0]));
+        clusters.assign(4000, 7000, Some(vec![0.0, 1.0]));
+        let mut before = Transcript {
+            segments: vec![segment("live-2", 0, 10000)],
+            ..Default::default()
+        };
+        before
+            .speaker_names
+            .insert("live-1".into(), "Участник А".into());
+        before
+            .speaker_names
+            .insert("live-2".into(), "Участник Б".into());
+        meeting.write_transcript(&before).unwrap();
+        let (events, _) = mpsc::channel();
+        crate::diarization::final_pass(
+            &meeting,
+            &mut SplitAsr,
+            std::path::Path::new("unused"),
+            None,
+            &crate::DiarizationConfig::default(),
+            &events,
+            Some((&clusters, &before)),
+        );
+        let result = meeting.read_transcript().unwrap();
+        assert_eq!(result.speaker_name("system-1"), "Участник Б");
+        assert!(
+            result
+                .speaker_names
+                .keys()
+                .all(|id| !id.starts_with("live-"))
+        );
+    }
     #[cfg(unix)]
     #[test]
     fn stopping_during_embedding_kills_worker_and_removes_the_closed_wav() {

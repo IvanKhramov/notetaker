@@ -271,16 +271,26 @@ pub(crate) fn final_pass(
             let library = Library::open(meeting.path().parent().context("Нет библиотеки")?)?;
             for edit in clusters.transfer(before, &result.embeddings) {
                 let expected = meeting.read_transcript()?;
-                let outcome = library.edit_speakers_owned(
+                // A final cluster may own no segment; it must not block the others.
+                let notetaker_core::SpeakerEdit::Rename { speaker, .. } = &edit else {
+                    continue;
+                };
+                if !expected.segments.iter().any(|s| &s.speaker.0 == speaker) {
+                    continue;
+                }
+                match library.edit_speakers_owned(
                     meeting,
                     &expected,
                     edit,
                     config.voice_library,
                     false,
                     None,
-                )?;
-                if !outcome.voice_status.is_empty() {
-                    let _ = events.send(PipelineEvent::Warning(outcome.voice_status));
+                ) {
+                    Ok(outcome) if !outcome.voice_status.is_empty() => {
+                        let _ = events.send(PipelineEvent::Warning(outcome.voice_status));
+                    }
+                    Ok(_) => {}
+                    Err(error) => warning(error.into()),
                 }
             }
             Ok(())
