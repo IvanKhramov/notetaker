@@ -1983,8 +1983,8 @@ impl NotetakerApp {
                     .settings
                     .voice_library
                     .then_some(&self.state.voices),
-                editable,
-                global_allowed,
+                editable || locked && self.state.recording.phase == Phase::Recording,
+                global_allowed && !locked,
             )
             .or(speaker_edit);
             self.meeting_layout.scroll_y = self.transcript_cache.scroll_y;
@@ -4698,13 +4698,18 @@ fn transcript_view(
                                 ui.spacing_mut().item_spacing.y = 0.0;
                             }
                             ui.horizontal(|ui| {
-                                let name =
-                                    document.data.transcript.speaker_name(&segment.speaker.0);
                                 let name_response = ui.add(
                                     egui::Label::new(
-                                        RichText::new(if me { "Я" } else { name })
-                                            .font(theme::medium(13.0))
-                                            .color(p.text),
+                                        RichText::new(if me {
+                                            "Я".to_owned()
+                                        } else {
+                                            crate::speakers::display_name(
+                                                &document.data.transcript,
+                                                &segment.speaker.0,
+                                            )
+                                        })
+                                        .font(theme::medium(13.0))
+                                        .color(p.text),
                                     )
                                     .sense(egui::Sense::click()),
                                 );
@@ -4731,7 +4736,7 @@ fn transcript_view(
                                 {
                                     selected = Some(index);
                                 }
-                                if !live && editable {
+                                if editable && (!live || segment.speaker.0.starts_with("live-")) {
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {

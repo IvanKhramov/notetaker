@@ -56,6 +56,7 @@ impl Default for RecordingConfig {
 #[derive(Debug, Clone)]
 pub enum PipelineEvent {
     LiveSegments(Vec<Segment>),
+    LiveSpeakers(notetaker_core::Transcript),
     Lag {
         seconds: f64,
     },
@@ -80,15 +81,31 @@ pub enum PipelineEvent {
     },
 }
 
-#[derive(Clone)]
-pub struct StopHandle(Arc<AtomicBool>);
+#[derive(Clone, Default)]
+pub struct StopHandle(
+    Arc<AtomicBool>,
+    notetaker_asr_proto::CancellationHandle,
+    crate::live_speakers::Edits,
+);
 impl StopHandle {
     /// Non-blocking; wait for Finished (or call RecordingSession::wait) to join.
     pub(crate) fn is_stopped(&self) -> bool {
         self.0.load(Ordering::Acquire)
     }
+    pub fn name_live(&self, edit: notetaker_core::SpeakerEdit) -> bool {
+        let Some(_) = crate::live_speakers::edit_id(&edit) else {
+            return false;
+        };
+        let mut edits = self.2.lock().unwrap_or_else(|e| e.into_inner());
+        if self.is_stopped() {
+            return false;
+        }
+        edits.push(edit);
+        true
+    }
     pub fn stop(&self) {
         self.0.store(true, Ordering::Release);
+        self.1.cancel();
     }
 }
 
@@ -137,7 +154,11 @@ impl RecordingSession {
         }
         let meeting = library.create_meeting(meta)?;
         let (events_tx, events) = mpsc::channel();
-        let stop = StopHandle(Arc::new(AtomicBool::new(false)));
+        let stop = StopHandle(
+            Arc::new(AtomicBool::new(false)),
+            Default::default(),
+            Default::default(),
+        );
         let worker_stop = stop.clone();
         let worker_meeting = meeting.clone();
         let handle = thread::Builder::new()
@@ -151,10 +172,7 @@ impl RecordingSession {
                     worker_stop,
                     &events_tx,
                 );
-                if let Err(error) = &result {
-                    let _ = events_tx.send(PipelineEvent::Error(format!("{error:#}")));
-                }
-                result
+                finish(&worker_meeting, &events_tx, result)
             })?;
         Ok(Self {
             meeting,
@@ -171,7 +189,11 @@ impl RecordingSession {
         config: RecordingConfig,
     ) -> Result<Self> {
         let (events_tx, events) = mpsc::channel();
-        let stop = StopHandle(Arc::new(AtomicBool::new(false)));
+        let stop = StopHandle(
+            Arc::new(AtomicBool::new(false)),
+            Default::default(),
+            Default::default(),
+        );
         let worker_stop = stop.clone();
         let worker_meeting = meeting.clone();
         let handle = thread::Builder::new()
@@ -179,10 +201,7 @@ impl RecordingSession {
             .spawn(move || {
                 let result =
                     crate::recover::run(&worker_meeting, asr, config, worker_stop, &events_tx);
-                if let Err(error) = &result {
-                    let _ = events_tx.send(PipelineEvent::Error(format!("{error:#}")));
-                }
-                result
+                finish(&worker_meeting, &events_tx, result)
             })?;
         Ok(Self {
             meeting,
@@ -225,7 +244,11 @@ impl RecordingSession {
         if let Err(error) = library.sweep_audio(Utc::now()) {
             let _ = events_tx.send(PipelineEvent::Error(format!("audio retention: {error:#}")));
         }
-        let stop = StopHandle(Arc::new(AtomicBool::new(false)));
+        let stop = StopHandle(
+            Arc::new(AtomicBool::new(false)),
+            Default::default(),
+            Default::default(),
+        );
         let worker_stop = stop.clone();
         let worker_meeting = meeting.clone();
         let handle = thread::Builder::new()
@@ -239,10 +262,7 @@ impl RecordingSession {
                     worker_stop,
                     &events_tx,
                 );
-                if let Err(error) = &result {
-                    let _ = events_tx.send(PipelineEvent::Error(format!("{error:#}")));
-                }
-                result
+                finish(&worker_meeting, &events_tx, result)
             })?;
         Ok(Self {
             meeting,
@@ -371,9 +391,21 @@ fn record(
     let asr_queue = Arc::clone(&queue);
     let asr_meeting = meeting.clone();
     let diarization = config.diarization.clone();
+    let live_cancel = stop.1.clone();
+    let live_edits = stop.2.clone();
     let asr_handle = thread::Builder::new()
         .name("session-asr".into())
-        .spawn(move || run_asr(asr, &asr_meeting, jobs_rx, &asr_queue, &diarization))?;
+        .spawn(move || {
+            run_asr(
+                asr,
+                &asr_meeting,
+                jobs_rx,
+                &asr_queue,
+                &diarization,
+                live_cancel,
+                live_edits,
+            )
+        })?;
     // Always join ASR, including disk/capture errors. Dropping jobs_tx cancels the
     // consumer rather than leaving a detached worker holding the model in RAM.
     let mut pending_metadata = None;
@@ -488,6 +520,7 @@ fn record(
                 let _ = events.send(PipelineEvent::AutoStopped);
             }
         }
+        stop.1.cancel();
         sources.stop(events);
         let ended = Utc::now();
         let end = tracks
@@ -532,6 +565,7 @@ fn record(
         }
         failure.map_or(Ok(()), Err)
     })();
+    stop.1.cancel();
     drop(jobs_tx);
     let recognized = asr_handle
         .join()
@@ -550,10 +584,25 @@ fn record(
         fs::remove_file(meeting.mic_audio_path())?;
         fs::remove_file(meeting.system_audio_path())?;
     }
-    let _ = events.send(PipelineEvent::Finished {
-        meeting: meeting.clone(),
-    });
     Ok(())
+}
+
+fn finish(meeting: &Meeting, events: &Sender<PipelineEvent>, result: Result<()>) -> Result<()> {
+    let cleanup = meeting
+        .update_transcript(crate::live_speakers::clear_identities)
+        .map_err(Into::into);
+    let result = result.and(cleanup);
+    match &result {
+        Ok(()) => {
+            let _ = events.send(PipelineEvent::Finished {
+                meeting: meeting.clone(),
+            });
+        }
+        Err(error) => {
+            let _ = events.send(PipelineEvent::Error(format!("{error:#}")));
+        }
+    }
+    result
 }
 
 /// A single timer since sound on either channel is equivalent to requiring both
@@ -782,7 +831,24 @@ fn run_asr(
     jobs: Receiver<Job>,
     queue: &Queue,
     diarization: &crate::DiarizationConfig,
+    live_cancel: notetaker_asr_proto::CancellationHandle,
+    live_edits: crate::live_speakers::Edits,
 ) -> Result<()> {
+    let mut speakers = if diarization.enabled {
+        asr.live_embedding_config().and_then(|config| {
+            crate::live_speakers::Worker::start(
+                config,
+                meeting.clone(),
+                diarization.clone(),
+                queue.events.clone(),
+                live_cancel,
+                live_edits.clone(),
+            )
+            .ok()
+        })
+    } else {
+        None
+    };
     let mut asr = Recognizer {
         asr,
         ready: false,
@@ -817,8 +883,21 @@ fn run_asr(
                             });
                             match saved {
                                 Ok(()) => {
-                                    let _ =
-                                        queue.events.send(PipelineEvent::LiveSegments(segments));
+                                    let _ = queue
+                                        .events
+                                        .send(PipelineEvent::LiveSegments(segments.clone()));
+                                    if chunk.channel == Channel::System
+                                        && let Some(speakers) = &speakers
+                                    {
+                                        let samples = Arc::new(chunk.samples);
+                                        for segment in &segments {
+                                            speakers.enqueue(
+                                                segment,
+                                                chunk.start * 1000 / u64::from(SAMPLE_RATE),
+                                                samples.clone(),
+                                            );
+                                        }
+                                    }
                                 }
                                 Err(error) => {
                                     let _ = queue.events.send(PipelineEvent::Warning(format!(
@@ -837,6 +916,12 @@ fn run_asr(
                 });
             }
             Job::Final(wavs) => {
+                let live_clusters = speakers
+                    .as_mut()
+                    .map(crate::live_speakers::Worker::finish)
+                    .unwrap_or_default();
+                let mut live_names = meeting.read_transcript()?;
+                crate::live_speakers::apply_pending(&mut live_names, &live_edits);
                 let mut final_segments = Vec::new();
                 let _ = queue.events.send(PipelineEvent::FinalPassProgress {
                     completed: 0,
@@ -871,6 +956,7 @@ fn run_asr(
                     Some(&wavs[0]),
                     diarization,
                     &queue.events,
+                    Some((&live_clusters, &live_names)),
                 );
             }
         }
@@ -951,6 +1037,64 @@ pub(crate) fn replace_final(existing: Vec<Segment>, final_segments: Vec<Segment>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finished_and_failed_operations_clean_identities_before_publishing() {
+        use crate::live_speakers::tests::{assert_no_live_identities, named_live_transcript};
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open(root.path()).unwrap();
+        let meeting = library
+            .create_meeting(MeetingMeta::new("Синтетическая встреча", Utc::now()))
+            .unwrap();
+        for success in [false, true] {
+            meeting.write_transcript(&named_live_transcript()).unwrap();
+            let (events, received) = mpsc::channel();
+            let result = if success {
+                Ok(())
+            } else {
+                Err(anyhow!("Распознавание отменено"))
+            };
+            assert_eq!(finish(&meeting, &events, result).is_ok(), success);
+            let event = received.try_recv().unwrap();
+            assert!(matches!(event, PipelineEvent::Finished { .. }) == success);
+            if !success {
+                assert!(matches!(event, PipelineEvent::Error(_)));
+            }
+            assert_no_live_identities(&meeting.read_transcript().unwrap());
+        }
+    }
+    #[test]
+    fn recovery_failure_before_diarization_cleans_old_live_identities() {
+        use crate::live_speakers::tests::{assert_no_live_identities, named_live_transcript};
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open(root.path()).unwrap();
+        let meeting = library
+            .create_meeting(MeetingMeta::new("Синтетическая встреча", Utc::now()))
+            .unwrap();
+        meeting.write_transcript(&named_live_transcript()).unwrap();
+        struct Unused;
+        impl Asr for Unused {
+            fn start(&mut self) -> Result<()> {
+                unreachable!()
+            }
+            fn transcribe(
+                &mut self,
+                _: AudioInput,
+                _: Channel,
+                _: u64,
+            ) -> Result<Vec<notetaker_asr_proto::Segment>> {
+                unreachable!()
+            }
+        }
+        let session = RecordingSession::retranscribe_with_asr(
+            meeting.clone(),
+            Unused,
+            RecordingConfig::default(),
+        )
+        .unwrap();
+        assert!(session.wait().is_err());
+        assert_no_live_identities(&meeting.read_transcript().unwrap());
+    }
 
     #[test]
     fn silence_timer_resets_for_either_channel_and_can_be_disabled() {

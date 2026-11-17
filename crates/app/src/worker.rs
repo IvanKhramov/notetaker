@@ -259,6 +259,7 @@ pub enum Command {
         speakers: Option<u32>,
     },
     EditSpeakers {
+        live: bool,
         meeting: Meeting,
         expected: Transcript,
         edit: notetaker_core::SpeakerEdit,
@@ -400,6 +401,10 @@ pub enum Event {
         path: PathBuf,
         result: Result<notetaker_core::SpeakerEditResult, String>,
         data: Option<Box<DocumentData>>,
+    },
+    LiveTranscript {
+        path: PathBuf,
+        transcript: Transcript,
     },
     Inventory(Result<Inventory, String>),
     Started {
@@ -893,10 +898,17 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                     });
                 }
                 Command::EditSpeakers {
+                    live,
                     meeting,
                     expected,
                     edit,
                 } => {
+                    if live {
+                        edit_live_speakers(&meeting, edit, |event| {
+                            let _ = events.send(event);
+                        });
+                        continue;
+                    }
                     let library = Library::open(meeting.path().parent().expect("meeting parent"));
                     let result = library
                         .as_ref()
@@ -1122,6 +1134,31 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
     (commands, messages)
 }
 
+pub(crate) fn edit_live_speakers(
+    meeting: &Meeting,
+    edit: notetaker_core::SpeakerEdit,
+    mut send: impl FnMut(Event),
+) {
+    let result = notetaker_pipeline::live_speakers::edit(meeting, edit)
+        .map(|updated| {
+            send(Event::LiveTranscript {
+                path: meeting.path().into(),
+                transcript: updated.value,
+            });
+            notetaker_core::SpeakerEditResult {
+                undo: None,
+                renamed_meetings: Vec::new(),
+                voice_status: String::new(),
+            }
+        })
+        .map_err(|e| e.to_string());
+    send(Event::SpeakersEdited {
+        path: meeting.path().into(),
+        result,
+        data: None,
+    });
+}
+
 pub fn summary_can_overwrite(data: &DocumentData) -> bool {
     data.meta
         .summary
@@ -1250,6 +1287,9 @@ struct AppAsr {
     notice: Option<String>,
 }
 impl Asr for AppAsr {
+    fn live_embedding_config(&self) -> Option<AsrConfig> {
+        Some(self.config.clone())
+    }
     fn take_notice(&mut self) -> Option<String> {
         self.notice.take()
     }

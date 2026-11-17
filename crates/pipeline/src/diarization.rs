@@ -171,16 +171,25 @@ pub(crate) fn final_pass(
     mic: Option<&Path>,
     config: &DiarizationConfig,
     events: &Sender<PipelineEvent>,
+    live: Option<(&crate::live_speakers::Clusters, &Transcript)>,
 ) {
-    if !config.enabled {
-        return;
-    }
     let warning = |error: anyhow::Error| {
         let _ = events.send(PipelineEvent::Warning(format!(
             "Разделение собеседников: {error:#}"
         )));
     };
-    let mut result = match asr.diarize(system, config.speakers, config.voice_library) {
+    if let Err(error) = meeting.update_transcript(crate::live_speakers::clear_identities) {
+        warning(error.into());
+        return;
+    }
+    if !config.enabled {
+        return;
+    }
+    let mut result = match asr.diarize(
+        system,
+        config.speakers,
+        config.voice_library || live.is_some_and(|(clusters, t)| clusters.has_named(t)),
+    ) {
         Ok(result) => result,
         Err(error) => {
             warning(error);
@@ -231,6 +240,12 @@ pub(crate) fn final_pass(
     }
     if let Err(error) = meeting.update_transcript(|transcript| {
         assign(transcript, &result);
+        if let Some((clusters, before)) = live {
+            for id in clusters.rejected_matches(before, &result.embeddings) {
+                transcript.voice_rejected.insert(id.clone());
+                transcript.voice_recognitions.remove(&id);
+            }
+        }
         for (id, name) in &suggestions {
             if !transcript.speaker_names.contains_key(id) {
                 transcript
@@ -250,6 +265,39 @@ pub(crate) fn final_pass(
         }
     }) {
         warning(error.into());
+    }
+    if let Some((clusters, before)) = live {
+        let transfer = (|| -> Result<()> {
+            let library = Library::open(meeting.path().parent().context("Нет библиотеки")?)?;
+            for edit in clusters.transfer(before, &result.embeddings) {
+                let expected = meeting.read_transcript()?;
+                // A final cluster may own no segment; it must not block the others.
+                let notetaker_core::SpeakerEdit::Rename { speaker, .. } = &edit else {
+                    continue;
+                };
+                if !expected.segments.iter().any(|s| &s.speaker.0 == speaker) {
+                    continue;
+                }
+                match library.edit_speakers_owned(
+                    meeting,
+                    &expected,
+                    edit,
+                    config.voice_library,
+                    false,
+                    None,
+                ) {
+                    Ok(outcome) if !outcome.voice_status.is_empty() => {
+                        let _ = events.send(PipelineEvent::Warning(outcome.voice_status));
+                    }
+                    Ok(_) => {}
+                    Err(error) => warning(error.into()),
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = transfer {
+            warning(error);
+        }
     }
 }
 
@@ -456,6 +504,74 @@ mod tests {
         }
     }
     #[test]
+    fn final_diarization_always_removes_session_identities() {
+        use crate::live_speakers::tests::{assert_no_live_identities, named_live_transcript};
+        struct Refusing(&'static str);
+        impl Asr for Refusing {
+            fn start(&mut self) -> Result<()> {
+                Ok(())
+            }
+            fn transcribe(
+                &mut self,
+                _: notetaker_asr_proto::AudioInput,
+                _: notetaker_capture::Channel,
+                _: u64,
+            ) -> Result<Vec<notetaker_asr_proto::Segment>> {
+                unreachable!()
+            }
+            fn diarize(&mut self, _: &Path, _: Option<u32>, _: bool) -> Result<Diarization> {
+                anyhow::bail!(self.0);
+            }
+        }
+        for outcome in ["success", "failure", "timeout", "cancelled", "disabled"] {
+            let root = tempfile::tempdir().unwrap();
+            let library = Library::open(root.path()).unwrap();
+            let meeting = library
+                .create_meeting(notetaker_core::MeetingMeta::new(
+                    "Синтетическая встреча",
+                    chrono::Utc::now(),
+                ))
+                .unwrap();
+            let mut transcript = named_live_transcript();
+            // Final ASR replaced one utterance; an edited live utterance survived.
+            transcript.segments[0].speaker.0 = "them".into();
+            transcript.segments[1].edited = true;
+            meeting.write_transcript(&transcript).unwrap();
+            let (events, _) = std::sync::mpsc::channel();
+            let config = DiarizationConfig {
+                enabled: outcome != "disabled",
+                ..Default::default()
+            };
+            if outcome == "success" {
+                final_pass(
+                    &meeting,
+                    &mut Fake { fail: false },
+                    Path::new("unused"),
+                    None,
+                    &config,
+                    &events,
+                    None,
+                );
+            } else {
+                final_pass(
+                    &meeting,
+                    &mut Refusing(outcome),
+                    Path::new("unused"),
+                    None,
+                    &config,
+                    &events,
+                    None,
+                );
+            }
+            let after = meeting.read_transcript().unwrap();
+            assert_no_live_identities(&after);
+            assert_eq!(after.segments.len(), transcript.segments.len());
+            assert_eq!(after.segments[1].text, transcript.segments[1].text);
+            assert!(after.segments[1].edited);
+        }
+    }
+
+    #[test]
     fn final_pass_preserves_asr_on_failure_and_keeps_biometrics_opt_in() {
         let dir = tempfile::tempdir().unwrap();
         let library = Library::open(dir.path()).unwrap();
@@ -486,6 +602,7 @@ mod tests {
             None,
             &DiarizationConfig::default(),
             &tx,
+            None,
         );
         assert_eq!(meeting.read_transcript().unwrap(), transcript);
         assert!(matches!(rx.try_recv().unwrap(), PipelineEvent::Warning(_)));
@@ -496,6 +613,7 @@ mod tests {
             None,
             &DiarizationConfig::default(),
             &tx,
+            None,
         );
         assert_eq!(
             meeting.read_transcript().unwrap().segments[0].speaker.0,
@@ -549,6 +667,7 @@ mod tests {
                 ..Default::default()
             },
             &tx,
+            None,
         );
         let loaded = meeting.read_transcript().unwrap();
         assert_eq!(loaded.segments[0].speaker.0, "s1");

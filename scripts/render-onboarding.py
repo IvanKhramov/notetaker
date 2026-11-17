@@ -128,6 +128,7 @@ impl LearningUi {
 impl NotetakerApp {
     pub fn fixture(state: AppState, screen: usize) -> Self {
         let scene=screen;
+        let screen=match screen {107|108=>5,_=>screen};
         let screen=match screen {97|98=>45,99|100=>3,_=>screen};
         let screen=match screen {95|96=>3,_=>screen};
         let screen=match screen {92=>3,93=>3,94=>10,_=>screen};
@@ -358,6 +359,26 @@ impl NotetakerApp {
                 if scene>=104 {app.state.ktalk.learning.fixture(&app.state.settings.library,scene-104);}
             }
         }
+        if scene==107 || scene==108 {
+            app.home=false;app.state.tab=Tab::Transcript;
+            app.state.settings.user_name="Участник М".into();
+            app.state.settings.voice_library=true;
+            app.state.recording.phase=Phase::Recording;
+            app.state.recording.path=app.state.selected.clone();
+            app.state.recording.started=Some(Instant::now()-Duration::from_secs(123));
+            let document=app.state.documents.get_mut(app.state.selected.as_ref().unwrap()).unwrap();
+            document.data.meta.title="Синтетическая встреча".into();
+            document.data.meta.calendar_event=None;
+            let mut transcript=notetaker_core::Transcript::default();
+            for (index,(speaker,text)) in [("live-1","Сначала проверим план и распределим задачи."),("live-2","Я проверю сроки и подготовлю список вопросов."),("live-1","Обсудим результат на следующей встрече.")].into_iter().enumerate() {
+                transcript.segments.push(notetaker_core::Segment {id:uuid::Uuid::now_v7(),speaker:notetaker_core::SpeakerId(speaker.into()),channel:notetaker_core::Channel::System,start_ms:index as u64*6000,end_ms:index as u64*6000+5000,text:text.into(),source:notetaker_core::Source::Live,edited:false,lang:None});
+            }
+            transcript.voice_recognitions.insert("live-1".into(),notetaker_core::VoiceRecognition {name:"Участник А".into(),voice_id:"synthetic-voice-a".into(),similarity_milli:850});
+            document.data.transcript=transcript;
+            document.data.meeting.write_transcript(&document.data.transcript).unwrap();
+            document.data.revisions.transcript=document.data.meeting.load_transcript().unwrap().revision;
+            document.changed();document.speaker_ui.invalidate_transcript();
+        }
         app
     }
     pub fn fixture_jump_settled(&self) -> bool { self.state.selected.as_ref().and_then(|path| self.state.documents.get(path)).is_none_or(|document| document.speaker_ui.scroll_to.is_none()) }
@@ -382,7 +403,7 @@ impl eframe::App for Preview {
         ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("fixture-meeting-menu"), self.screen == 15));
         ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("preview-expand-settings"),self.screen==37 || self.screen==38));
         ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("calendar-status-preview"),self.screen==76 || self.screen==77));
-        ui.ctx().data_mut(|data| {data.insert_temp(egui::Id::unique("fixture-speaker-menu"),self.screen==58);data.insert_temp(egui::Id::unique("fixture-rename-form"),self.screen==58);});
+        ui.ctx().data_mut(|data| {data.insert_temp(egui::Id::unique("fixture-speaker-menu"),self.screen==58 || self.screen==108);data.insert_temp(egui::Id::unique("fixture-rename-form"),self.screen==58 || self.screen==108);});
         if self.screen==66 && ui.ctx().content_rect().height()<600.0 {
             ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("fixture-recording-settings-offset"),240.0_f32));
         }
@@ -512,7 +533,7 @@ if shutil.disk_usage(root).free < 2 * 1024**3:
 # Resolve the derived harness root against the copied workspace lock before its locked build.
 subprocess.run(["cargo", "metadata", "--offline", "--format-version", "1", "--manifest-path", str(harness / "Cargo.toml")], cwd=root, env=env, check=True, stdout=subprocess.DEVNULL)
 subprocess.run(["cargo", "build", "--locked", "--manifest-path", str(harness / "Cargo.toml")], cwd=root, env=env, check=True)
-names = ["welcome", "name", "connections", "home", "note", "transcript", "general", "recording", "calendars", "ai", "search", "storage", "recording-pill", "connections-expanded", "delete-confirm", "meeting-menu", "toast", "empty-library", "narrow-settings", "recording-bar", "chat", "tasks", "people", "person", "series", "digest", "folders", "diagnostics", "tracker-preview", "new-recording", "rename", "regenerate", "capture-warning", "widgets", "update-card", "folder-delete", "merge-people", "folders-advanced", "ai-expanded", "performance-transcript", "performance-meetings", "performance-live", "chat-meeting-empty", "chat-library-empty", "chat-recipes", "chat-recording", "recording-silence", "recording-final-pass", "recording-ready", "recording-not-ready", "summary-skipped", "calendar-reminder-link", "calendar-reminder-no-link", "calendar-upcoming", "calendar-help", "direct-task-checkboxes", "direct-template-bar", "direct-template-picker", "direct-speaker-menu", "compact-transcript", "compact-summary", "compact-storage", "compact-person", "compact-series", "one-step-bar", "one-step-countdown", "one-step-settings", "one-step-auto-title", "ktalk-settings-empty", "ktalk-settings-connected", "ktalk-preview", "ktalk-transcript", "ktalk-success", "calendar-home-events", "calendar-home-empty", "calendar-home-error", "calendar-settings-status", "calendar-settings-error", "mac-sound-no-access", "mac-sound-silent", "mac-sound-ready", "spinner-retina", "hint-disabled", "calendar-recording-blocked", "model-byte-progress", "model-download-stalled", "calendar-partial-success", "welcome-download-progress", "profile-list-hints", "permission-home", "permission-recording", "permission-settings", "recording-ready-speech-only", "optional-speaker-download", "optional-search-failure", "quit-wait", "quit-force", "recording-next-meeting", "recording-next-soon", "indicator-next-meeting", "indicator-next-started", "voice-recognised", "voice-recognised-menu", "voice-settings", "voice-learning-plan", "voice-learning-running", "voice-learning-finished"]
+names = ["welcome", "name", "connections", "home", "note", "transcript", "general", "recording", "calendars", "ai", "search", "storage", "recording-pill", "connections-expanded", "delete-confirm", "meeting-menu", "toast", "empty-library", "narrow-settings", "recording-bar", "chat", "tasks", "people", "person", "series", "digest", "folders", "diagnostics", "tracker-preview", "new-recording", "rename", "regenerate", "capture-warning", "widgets", "update-card", "folder-delete", "merge-people", "folders-advanced", "ai-expanded", "performance-transcript", "performance-meetings", "performance-live", "chat-meeting-empty", "chat-library-empty", "chat-recipes", "chat-recording", "recording-silence", "recording-final-pass", "recording-ready", "recording-not-ready", "summary-skipped", "calendar-reminder-link", "calendar-reminder-no-link", "calendar-upcoming", "calendar-help", "direct-task-checkboxes", "direct-template-bar", "direct-template-picker", "direct-speaker-menu", "compact-transcript", "compact-summary", "compact-storage", "compact-person", "compact-series", "one-step-bar", "one-step-countdown", "one-step-settings", "one-step-auto-title", "ktalk-settings-empty", "ktalk-settings-connected", "ktalk-preview", "ktalk-transcript", "ktalk-success", "calendar-home-events", "calendar-home-empty", "calendar-home-error", "calendar-settings-status", "calendar-settings-error", "mac-sound-no-access", "mac-sound-silent", "mac-sound-ready", "spinner-retina", "hint-disabled", "calendar-recording-blocked", "model-byte-progress", "model-download-stalled", "calendar-partial-success", "welcome-download-progress", "profile-list-hints", "permission-home", "permission-recording", "permission-settings", "recording-ready-speech-only", "optional-speaker-download", "optional-search-failure", "quit-wait", "quit-force", "recording-next-meeting", "recording-next-soon", "indicator-next-meeting", "indicator-next-started", "voice-recognised", "voice-recognised-menu", "voice-settings", "voice-learning-plan", "voice-learning-running", "voice-learning-finished", "live-speakers", "live-speakers-menu"]
 def render(spec):
     index, name, theme, width, height, zoom = spec
     actual_width = 760 if name == "narrow-settings" and zoom == 1.0 else width

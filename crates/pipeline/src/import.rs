@@ -99,13 +99,18 @@ pub(crate) fn run(
             convert(segments.clone(), Channel::System, Source::Final),
         );
     })?;
-    crate::diarization::final_pass(meeting, &mut asr, &wav, None, &config.diarization, events);
+    crate::diarization::final_pass(
+        meeting,
+        &mut asr,
+        &wav,
+        None,
+        &config.diarization,
+        events,
+        None,
+    );
     if config.retention == Some(Duration::ZERO) {
         fs::remove_file(meeting.system_audio_path())?;
     }
     progress(200);
-    let _ = events.send(PipelineEvent::Finished {
-        meeting: meeting.clone(),
-    });
     Ok(())
 }

@@ -13,6 +13,7 @@ mod echo;
 mod import;
 mod recover;
 pub use echo::suppress_echo;
+pub mod live_speakers;
 mod session;
 
 pub use asr::{Asr, AsrConfig, WorkerAsr};

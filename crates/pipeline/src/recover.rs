@@ -86,6 +86,7 @@ pub(crate) fn run(
             wav_of(Channel::Mic),
             &config.diarization,
             events,
+            None,
         );
     }
     let mut meta = meeting.read_meta()?;
@@ -112,8 +113,5 @@ pub(crate) fn run(
     // Leftovers of the interrupted recording; the transcript no longer needs them.
     let _ = fs::remove_dir_all(meeting.path().join("audio/.work"));
     progress(total);
-    let _ = events.send(PipelineEvent::Finished {
-        meeting: meeting.clone(),
-    });
     Ok(())
 }

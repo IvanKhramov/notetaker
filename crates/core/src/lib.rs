@@ -35,8 +35,10 @@ pub use export::{ExportFormat, format_timestamp};
 pub use model::{SpeakerIdentity, SpeakerNameSource, VoiceRecognition};
 pub use speakers::{MergeUndo, SpeakerStats, SpeakerTimeline, TimelineSegment};
 pub use vocabulary::Vocabulary;
+pub use voices::{
+    AUTOMATIC_MARGIN, AUTOMATIC_THRESHOLD, SpeakerEdit, SpeakerEditResult, SpeakerUndo,
+};
 pub use voices::{MeetingVoices, SELF_THRESHOLD, VOICE_MODEL, Voice, VoiceLibrary, cosine};
-pub use voices::{SpeakerEdit, SpeakerEditResult, SpeakerUndo};
 pub use voices::{VOICE_NAME_TAKEN, VoiceEvidence, VoiceSample};
 
 pub use attachments::{attachment_image_path, attachment_references, markdown_images};
