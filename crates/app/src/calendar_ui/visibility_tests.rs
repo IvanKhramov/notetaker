@@ -91,18 +91,13 @@ fn home_loading_empty_today_tomorrow_in_progress_and_record_action() {
         "Завтра",
         "Текущая",
         "идёт",
-        "Войти и записать",
+        "Записать",
         "Завтрашняя",
     ] {
         assert!(text.contains(&value.into()), "{value}: {text:?}");
     }
     assert!(!text.contains(&"Прошедшая".into()));
-    assert_eq!(
-        text.iter()
-            .filter(|t| t.as_str() == "Войти и записать")
-            .count(),
-        1
-    );
+    assert_eq!(text.iter().filter(|t| t.as_str() == "Записать").count(), 1);
 }
 #[test]
 fn home_error_settings_link_and_more_expand() {

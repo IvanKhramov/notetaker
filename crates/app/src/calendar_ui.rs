@@ -7,13 +7,8 @@ pub fn call_link(event: &CalendarEvent) -> Option<String> {
     let url = event.link.call_url.as_deref()?;
     notetaker_core::calendar::is_allowed_call_link(url).then(|| url.to_owned())
 }
-pub fn action_label(event: &CalendarEvent) -> &'static str {
-    if call_link(event).is_some() {
-        "Войти и записать"
-    } else {
-        "Начать запись"
-    }
-}
+pub const RECORD: &str = "Записать";
+pub const JOIN: &str = "Войти";
 pub fn eligible(event: &CalendarEvent, now: DateTime<Utc>) -> bool {
     !event.all_day
         && event.end > now
@@ -95,6 +90,7 @@ pub enum Action {
     #[default]
     None,
     Start,
+    Join,
     Dismiss,
 }
 pub fn reminder(ui: &mut egui::Ui, event: &CalendarEvent, reason: Option<&str>) -> Action {
@@ -138,16 +134,19 @@ pub fn reminder(ui: &mut egui::Ui, event: &CalendarEvent, reason: Option<&str>) 
             if ui
                 .add_enabled(
                     reason.is_none(),
-                    theme::styled_button(
-                        theme::Palette::of(ui),
-                        action_label(event),
-                        ButtonStyle::Primary,
-                    ),
+                    theme::styled_button(theme::Palette::of(ui), RECORD, ButtonStyle::Primary),
                 )
                 .on_disabled_hover_text(reason.unwrap_or_default())
                 .clicked()
             {
                 action = Action::Start;
+            }
+            if call_link(event).is_some()
+                && theme::button(ui, JOIN, ButtonStyle::Secondary)
+                    .on_hover_text("Открыть ссылку звонка. Запись не начнётся.")
+                    .clicked()
+            {
+                action = Action::Join;
             }
         });
         if let Some(reason) = reason {
@@ -249,7 +248,7 @@ mod tests {
                 .request_focus();
             reminder(ui, &event, None);
         });
-        crate::test_ui::text_rect(&output.shapes, "Начать запись");
+        crate::test_ui::text_rect(&output.shapes, RECORD);
         assert!(ctx.memory(|m| m.has_focus(field)));
         output.drop_without_applying_deltas();
         let mut chosen = Action::None;
@@ -261,7 +260,7 @@ mod tests {
                     chosen = action;
                 }
             },
-            "Начать запись",
+            RECORD,
         );
         assert_eq!(chosen, Action::Start);
     }
@@ -431,6 +430,7 @@ pub enum HomeAction {
     None,
     Settings,
     Start(CalendarEvent),
+    Join(CalendarEvent),
 }
 pub fn home(
     ui: &mut egui::Ui,
@@ -530,12 +530,21 @@ pub fn home(
                     && ui
                         .add_enabled(
                             model.reason.is_none(),
-                            theme::styled_button(p, action_label(event), ButtonStyle::Secondary),
+                            theme::styled_button(p, RECORD, ButtonStyle::Secondary),
                         )
                         .on_disabled_hover_text(model.reason.unwrap_or_default())
                         .clicked()
                 {
                     action = HomeAction::Start(event.clone());
+                }
+                if !event.all_day
+                    && event.start <= model.now + chrono::Duration::minutes(5)
+                    && call_link(event).is_some()
+                    && theme::button(ui, JOIN, ButtonStyle::Ghost)
+                        .on_hover_text("Открыть ссылку звонка. Запись не начнётся.")
+                        .clicked()
+                {
+                    action = HomeAction::Join(event.clone());
                 }
             });
         }

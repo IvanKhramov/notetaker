@@ -229,6 +229,11 @@ impl Worker {
                         "NOTETAKER_MODELS_DIR",
                         notetaker_core::app_config::AppSettings::load()?.models_path(),
                     );
+                    #[cfg(windows)]
+                    {
+                        use std::os::windows::process::CommandExt;
+                        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+                    }
                     let mut client = AsrClient::spawn_command_cancellable(
                         command,
                         Duration::from_secs(30),

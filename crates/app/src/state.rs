@@ -1300,8 +1300,6 @@ impl AppState {
         {
             return;
         }
-        let call = crate::calendar_ui::call_link(&event);
-        let has_call = event.link.call_url.is_some();
         self.title.clear();
         self.prefilled_title = None;
         self.selected_event = Some(event);
@@ -1311,15 +1309,16 @@ impl AppState {
         self.record_mode = self.settings.mode;
         self.record_mode_edited = false;
         self.start_recording();
-        if self.recording.phase == Phase::Starting {
-            if let Some(url) = call {
-                self.send(Command::OpenCall(url));
-            } else if has_call {
-                self.notices.push((
-                    crate::theme::ToastLevel::Warning,
-                    "Ссылка звонка не разрешена. Запись продолжается.".into(),
-                ));
-            }
+    }
+    /// Joining is separate from recording: most users enter the call themselves.
+    pub fn join_event(&mut self, event: &notetaker_core::calendar::CalendarEvent) {
+        if let Some(url) = crate::calendar_ui::call_link(event) {
+            self.send(Command::OpenCall(url));
+        } else if event.link.call_url.is_some() {
+            self.notices.push((
+                crate::theme::ToastLevel::Warning,
+                "Ссылка звонка не разрешена.".into(),
+            ));
         }
     }
     pub fn refresh_tasks(&mut self) {
@@ -5445,6 +5444,7 @@ mod calendar_tests {
         state.update_calendar_reminder(now);
         assert!(state.calendar_reminder.is_some());
         let event = state.calendar_reminder().cloned().unwrap();
+        let mut commands_replay = Vec::new();
         let ctx = eframe::egui::Context::default();
         crate::theme::install(&ctx);
         crate::test_ui::click(
@@ -5456,12 +5456,34 @@ mod calendar_tests {
                     state.start_event(event.clone());
                 }
             },
-            "Войти и записать",
+            crate::calendar_ui::RECORD,
         );
         assert!(state.calendar_reminder.is_none());
+        // Recording never opens the call by itself; joining is a separate button.
+        let recorded: Vec<_> = commands.try_iter().collect();
+        assert!(
+            recorded
+                .iter()
+                .all(|cmd| !matches!(cmd, Command::OpenCall(_)))
+        );
+        for command in recorded {
+            commands_replay.push(command);
+        }
+        crate::test_ui::click(
+            &ctx,
+            &mut |ui| {
+                if crate::calendar_ui::reminder(ui, &event, None)
+                    == crate::calendar_ui::Action::Join
+                {
+                    state.join_event(&event);
+                }
+            },
+            crate::calendar_ui::JOIN,
+        );
+        assert!(state.recording.busy());
         let mut started = false;
         let mut opened = false;
-        for command in commands.try_iter() {
+        for command in commands_replay.into_iter().chain(commands.try_iter()) {
             match command {
                 Command::Record(request) => {
                     assert_eq!(request.event.unwrap().start, event.start);
@@ -5482,10 +5504,17 @@ mod calendar_tests {
         event.start += chrono::Duration::minutes(1);
         event.link.call_url = Some("https://evil.invalid/call".into());
         state.start_event(event.clone());
+        state.join_event(&event);
         assert!(
             commands
                 .try_iter()
                 .all(|cmd| !matches!(cmd, Command::OpenCall(_)))
+        );
+        assert!(
+            state
+                .notices
+                .iter()
+                .any(|(_, text)| text.contains("Ссылка звонка не разрешена"))
         );
         state.apply(Event::CallOpened(false));
         assert!(
@@ -5510,7 +5539,6 @@ mod calendar_tests {
         state.calendar_events = vec![event.clone()];
         state.calendar_reminder = None;
         state.update_calendar_reminder(now);
-        assert_eq!(crate::calendar_ui::action_label(&event), "Начать запись");
         assert!(state.calendar_reminder.is_some());
         state.update_calendar_reminder(event.end);
         assert!(state.calendar_reminder.is_none());
@@ -5887,7 +5915,13 @@ mod next_meeting_tests {
         state.start_event(next.clone());
         let sent: Vec<_> = commands.try_iter().collect();
         assert!(sent.iter().any(|command| matches!(command, Command::Record(request) if request.event.as_ref().is_some_and(|event| event.link.uid == next.link.uid))));
-        assert!(sent.iter().any(|command| matches!(command, Command::OpenCall(url) if url == "https://space.ktalk.ru/neutral")));
+        assert!(
+            !sent
+                .iter()
+                .any(|command| matches!(command, Command::OpenCall(_)))
+        );
+        state.join_event(&next);
+        assert!(commands.try_iter().any(|command| matches!(command, Command::OpenCall(url) if url == "https://space.ktalk.ru/neutral")));
         assert!(state.calendar_reminder.is_none());
     }
 }
