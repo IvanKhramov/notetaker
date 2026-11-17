@@ -402,6 +402,10 @@ pub enum Event {
         result: Result<notetaker_core::SpeakerEditResult, String>,
         data: Option<Box<DocumentData>>,
     },
+    LiveTranscript {
+        path: PathBuf,
+        transcript: Transcript,
+    },
     Inventory(Result<Inventory, String>),
     Started {
         options: Option<notetaker_core::app_config::RecordingOptions>,
@@ -900,18 +904,8 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                     edit,
                 } => {
                     if live {
-                        let result = notetaker_pipeline::live_speakers::edit(&meeting, edit)
-                            .map(|_| notetaker_core::SpeakerEditResult {
-                                undo: None,
-                                renamed_meetings: Vec::new(),
-                                voice_status: String::new(),
-                            })
-                            .map_err(|e| e.to_string());
-                        let data = DocumentData::read(meeting.clone()).ok().map(Box::new);
-                        let _ = events.send(Event::SpeakersEdited {
-                            path: meeting.path().into(),
-                            result,
-                            data,
+                        edit_live_speakers(&meeting, edit, |event| {
+                            let _ = events.send(event);
                         });
                         continue;
                     }
@@ -1138,6 +1132,31 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
         }
     });
     (commands, messages)
+}
+
+pub(crate) fn edit_live_speakers(
+    meeting: &Meeting,
+    edit: notetaker_core::SpeakerEdit,
+    mut send: impl FnMut(Event),
+) {
+    let result = notetaker_pipeline::live_speakers::edit(meeting, edit)
+        .map(|updated| {
+            send(Event::LiveTranscript {
+                path: meeting.path().into(),
+                transcript: updated.value,
+            });
+            notetaker_core::SpeakerEditResult {
+                undo: None,
+                renamed_meetings: Vec::new(),
+                voice_status: String::new(),
+            }
+        })
+        .map_err(|e| e.to_string());
+    send(Event::SpeakersEdited {
+        path: meeting.path().into(),
+        result,
+        data: None,
+    });
 }
 
 pub fn summary_can_overwrite(data: &DocumentData) -> bool {

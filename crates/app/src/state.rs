@@ -304,6 +304,48 @@ impl Document {
     pub fn changed(&mut self) {
         self.changed_at = Instant::now();
     }
+    fn merge_live(&mut self, live: &Transcript) {
+        for segment in &live.segments {
+            if let Some(own) = self
+                .data
+                .transcript
+                .segments
+                .iter_mut()
+                .find(|s| s.id == segment.id)
+            {
+                // A delayed text delta must not undo an already assigned live voice.
+                if own.source == notetaker_core::Source::Live && segment.speaker.0 != "them" {
+                    own.speaker = segment.speaker.clone();
+                }
+            } else {
+                self.data.transcript.segments.push(segment.clone());
+            }
+        }
+        for (id, mark) in &live.voice_recognitions {
+            if !self.data.transcript.speaker_names.contains_key(id)
+                && !self.data.transcript.voice_rejected.contains(id)
+            {
+                self.data
+                    .transcript
+                    .voice_recognitions
+                    .insert(id.clone(), mark.clone());
+            }
+        }
+        for (id, name) in &live.speaker_suggestions {
+            if !self.data.transcript.speaker_names.contains_key(id)
+                && !self.data.transcript.voice_rejected.contains(id)
+            {
+                self.data
+                    .transcript
+                    .speaker_suggestions
+                    .insert(id.clone(), name.clone());
+            }
+        }
+        self.data.transcript.segments.sort_by_key(|s| s.start_ms);
+        notetaker_pipeline::suppress_echo(&mut self.data.transcript.segments);
+        self.speaker_ui.invalidate_transcript();
+        self.changed();
+    }
     pub fn summary_stale(&mut self) -> bool {
         let Some(stamp) = &self.data.meta.summary else {
             return false;
@@ -2380,6 +2422,14 @@ impl AppState {
                 }
                 self.refresh();
             }
+            Event::LiveTranscript { path, transcript } => {
+                if self.recording.path.as_ref() == Some(&path)
+                    && self.recording.busy()
+                    && let Some(doc) = self.documents.get_mut(&path)
+                {
+                    doc.merge_live(&transcript);
+                }
+            }
             Event::SpeakersEdited { path, result, data } => {
                 if let Some(document) = self.documents.get_mut(&path) {
                     document.speaker_ui.busy = false;
@@ -2655,39 +2705,7 @@ impl AppState {
                         .as_ref()
                         .and_then(|path| self.documents.get_mut(path))
                 {
-                    for segment in &live.segments {
-                        if let Some(own) = doc
-                            .data
-                            .transcript
-                            .segments
-                            .iter_mut()
-                            .find(|own| own.id == segment.id)
-                        {
-                            own.speaker = segment.speaker.clone();
-                        }
-                    }
-                    for (id, mark) in &live.voice_recognitions {
-                        if !doc.data.transcript.speaker_names.contains_key(id)
-                            && !doc.data.transcript.voice_rejected.contains(id)
-                        {
-                            doc.data
-                                .transcript
-                                .voice_recognitions
-                                .insert(id.clone(), mark.clone());
-                        }
-                    }
-                    for (id, name) in &live.speaker_suggestions {
-                        if !doc.data.transcript.speaker_names.contains_key(id)
-                            && !doc.data.transcript.voice_rejected.contains(id)
-                        {
-                            doc.data
-                                .transcript
-                                .speaker_suggestions
-                                .insert(id.clone(), name.clone());
-                        }
-                    }
-                    doc.speaker_ui.invalidate_transcript();
-                    doc.changed();
+                    doc.merge_live(live);
                 }
                 if let PipelineEvent::LiveSegments(segments) = event
                     && let Some(doc) = self
@@ -2696,7 +2714,7 @@ impl AppState {
                         .as_ref()
                         .and_then(|path| self.documents.get_mut(path))
                 {
-                    for segment in segments {
+                    for segment in &segments {
                         if !doc
                             .data
                             .transcript
@@ -2712,12 +2730,12 @@ impl AppState {
                                     segment.text
                                 ));
                             }
-                            doc.data.transcript.segments.push(segment);
                         }
                     }
-                    doc.data.transcript.segments.sort_by_key(|s| s.start_ms);
-                    notetaker_pipeline::suppress_echo(&mut doc.data.transcript.segments);
-                    doc.speaker_ui.invalidate_transcript();
+                    doc.merge_live(&Transcript {
+                        segments,
+                        ..Default::default()
+                    });
                 }
             }
             Event::RecordDone {
@@ -3571,6 +3589,93 @@ mod tests {
         assert!(cancel.is_cancelled());
         state.add_bookmark();
         assert!(commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn live_edit_ack_keeps_newer_segments_and_delayed_deltas_keep_the_voice() {
+        let (mut state, _commands, _root, path) = fixture();
+        state.recording.path = Some(path.clone());
+        state.recording.phase = Phase::Recording;
+        let first = Segment {
+            id: Uuid::now_v7(),
+            speaker: SpeakerId("live-1".into()),
+            channel: Channel::System,
+            start_ms: 0,
+            end_ms: 3000,
+            text: "Синтетическая реплика".into(),
+            source: Source::Live,
+            edited: false,
+            lang: None,
+        };
+        let meeting = state.documents[&path].data.meeting.clone();
+        meeting
+            .update_transcript(|t| t.segments.push(first.clone()))
+            .unwrap();
+        state.apply(Event::Pipeline(PipelineEvent::LiveSegments(vec![
+            first.clone(),
+        ])));
+        let edit = notetaker_core::SpeakerEdit::Rename {
+            speaker: "live-1".into(),
+            name: "Участник А".into(),
+            is_me: false,
+            everywhere: false,
+        };
+        // Optimistic UI naming precedes the worker, just as edit_speakers does.
+        notetaker_pipeline::live_speakers::apply_edit(
+            &mut state.documents.get_mut(&path).unwrap().data.transcript,
+            &edit,
+        );
+        let mut replies = Vec::new();
+        worker::edit_live_speakers(&meeting, edit, |event| replies.push(event));
+        let second = Segment {
+            id: Uuid::now_v7(),
+            start_ms: 4000,
+            end_ms: 7000,
+            ..first.clone()
+        };
+        meeting
+            .update_transcript(|t| t.segments.push(second.clone()))
+            .unwrap();
+        state.apply(Event::Pipeline(PipelineEvent::LiveSegments(vec![
+            second.clone(),
+        ])));
+        for reply in replies {
+            state.apply(reply);
+        }
+        let transcript = &state.documents[&path].data.transcript;
+        assert_eq!(transcript.segments.len(), 2);
+        assert_eq!(transcript.speaker_name("live-1"), "Участник А");
+        // A full speaker snapshot can arrive before its text delta.
+        let third = Segment {
+            id: Uuid::now_v7(),
+            start_ms: 8000,
+            end_ms: 11000,
+            ..second
+        };
+        state.apply(Event::Pipeline(PipelineEvent::LiveSpeakers(Transcript {
+            segments: vec![third.clone()],
+            ..Default::default()
+        })));
+        let neutral = Segment {
+            speaker: SpeakerId("them".into()),
+            ..third.clone()
+        };
+        state.apply(Event::Pipeline(PipelineEvent::LiveSegments(vec![neutral])));
+        let transcript = &state.documents[&path].data.transcript;
+        assert_eq!(transcript.segments.len(), 3);
+        assert_eq!(transcript.segments[2].speaker, third.speaker);
+        // A delayed acknowledgement from a previous meeting cannot enter a new one.
+        state.apply(Event::LiveTranscript {
+            path: path.with_file_name("other"),
+            transcript: Transcript {
+                segments: vec![Segment {
+                    id: Uuid::now_v7(),
+                    ..third
+                }],
+                ..Default::default()
+            },
+        });
+        assert_eq!(state.documents[&path].data.transcript.segments.len(), 3);
     }
 
     #[test]
