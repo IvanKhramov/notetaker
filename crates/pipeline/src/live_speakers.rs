@@ -17,7 +17,7 @@ pub const UPDATE_CENTROID_MS: u64 = 3000;
 // A brief answer can inherit only the immediately preceding voice within one second.
 pub const NEIGHBOR_GAP_MS: u64 = 1000;
 pub const QUEUE_CAPACITY: usize = 4;
-pub(crate) type Edits = std::sync::Arc<std::sync::Mutex<BTreeMap<String, SpeakerEdit>>>;
+pub(crate) type Edits = std::sync::Arc<std::sync::Mutex<Vec<SpeakerEdit>>>;
 pub(crate) fn edit_id(edit: &SpeakerEdit) -> Option<&str> {
     match edit {
         SpeakerEdit::Rename {
@@ -35,7 +35,7 @@ pub(crate) fn edit_id(edit: &SpeakerEdit) -> Option<&str> {
     }
 }
 pub(crate) fn apply_pending(transcript: &mut Transcript, edits: &Edits) {
-    for edit in edits.lock().unwrap_or_else(|e| e.into_inner()).values() {
+    for edit in edits.lock().unwrap_or_else(|e| e.into_inner()).iter() {
         apply_edit(transcript, edit);
     }
 }
@@ -357,6 +357,20 @@ pub fn apply_edit(t: &mut Transcript, edit: &SpeakerEdit) -> bool {
     }
     match edit {
         SpeakerEdit::Rename { name, is_me, .. } => {
+            // A live name identifies one cluster. The latest explicit assignment wins.
+            let normalized = name.trim().to_lowercase();
+            let previous: Vec<_> = t
+                .speaker_identities()
+                .filter(|(id, identity)| {
+                    id.starts_with("live-")
+                        && *id != speaker
+                        && identity.name.trim().to_lowercase() == normalized
+                })
+                .map(|(id, _)| id.to_owned())
+                .collect();
+            for id in previous {
+                apply_edit(t, &SpeakerEdit::ClearName { speaker: id });
+            }
             if t.voice_recognitions
                 .get(&speaker)
                 .is_some_and(|mark| mark.name != name.trim())
@@ -518,6 +532,63 @@ mod tests {
                 .contains_key("live-1")
         );
     }
+    #[test]
+    fn pending_edits_keep_user_order_for_own_voice_and_unique_live_names() {
+        let mut clusters = Clusters::default();
+        clusters.assign(0, 3000, Some(vec![1.0, 0.0]));
+        clusters.assign(4000, 7000, Some(vec![0.0, 1.0]));
+        let rename = |speaker: &str, name: &str, is_me| SpeakerEdit::Rename {
+            speaker: speaker.into(),
+            name: name.into(),
+            is_me,
+            everywhere: false,
+        };
+        let edits: Edits = Default::default();
+        edits.lock().unwrap().extend([
+            rename("live-2", "Участник Б", true),
+            rename("live-1", "Участник А", true),
+        ]);
+        let mut t = Transcript {
+            segments: vec![segment("live-1", 0, 3000), segment("live-2", 4000, 7000)],
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            apply_pending(&mut t, &edits);
+            assert_eq!(t.self_speaker.as_deref(), Some("live-1"));
+            let transfer = clusters.transfer(
+                &t,
+                &BTreeMap::from([("s1".into(), vec![1.0, 0.0]), ("s2".into(), vec![0.0, 1.0])]),
+            );
+            assert!(
+                matches!(&transfer[0], SpeakerEdit::Rename {speaker,is_me:true,..} if speaker=="s1")
+            );
+            assert!(
+                matches!(&transfer[1], SpeakerEdit::Rename {speaker,is_me:false,..} if speaker=="s2")
+            );
+        }
+        edits.lock().unwrap().extend([
+            rename("live-2", "Участник В", false),
+            rename("live-1", "  УЧАСТНИК В  ", false),
+        ]);
+        for _ in 0..2 {
+            apply_pending(&mut t, &edits);
+            assert!(!t.speaker_names.contains_key("live-2"));
+            assert_eq!(t.speaker_names["live-1"], "УЧАСТНИК В");
+            assert!(!t.speaker_voice_ids.contains_key("live-2"));
+        }
+        t.voice_rejected.remove("live-2");
+        t.voice_recognitions.insert(
+            "live-2".into(),
+            notetaker_core::VoiceRecognition {
+                name: "Участник В".into(),
+                voice_id: "synthetic-voice".into(),
+                similarity_milli: 900,
+            },
+        );
+        apply_edit(&mut t, &rename("live-1", "Участник В", false));
+        assert!(!t.voice_recognitions.contains_key("live-2"));
+    }
+
     #[test]
     fn live_controls_survive_stop_without_a_late_disk_command() {
         let stop = crate::StopHandle::default();

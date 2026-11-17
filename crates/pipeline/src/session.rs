@@ -93,14 +93,14 @@ impl StopHandle {
         self.0.load(Ordering::Acquire)
     }
     pub fn name_live(&self, edit: notetaker_core::SpeakerEdit) -> bool {
-        let Some(id) = crate::live_speakers::edit_id(&edit) else {
+        let Some(_) = crate::live_speakers::edit_id(&edit) else {
             return false;
         };
         let mut edits = self.2.lock().unwrap_or_else(|e| e.into_inner());
         if self.is_stopped() {
             return false;
         }
-        edits.insert(id.to_owned(), edit);
+        edits.push(edit);
         true
     }
     pub fn stop(&self) {
