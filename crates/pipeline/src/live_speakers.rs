@@ -67,10 +67,12 @@ impl Clusters {
             .iter()
             .filter_map(|(id, c)| cosine(c, &embedding).map(|score| (id.clone(), score)))
             .max_by(|a, b| a.1.total_cmp(&b.1));
-        let id = best.filter(|(_, score)| *score >= JOIN_COSINE).map_or_else(
-            || format!("live-{}", self.centroids.len() + 1),
-            |(id, _)| id,
-        );
+        let id = match best.filter(|(_, score)| *score >= JOIN_COSINE) {
+            Some((id, _)) => id,
+            // A short utterance is too noisy to open a new speaker.
+            None if duration < UPDATE_CENTROID_MS => return "them".into(),
+            None => format!("live-{}", self.centroids.len() + 1),
+        };
         if !self.centroids.contains_key(&id) {
             self.centroids.insert(id.clone(), embedding.clone());
             self.counts.insert(id.clone(), 1);
@@ -413,6 +415,8 @@ mod tests {
         assert_eq!(c.assign(9000, 9400, None), "them");
         assert_eq!(c.assign(10000, 12000, Some(vec![1.0, 0.1])), "live-1");
         assert_eq!(c.centroids["live-1"], vec![1.0, 0.0]);
+        assert_eq!(c.assign(12100, 14000, Some(vec![-1.0, 0.0])), "them");
+        assert_eq!(c.centroids.len(), 2);
         assert_eq!(c.assign(13000, 16000, Some(vec![1.0, 0.1])), "live-1");
         assert!(c.centroids["live-1"][1] > 0.0);
     }
