@@ -2721,15 +2721,14 @@ impl AppState {
                             .segments
                             .iter()
                             .any(|s| s.id == segment.id)
+                            && !segment.text.trim().is_empty()
                         {
-                            if !segment.text.trim().is_empty() {
-                                self.recording.assist.pending.push_str(&format!(
-                                    "[{}] {}: {}\n",
-                                    timestamp(segment.start_ms),
-                                    doc.data.transcript.speaker_name(&segment.speaker.0),
-                                    segment.text
-                                ));
-                            }
+                            self.recording.assist.pending.push_str(&format!(
+                                "[{}] {}: {}\n",
+                                timestamp(segment.start_ms),
+                                doc.data.transcript.speaker_name(&segment.speaker.0),
+                                segment.text
+                            ));
                         }
                     }
                     doc.merge_live(&Transcript {
