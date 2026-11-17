@@ -560,6 +560,9 @@ impl NotetakerApp {
                     ui.data_mut(|d| d.insert_temp(id, expanded));
                     match action {
                         crate::calendar_ui::HomeAction::Start(event) => start_event = Some(event),
+                        crate::calendar_ui::HomeAction::Join(event) => {
+                            self.state.join_event(&event)
+                        }
                         crate::calendar_ui::HomeAction::Settings => calendar_settings = true,
                         crate::calendar_ui::HomeAction::None => {}
                     }
@@ -2725,6 +2728,11 @@ impl NotetakerApp {
                     self.show_main(ctx, false);
                 }
             }
+            crate::calendar_ui::Action::Join => {
+                if let Some(event) = self.state.calendar_reminder().cloned() {
+                    self.state.join_event(&event);
+                }
+            }
             crate::calendar_ui::Action::Dismiss => self.state.dismiss_calendar_reminder(),
             crate::calendar_ui::Action::None => {}
         }
@@ -2766,6 +2774,7 @@ impl NotetakerApp {
             .then(|| self.state.next_meeting(chrono::Utc::now()))
             .flatten();
         let mut accept = false;
+        let mut join = false;
         let mut dismiss = false;
         let builder = egui::ViewportBuilder::default();
         let main = self.main_rect;
@@ -2790,6 +2799,7 @@ impl NotetakerApp {
                 } else if let Some(event) = &calendar {
                     match crate::calendar_ui::reminder(ui, event, self.recording_reason()) {
                         crate::calendar_ui::Action::Start => accept = true,
+                        crate::calendar_ui::Action::Join => join = true,
                         crate::calendar_ui::Action::Dismiss => dismiss = true,
                         crate::calendar_ui::Action::None => {}
                     }
@@ -2826,6 +2836,8 @@ impl NotetakerApp {
                 ctx,
                 if accept {
                     crate::calendar_ui::Action::Start
+                } else if join {
+                    crate::calendar_ui::Action::Join
                 } else if !ending && dismiss {
                     crate::calendar_ui::Action::Dismiss
                 } else {
@@ -6122,6 +6134,7 @@ mod calendar_review_tests {
         let ctx = egui::Context::default();
         theme::install(&ctx);
         let output = crate::test_ui::frame(&ctx, vec![], &mut |ui| {
+            app.calendar_action(ui.ctx(), crate::calendar_ui::Action::Join);
             app.calendar_action(ui.ctx(), crate::calendar_ui::Action::Start);
         });
         output.drop_without_applying_deltas();
