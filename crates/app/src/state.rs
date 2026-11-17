@@ -344,7 +344,7 @@ impl Document {
         self.data.transcript.segments.sort_by_key(|s| s.start_ms);
         notetaker_pipeline::suppress_echo(&mut self.data.transcript.segments);
         self.speaker_ui.invalidate_transcript();
-        self.changed();
+        self.summary_status = None;
     }
     pub fn summary_stale(&mut self) -> bool {
         let Some(stamp) = &self.data.meta.summary else {
