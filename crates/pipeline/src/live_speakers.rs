@@ -39,6 +39,43 @@ pub(crate) fn apply_pending(transcript: &mut Transcript, edits: &Edits) {
         apply_edit(transcript, edit);
     }
 }
+/// Session-only IDs must not survive in any finished or interrupted final pass.
+pub(crate) fn clear_identities(transcript: &mut Transcript) {
+    transcript
+        .speaker_names
+        .retain(|id, _| !id.starts_with("live-"));
+    transcript
+        .voice_recognitions
+        .retain(|id, _| !id.starts_with("live-"));
+    transcript
+        .speaker_suggestions
+        .retain(|id, _| !id.starts_with("live-"));
+    transcript
+        .speaker_voice_ids
+        .retain(|id, _| !id.starts_with("live-"));
+    transcript
+        .ktalk_sources
+        .retain(|id, _| !id.starts_with("live-"));
+    transcript
+        .voice_rejected
+        .retain(|id| !id.starts_with("live-"));
+    if transcript
+        .self_speaker
+        .as_ref()
+        .is_some_and(|id| id.starts_with("live-"))
+    {
+        transcript.self_speaker = None;
+    }
+    for segment in &mut transcript.segments {
+        if segment.speaker.0.starts_with("live-") {
+            segment.speaker.0 = match segment.channel {
+                Channel::Mic => "me",
+                Channel::System => "them",
+            }
+            .into();
+        }
+    }
+}
 #[derive(Default)]
 pub(crate) struct Clusters {
     centroids: BTreeMap<String, Vec<f32>>,
@@ -403,7 +440,7 @@ pub fn apply_edit(t: &mut Transcript, edit: &SpeakerEdit) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use notetaker_core::{Library, MeetingMeta, Segment, Source, SpeakerId};
     fn segment(id: &str, start: u64, end: u64) -> Segment {
@@ -418,6 +455,66 @@ mod tests {
             edited: false,
             lang: None,
         }
+    }
+    pub(crate) fn named_live_transcript() -> Transcript {
+        let mut mic = segment("me", 7000, 10000);
+        mic.channel = Channel::Mic;
+        Transcript {
+            segments: vec![
+                segment("live-1", 0, 3000),
+                segment("live-2", 4000, 7000),
+                mic,
+            ],
+            speaker_names: BTreeMap::from([
+                ("live-1".into(), "Участник А".into()),
+                ("me".into(), "Участник М".into()),
+            ]),
+            voice_recognitions: BTreeMap::from([(
+                "live-2".into(),
+                notetaker_core::VoiceRecognition {
+                    name: "Участник Б".into(),
+                    voice_id: "synthetic-voice".into(),
+                    similarity_milli: 900,
+                },
+            )]),
+            speaker_suggestions: BTreeMap::from([("live-2".into(), "Участник Б".into())]),
+            speaker_voice_ids: BTreeMap::from([
+                ("live-1".into(), "synthetic-voice-a".into()),
+                ("me".into(), "synthetic-mic".into()),
+            ]),
+            ktalk_sources: BTreeMap::from([("live-1".into(), "synthetic-recording".into())]),
+            voice_rejected: std::collections::BTreeSet::from(["live-3".into()]),
+            self_speaker: Some("live-1".into()),
+            ..Default::default()
+        }
+    }
+    pub(crate) fn assert_no_live_identities(transcript: &Transcript) {
+        assert!(
+            transcript
+                .segments
+                .iter()
+                .all(|s| !s.speaker.0.starts_with("live-"))
+        );
+        for id in transcript
+            .speaker_names
+            .keys()
+            .chain(transcript.voice_recognitions.keys())
+            .chain(transcript.speaker_suggestions.keys())
+            .chain(transcript.speaker_voice_ids.keys())
+            .chain(transcript.ktalk_sources.keys())
+            .chain(transcript.voice_rejected.iter())
+            .chain(transcript.self_speaker.iter())
+        {
+            assert!(!id.starts_with("live-"), "stale live identity: {id}");
+        }
+        assert_eq!(transcript.speaker_names["me"], "Участник М");
+        assert_eq!(transcript.speaker_voice_ids["me"], "synthetic-mic");
+        assert!(
+            transcript
+                .segments
+                .iter()
+                .any(|s| s.channel == Channel::Mic && s.speaker.0 == "me")
+        );
     }
     #[test]
     fn alternating_voices_short_answers_and_centroid_update_floor() {

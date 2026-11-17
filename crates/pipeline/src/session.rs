@@ -172,10 +172,7 @@ impl RecordingSession {
                     worker_stop,
                     &events_tx,
                 );
-                if let Err(error) = &result {
-                    let _ = events_tx.send(PipelineEvent::Error(format!("{error:#}")));
-                }
-                result
+                finish(&worker_meeting, &events_tx, result)
             })?;
         Ok(Self {
             meeting,
@@ -204,10 +201,7 @@ impl RecordingSession {
             .spawn(move || {
                 let result =
                     crate::recover::run(&worker_meeting, asr, config, worker_stop, &events_tx);
-                if let Err(error) = &result {
-                    let _ = events_tx.send(PipelineEvent::Error(format!("{error:#}")));
-                }
-                result
+                finish(&worker_meeting, &events_tx, result)
             })?;
         Ok(Self {
             meeting,
@@ -268,10 +262,7 @@ impl RecordingSession {
                     worker_stop,
                     &events_tx,
                 );
-                if let Err(error) = &result {
-                    let _ = events_tx.send(PipelineEvent::Error(format!("{error:#}")));
-                }
-                result
+                finish(&worker_meeting, &events_tx, result)
             })?;
         Ok(Self {
             meeting,
@@ -593,10 +584,25 @@ fn record(
         fs::remove_file(meeting.mic_audio_path())?;
         fs::remove_file(meeting.system_audio_path())?;
     }
-    let _ = events.send(PipelineEvent::Finished {
-        meeting: meeting.clone(),
-    });
     Ok(())
+}
+
+fn finish(meeting: &Meeting, events: &Sender<PipelineEvent>, result: Result<()>) -> Result<()> {
+    let cleanup = meeting
+        .update_transcript(crate::live_speakers::clear_identities)
+        .map_err(Into::into);
+    let result = result.and(cleanup);
+    match &result {
+        Ok(()) => {
+            let _ = events.send(PipelineEvent::Finished {
+                meeting: meeting.clone(),
+            });
+        }
+        Err(error) => {
+            let _ = events.send(PipelineEvent::Error(format!("{error:#}")));
+        }
+    }
+    result
 }
 
 /// A single timer since sound on either channel is equivalent to requiring both
@@ -1031,6 +1037,64 @@ pub(crate) fn replace_final(existing: Vec<Segment>, final_segments: Vec<Segment>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finished_and_failed_operations_clean_identities_before_publishing() {
+        use crate::live_speakers::tests::{assert_no_live_identities, named_live_transcript};
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open(root.path()).unwrap();
+        let meeting = library
+            .create_meeting(MeetingMeta::new("Синтетическая встреча", Utc::now()))
+            .unwrap();
+        for success in [false, true] {
+            meeting.write_transcript(&named_live_transcript()).unwrap();
+            let (events, received) = mpsc::channel();
+            let result = if success {
+                Ok(())
+            } else {
+                Err(anyhow!("Распознавание отменено"))
+            };
+            assert_eq!(finish(&meeting, &events, result).is_ok(), success);
+            let event = received.try_recv().unwrap();
+            assert!(matches!(event, PipelineEvent::Finished { .. }) == success);
+            if !success {
+                assert!(matches!(event, PipelineEvent::Error(_)));
+            }
+            assert_no_live_identities(&meeting.read_transcript().unwrap());
+        }
+    }
+    #[test]
+    fn recovery_failure_before_diarization_cleans_old_live_identities() {
+        use crate::live_speakers::tests::{assert_no_live_identities, named_live_transcript};
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open(root.path()).unwrap();
+        let meeting = library
+            .create_meeting(MeetingMeta::new("Синтетическая встреча", Utc::now()))
+            .unwrap();
+        meeting.write_transcript(&named_live_transcript()).unwrap();
+        struct Unused;
+        impl Asr for Unused {
+            fn start(&mut self) -> Result<()> {
+                unreachable!()
+            }
+            fn transcribe(
+                &mut self,
+                _: AudioInput,
+                _: Channel,
+                _: u64,
+            ) -> Result<Vec<notetaker_asr_proto::Segment>> {
+                unreachable!()
+            }
+        }
+        let session = RecordingSession::retranscribe_with_asr(
+            meeting.clone(),
+            Unused,
+            RecordingConfig::default(),
+        )
+        .unwrap();
+        assert!(session.wait().is_err());
+        assert_no_live_identities(&meeting.read_transcript().unwrap());
+    }
 
     #[test]
     fn silence_timer_resets_for_either_channel_and_can_be_disabled() {

@@ -112,8 +112,5 @@ pub(crate) fn run(
         fs::remove_file(meeting.system_audio_path())?;
     }
     progress(200);
-    let _ = events.send(PipelineEvent::Finished {
-        meeting: meeting.clone(),
-    });
     Ok(())
 }
