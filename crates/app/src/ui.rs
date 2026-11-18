@@ -296,7 +296,19 @@ impl NotetakerApp {
     fn can_record(&self) -> bool {
         self.recording_reason().is_none()
     }
-    fn recording_reason(&self) -> Option<&'static str> {
+    fn recording_reason(&self) -> Option<std::borrow::Cow<'static, str>> {
+        self.recording_block()
+            .map(std::borrow::Cow::Borrowed)
+            .or_else(|| {
+                (!self.state.can_prepare_recording()).then(|| {
+                    self.state
+                        .busy_reason()
+                        .unwrap_or_else(|| "Дождитесь завершения текущей операции".into())
+                        .into()
+                })
+            })
+    }
+    fn recording_block(&self) -> Option<&'static str> {
         if let Some(reason) = self.state.permissions.blocked() {
             Some(reason)
         } else if !self.state.ready {
@@ -311,7 +323,7 @@ impl NotetakerApp {
         } else if self.state.quickstart.probe_busy {
             Some("Дождитесь проверки звука")
         } else if !self.state.can_prepare_recording() {
-            Some("Дождитесь завершения текущей операции")
+            None
         } else if !cfg!(any(windows, target_os = "macos", test)) {
             Some("Запись доступна на macOS и Windows")
         } else {
@@ -552,7 +564,7 @@ impl NotetakerApp {
                             loading: self.state.calendar_reports.is_empty()
                                 && self.state.calendar_error.is_none(),
                             now: chrono::Utc::now(),
-                            reason: recording_reason,
+                            reason: recording_reason.as_deref(),
                         },
                         &mut expanded,
                         &mut self.calendar_rows,
@@ -798,7 +810,9 @@ impl NotetakerApp {
                                 )
                                 .min_size(egui::vec2(0.0, theme::CTA_HEIGHT)),
                             )
-                            .on_disabled_hover_text(self.recording_reason().unwrap_or_default())
+                            .on_disabled_hover_text(
+                                self.recording_reason().unwrap_or_default().into_owned(),
+                            )
                             .clicked()
                     {
                         self.state.toggle_recording();
@@ -2702,7 +2716,8 @@ impl NotetakerApp {
                     // The recording status row below already shows the next meeting.
                     ending_action = crate::detection::stop_card(ui, remaining, None);
                 } else if let Some(event) = &event {
-                    action = crate::calendar_ui::reminder(ui, event, self.recording_reason());
+                    action =
+                        crate::calendar_ui::reminder(ui, event, self.recording_reason().as_deref());
                 }
             });
         self.calendar_action(ctx, action);
@@ -2797,7 +2812,11 @@ impl NotetakerApp {
                     ending_action =
                         crate::detection::stop_card(ui, countdown.remaining, next.as_ref());
                 } else if let Some(event) = &calendar {
-                    match crate::calendar_ui::reminder(ui, event, self.recording_reason()) {
+                    match crate::calendar_ui::reminder(
+                        ui,
+                        event,
+                        self.recording_reason().as_deref(),
+                    ) {
                         crate::calendar_ui::Action::Start => accept = true,
                         crate::calendar_ui::Action::Join => join = true,
                         crate::calendar_ui::Action::Dismiss => dismiss = true,
@@ -2811,7 +2830,7 @@ impl NotetakerApp {
                         ui,
                         app,
                         meeting_title.as_deref(),
-                        self.recording_reason(),
+                        self.recording_reason().as_deref(),
                     );
                     accept = response.0;
                     dismiss = response.1;

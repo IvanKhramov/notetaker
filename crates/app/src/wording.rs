@@ -50,6 +50,20 @@ pub fn short_excerpt(markdown: &str) -> String {
         .collect()
 }
 
+/// "около …" takes the genitive: около 1 минуты, около 3 минут.
+pub fn minutes_left(left: std::time::Duration) -> String {
+    let minutes = left.as_secs().div_ceil(60);
+    if minutes <= 1 {
+        return "минуты".into();
+    }
+    let form = if minutes % 10 == 1 && minutes % 100 != 11 {
+        "минуты"
+    } else {
+        "минут"
+    };
+    format!("{minutes} {form}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,5 +125,14 @@ mod tests {
         assert_eq!(audio_status(true, Some(expiry)), "Аудио хранится до 22.11");
         assert_eq!(audio_status(false, Some(expiry)), "Аудио не хранится");
         assert_eq!(audio_status(false, None), "Аудио не хранится");
+    }
+    #[test]
+    fn minutes_left_uses_genitive() {
+        use std::time::Duration;
+        let m = |s| super::minutes_left(Duration::from_secs(s));
+        assert_eq!(m(20), "минуты");
+        assert_eq!(m(150), "3 минут");
+        assert_eq!(m(21 * 60), "21 минуты");
+        assert_eq!(m(11 * 60), "11 минут");
     }
 }

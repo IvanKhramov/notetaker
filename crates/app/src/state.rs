@@ -57,6 +57,8 @@ pub struct Recording {
     pub fallback: bool,
     pub capture_incomplete: bool,
     pub progress: Option<(usize, usize)>,
+    /// First final-pass progress seen and when, to estimate the time left.
+    progress_origin: Option<(Instant, usize)>,
     pub messages: VecDeque<String>,
     /// Latest peak of the microphone and of the system audio, 0..1.
     pub levels: [f32; 2],
@@ -131,6 +133,39 @@ impl Recording {
                 .flatten(),
         })
     }
+    /// Time left in the final pass, from the pace since the first progress event.
+    pub fn remaining(&self) -> Option<Duration> {
+        let (done, total) = self.progress?;
+        let (since, first) = self.progress_origin?;
+        let advanced = done.checked_sub(first).filter(|n| *n > 0)? as u32;
+        Some(since.elapsed() / advanced * total.saturating_sub(done) as u32)
+    }
+    /// Why a new recording cannot start right now, in the user's words.
+    pub fn busy_reason(&self) -> Option<String> {
+        let text = match self.phase {
+            Phase::Idle => return None,
+            Phase::Starting | Phase::Recording if self.importing => "Идёт импорт аудиофайла".into(),
+            Phase::Starting | Phase::Recording => {
+                "Идёт запись. Новая начнётся после её остановки".into()
+            }
+            Phase::Finalizing => {
+                let mut text = format!(
+                    "Распознаю предыдущую запись{}",
+                    self.progress
+                        .map(|(done, total)| format!(": {done} из {total}"))
+                        .unwrap_or_default()
+                );
+                if let Some(left) = self.remaining() {
+                    text.push_str(&format!(
+                        ", осталось около {}",
+                        crate::wording::minutes_left(left)
+                    ));
+                }
+                text
+            }
+        };
+        Some(text)
+    }
     pub fn message(&mut self, text: String) {
         if self.messages.len() == 8 {
             self.messages.pop_front();
@@ -168,6 +203,8 @@ impl Recording {
                 }
                 self.phase = Phase::Finalizing;
                 self.progress = Some((*completed, *total));
+                self.progress_origin
+                    .get_or_insert_with(|| (Instant::now(), *completed));
             }
             PipelineEvent::CaptureEvent(CaptureEvent::Fallback { .. }) => {
                 self.fallback = true;
@@ -898,6 +935,32 @@ impl AppState {
             self.title = title.clone();
             self.prefilled_title = Some(title.clone());
         }
+    }
+    /// The specific operation that blocks a new recording or import.
+    pub fn busy_reason(&self) -> Option<String> {
+        if let Some(reason) = self.recording.busy_reason() {
+            return Some(reason);
+        }
+        let reason = if self.settings_pending {
+            "Сохраняю настройки"
+        } else if self.exit_requested {
+            "Приложение закрывается"
+        } else if self.quickstart.probe_busy {
+            "Идёт проверка звука"
+        } else if self.draft_busy {
+            "Готовлю черновик"
+        } else if self.recording.assist.bookmarks_pending > 0 {
+            "Сохраняю закладки"
+        } else if self
+            .documents
+            .values()
+            .any(|document| document.speaker_ui.recalculating)
+        {
+            "Пересчитываю собеседников"
+        } else {
+            return None;
+        };
+        Some(reason.into())
     }
     pub fn can_prepare_recording(&self) -> bool {
         self.can_prepare_audio(true)
@@ -4438,6 +4501,33 @@ mod tests {
         assert_eq!(state.warnings, ["Изображение больше 20 МБ"]);
     }
 
+    #[test]
+    fn busy_reason_names_the_final_pass_and_time_left() {
+        let mut recording = Recording::default();
+        assert_eq!(recording.busy_reason(), None);
+        recording.phase = Phase::Recording;
+        assert!(recording.busy_reason().unwrap().starts_with("Идёт запись"));
+        recording.apply(&PipelineEvent::FinalPassProgress {
+            completed: 1,
+            total: 5,
+        });
+        assert_eq!(
+            recording.busy_reason().as_deref(),
+            Some("Распознаю предыдущую запись: 1 из 5")
+        );
+        recording.progress_origin = Some((Instant::now() - Duration::from_secs(120), 1));
+        recording.apply(&PipelineEvent::FinalPassProgress {
+            completed: 3,
+            total: 5,
+        });
+        assert_eq!(
+            recording.busy_reason().as_deref(),
+            Some("Распознаю предыдущую запись: 3 из 5, осталось около 2 минут")
+        );
+        let (mut state, _commands, _dir, _path) = fixture();
+        state.settings_pending = true;
+        assert_eq!(state.busy_reason().as_deref(), Some("Сохраняю настройки"));
+    }
     #[test]
     fn final_progress_does_not_override_navigation_after_initial_transition() {
         let (mut state, _commands, _root, path) = fixture();
