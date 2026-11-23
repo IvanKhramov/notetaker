@@ -235,12 +235,13 @@ impl Prosody {
         by_start
             .into_iter()
             .filter_map(|s| {
-                let raw = self.segments.get(&s.id)?;
                 let baseline = baselines.get(s.speaker.0.as_str())?;
-                let mut markers = if s.end_ms.saturating_sub(s.start_ms) >= MIN_METRIC_MS {
-                    metric_markers(raw, baseline)
-                } else {
-                    Vec::new()
+                // Short segments have no measurements but may still interrupt.
+                let mut markers = match self.segments.get(&s.id) {
+                    Some(raw) if s.end_ms.saturating_sub(s.start_ms) >= MIN_METRIC_MS => {
+                        metric_markers(raw, baseline)
+                    }
+                    _ => Vec::new(),
                 };
                 if let Some(&(speaker, overlap)) = interruptions.get(&s.id) {
                     let name = transcript.speaker_name(speaker);
@@ -273,7 +274,7 @@ fn utterances<'a>(by_start: &[&'a Segment]) -> Vec<Utterance<'a>> {
         let speaker = s.speaker.0.as_str();
         if let Some(&index) = open.get(speaker) {
             let utterance = &mut result[index];
-            if s.start_ms <= utterance.end_ms + UTTERANCE_GAP_MS {
+            if s.start_ms.saturating_sub(utterance.end_ms) <= UTTERANCE_GAP_MS {
                 utterance.end_ms = utterance.end_ms.max(s.end_ms);
                 continue;
             }
@@ -556,6 +557,8 @@ mod tests {
             ("a", 57_000, 60_000),
             ("b", 58_000, 61_000)
         ]));
+        // A short first segment has no measurements but still carries the marker.
+        assert!(interrupted(&[("b", 58_000, 60_500), ("a", 59_900, 61_000)]));
     }
 
     #[test]
