@@ -602,7 +602,7 @@ pub(crate) fn checked_write(path: &Path, bytes: &[u8], expected: Revision) -> Re
     PreparedWrite::new(path, bytes)?.checked_persist(path, bytes, expected)
 }
 
-fn read_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
+pub(crate) fn read_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
     match fs::read(path) {
         Ok(bytes) => Ok(Some(bytes)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),

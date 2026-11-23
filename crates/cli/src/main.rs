@@ -7,6 +7,7 @@ mod cmd_ktalk;
 mod cmd_mcp;
 mod cmd_people;
 mod cmd_probe;
+mod cmd_prosody;
 mod cmd_record;
 mod cmd_rediarize;
 mod cmd_search;
@@ -60,6 +61,8 @@ enum Command {
     Transcribe(cmd_transcribe::Args),
     /// Reassign speakers in an existing meeting from retained system audio.
     Rediarize(cmd_rediarize::Args),
+    /// Пересчитать просодию по сохранённому аудио и показать отклонения.
+    Prosody(cmd_prosody::Args),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -88,5 +91,6 @@ fn main() -> anyhow::Result<()> {
         Command::Record(args) => cmd_record::run(args),
         Command::Transcribe(args) => cmd_transcribe::run(args),
         Command::Rediarize(args) => cmd_rediarize::run(args),
+        Command::Prosody(args) => cmd_prosody::run(args),
     }
 }

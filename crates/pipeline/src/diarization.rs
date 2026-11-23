@@ -172,7 +172,7 @@ pub(crate) fn final_pass(
     config: &DiarizationConfig,
     events: &Sender<PipelineEvent>,
     live: Option<(&crate::live_speakers::Clusters, &Transcript)>,
-) {
+) -> Option<Diarization> {
     let warning = |error: anyhow::Error| {
         let _ = events.send(PipelineEvent::Warning(format!(
             "Разделение собеседников: {error:#}"
@@ -180,10 +180,10 @@ pub(crate) fn final_pass(
     };
     if let Err(error) = meeting.update_transcript(crate::live_speakers::clear_identities) {
         warning(error.into());
-        return;
+        return None;
     }
     if !config.enabled {
-        return;
+        return None;
     }
     let mut result = match asr.diarize(
         system,
@@ -193,7 +193,7 @@ pub(crate) fn final_pass(
         Ok(result) => result,
         Err(error) => {
             warning(error);
-            return;
+            return None;
         }
     };
     let mut suggestions = BTreeMap::<String, String>::new();
@@ -299,6 +299,7 @@ pub(crate) fn final_pass(
             warning(error);
         }
     }
+    Some(result)
 }
 
 #[cfg(test)]

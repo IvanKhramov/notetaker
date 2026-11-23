@@ -24,6 +24,7 @@ pub use semantic::{
 };
 mod model;
 mod paths;
+pub mod prosody;
 pub use paths::{display_path, display_text};
 mod speakers;
 mod storage;
@@ -64,6 +65,8 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error("unsupported transcript schema version {0}")]
     UnsupportedVersion(u32),
+    #[error("unsupported prosody schema version {0}")]
+    UnsupportedProsodyVersion(u32),
     #[error("SQLite index operation failed: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("Conflict: {path} changed on disk; local version saved to {local}")]
