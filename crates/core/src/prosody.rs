@@ -19,6 +19,7 @@ pub mod thresholds {
     pub const MIN_INTERRUPTION_OVERLAP_MS: u64 = 300;
     pub const INTERRUPTION_WINDOW_MS: u64 = 1_500;
     pub const MIN_INTERRUPTER_MS: u64 = 1_000;
+    pub const UTTERANCE_GAP_MS: u64 = 500;
 
     pub const FRAME_MS: usize = 40;
     pub const MIN_SPEECH_DBFS: f32 = -50.0;
@@ -242,11 +243,11 @@ impl Prosody {
                 } else {
                     Vec::new()
                 };
-                if let Some(previous) = interrupted(s, &by_end) {
+                if let Some((previous, end)) = interrupted(s, &by_end) {
                     let name = transcript.speaker_name(&previous.speaker.0);
                     markers.push(Marker {
                         label: format!("перебивает спикера «{name}»"),
-                        detail: format!("пересечение {} мс", previous.end_ms - s.start_ms),
+                        detail: format!("пересечение {} мс", end - s.start_ms),
                     });
                 }
                 (!markers.is_empty()).then_some((s.id, markers))
@@ -255,31 +256,44 @@ impl Prosody {
     }
 }
 
-fn interrupted<'a>(s: &Segment, by_end: &[&'a Segment]) -> Option<&'a Segment> {
+/// End of the continuous utterance that contains `segment`. ASR may split one
+/// utterance into same-speaker segments separated by a short gap.
+fn utterance_end(segment: &Segment, by_end: &[&Segment]) -> u64 {
+    let mut end = segment.end_ms;
+    while let Some(next) = by_end
+        .iter()
+        .filter(|next| {
+            next.speaker == segment.speaker
+                && next.start_ms <= end + UTTERANCE_GAP_MS
+                && next.end_ms > end
+        })
+        .map(|next| next.end_ms)
+        .max()
+    {
+        end = next;
+    }
+    end
+}
+
+/// The interrupted segment and the end of its utterance.
+fn interrupted<'a>(s: &Segment, by_end: &[&'a Segment]) -> Option<(&'a Segment, u64)> {
     if s.end_ms.saturating_sub(s.start_ms) < MIN_INTERRUPTER_MS {
         return None;
     }
-    let first = by_end.partition_point(|other| {
-        other.end_ms.saturating_sub(s.start_ms) < MIN_INTERRUPTION_OVERLAP_MS
-    });
+    // A candidate is still speaking or pauses briefly when the interrupter starts.
+    let first = by_end.partition_point(|other| other.end_ms + UTTERANCE_GAP_MS <= s.start_ms);
     by_end[first..]
         .iter()
         .copied()
-        .take_while(|other| other.end_ms - s.start_ms <= INTERRUPTION_WINDOW_MS)
-        .filter(|other| {
-            other.start_ms < s.start_ms && other.end_ms <= s.end_ms && other.speaker != s.speaker
+        .take_while(|other| other.end_ms <= s.start_ms + INTERRUPTION_WINDOW_MS)
+        .filter(|other| other.start_ms < s.start_ms && other.speaker != s.speaker)
+        .map(|other| (other, utterance_end(other, by_end)))
+        .filter(|&(_, end)| {
+            let overlap = end.saturating_sub(s.start_ms);
+            (MIN_INTERRUPTION_OVERLAP_MS..=INTERRUPTION_WINDOW_MS).contains(&overlap)
+                && end <= s.end_ms
         })
-        // ASR may split one utterance: the speaker did not stop if another of
-        // their segments goes on during the interrupter's segment.
-        .filter(|other| {
-            !by_end.iter().any(|next| {
-                next.speaker == other.speaker
-                    && next.id != other.id
-                    && next.start_ms < s.end_ms
-                    && next.end_ms > other.end_ms
-            })
-        })
-        .max_by_key(|other| other.end_ms)
+        .max_by_key(|&(_, end)| end)
 }
 
 fn metric_markers(raw: &SegmentProsody, baseline: &[Option<MetricBaseline>; 4]) -> Vec<Marker> {
@@ -522,6 +536,16 @@ mod tests {
             .segments
             .push(segment("b", Channel::System, 60_400, 65_000));
         assert!(!prosody.annotated_text(&transcript).contains("перебивает"));
+        transcript.segments.pop();
+        // A split utterance that ends inside the window is still interrupted.
+        transcript
+            .segments
+            .push(segment("b", Channel::System, 60_300, 61_000));
+        assert!(
+            prosody
+                .annotated_text(&transcript)
+                .contains("перебивает спикера «Никита»")
+        );
         transcript.segments.pop();
 
         let b = &mut transcript.segments[5];
