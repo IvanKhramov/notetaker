@@ -269,6 +269,16 @@ fn interrupted<'a>(s: &Segment, by_end: &[&'a Segment]) -> Option<&'a Segment> {
         .filter(|other| {
             other.start_ms < s.start_ms && other.end_ms <= s.end_ms && other.speaker != s.speaker
         })
+        // ASR may split one utterance: the speaker did not stop if another of
+        // their segments goes on during the interrupter's segment.
+        .filter(|other| {
+            !by_end.iter().any(|next| {
+                next.speaker == other.speaker
+                    && next.id != other.id
+                    && next.start_ms < s.end_ms
+                    && next.end_ms > other.end_ms
+            })
+        })
         .max_by_key(|other| other.end_ms)
 }
 
@@ -507,6 +517,12 @@ mod tests {
                 .annotated_text(&transcript)
                 .contains("перебивает спикера «Никита»")
         );
+        // ASR split Никита's utterance: he goes on talking, so no interruption.
+        transcript
+            .segments
+            .push(segment("b", Channel::System, 60_400, 65_000));
+        assert!(!prosody.annotated_text(&transcript).contains("перебивает"));
+        transcript.segments.pop();
 
         let b = &mut transcript.segments[5];
         b.channel = Channel::System;
