@@ -124,7 +124,10 @@ fn measure(
             };
             let start = sample_index(s.start_ms, reader.duration());
             let end = sample_index(s.end_ms, reader.duration());
-            if !raw.same_channel_overlap && end > start {
+            // Without diarization turns overlap on the system track is unknown,
+            // so its mixed audio must not count as one person's voice.
+            let overlap_known = channel == Channel::Mic || !system_turns.is_empty();
+            if overlap_known && !raw.same_channel_overlap && end > start {
                 reader.seek(start)?;
                 let count = (end - start) as usize;
                 let sound = match spec.sample_format {
@@ -317,5 +320,14 @@ mod tests {
         assert!(mixed.same_channel_overlap);
         assert!(mixed.loudness_dbfs.is_none() && mixed.f0_hz.is_none());
         assert!(mixed.chars_per_second.is_some());
+
+        // No diarization turns: overlap is unknown, so no system acoustics.
+        recompute_prosody(&meeting, |_, _| Ok(Vec::new())).unwrap();
+        let prosody = meeting.read_prosody().unwrap().unwrap();
+        for segment in &transcript.segments {
+            let raw = &prosody.segments[&segment.id];
+            assert!(raw.loudness_dbfs.is_none() && raw.f0_hz.is_none());
+            assert!(raw.chars_per_second.is_some());
+        }
     }
 }

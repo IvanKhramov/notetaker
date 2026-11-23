@@ -107,10 +107,12 @@ struct Marker {
     detail: String,
 }
 
-fn speaker_known(segment: &Segment) -> bool {
-    // "them" is the unresolved system track. Rediarize may append underscores
-    // to avoid a collision with a mic identity.
-    segment.channel == Channel::Mic || segment.speaker.0.trim_end_matches('_') != "them"
+fn speaker_known(transcript: &Transcript, segment: &Segment) -> bool {
+    // "them" is the unresolved system track unless the user named it.
+    // Rediarize may append underscores to avoid a collision with a mic identity.
+    segment.channel == Channel::Mic
+        || segment.speaker.0.trim_end_matches('_') != "them"
+        || transcript.speaker_names.contains_key(&segment.speaker.0)
 }
 
 impl Prosody {
@@ -161,7 +163,7 @@ impl Prosody {
         let mut by_start: Vec<_> = transcript
             .segments
             .iter()
-            .filter(|s| speaker_known(s))
+            .filter(|s| speaker_known(transcript, s))
             .collect();
         by_start.sort_by_key(|s| s.start_ms);
         let mut baselines = HashMap::<&str, Baseline>::new();
@@ -354,6 +356,23 @@ mod tests {
         transcript.segments[0].end_ms += 1;
         prosody.segments.remove(&transcript.segments[4].id);
         assert_eq!(prosody.annotated_text(&transcript), transcript.named_text());
+    }
+
+    #[test]
+    fn unresolved_system_speaker_counts_only_once_named() {
+        let (mut transcript, prosody) = fixture();
+        transcript.speaker_names.clear();
+        for s in &mut transcript.segments {
+            s.speaker = SpeakerId("them".into());
+            s.channel = Channel::System;
+        }
+        assert_eq!(prosody.annotated_text(&transcript), transcript.named_text());
+        transcript.rename_speaker("them", "Анна");
+        assert!(
+            prosody
+                .annotated_text(&transcript)
+                .contains("Анна [заметно громче своей нормы")
+        );
     }
 
     #[test]
