@@ -231,8 +231,7 @@ impl Prosody {
                     .then_some((speaker, metrics))
             })
             .collect();
-        let mut by_end = by_start.clone();
-        by_end.sort_by_key(|s| s.end_ms);
+        let interruptions = interruptions(&utterances(&by_start));
         by_start
             .into_iter()
             .filter_map(|s| {
@@ -243,11 +242,11 @@ impl Prosody {
                 } else {
                     Vec::new()
                 };
-                if let Some((previous, end)) = interrupted(s, &by_end) {
-                    let name = transcript.speaker_name(&previous.speaker.0);
+                if let Some(&(speaker, overlap)) = interruptions.get(&s.id) {
+                    let name = transcript.speaker_name(speaker);
                     markers.push(Marker {
                         label: format!("перебивает спикера «{name}»"),
-                        detail: format!("пересечение {} мс", end - s.start_ms),
+                        detail: format!("пересечение {overlap} мс"),
                     });
                 }
                 (!markers.is_empty()).then_some((s.id, markers))
@@ -256,44 +255,62 @@ impl Prosody {
     }
 }
 
-/// End of the continuous utterance that contains `segment`. ASR may split one
-/// utterance into same-speaker segments separated by a short gap.
-fn utterance_end(segment: &Segment, by_end: &[&Segment]) -> u64 {
-    let mut end = segment.end_ms;
-    while let Some(next) = by_end
-        .iter()
-        .filter(|next| {
-            next.speaker == segment.speaker
-                && next.start_ms <= end + UTTERANCE_GAP_MS
-                && next.end_ms > end
-        })
-        .map(|next| next.end_ms)
-        .max()
-    {
-        end = next;
-    }
-    end
+/// One speaker's continuous speech. ASR may split it into segments separated
+/// by short gaps.
+struct Utterance<'a> {
+    speaker: &'a str,
+    start_ms: u64,
+    end_ms: u64,
+    first_segment: Uuid,
 }
 
-/// The interrupted segment and the end of its utterance.
-fn interrupted<'a>(s: &Segment, by_end: &[&'a Segment]) -> Option<(&'a Segment, u64)> {
-    if s.end_ms.saturating_sub(s.start_ms) < MIN_INTERRUPTER_MS {
-        return None;
+/// Merge same-speaker segments with a gap of at most `UTTERANCE_GAP_MS`.
+/// `by_start` is sorted by start time, so the result is too.
+fn utterances<'a>(by_start: &[&'a Segment]) -> Vec<Utterance<'a>> {
+    let mut result: Vec<Utterance<'a>> = Vec::new();
+    let mut open = HashMap::<&str, usize>::new();
+    for s in by_start {
+        let speaker = s.speaker.0.as_str();
+        if let Some(&index) = open.get(speaker) {
+            let utterance = &mut result[index];
+            if s.start_ms <= utterance.end_ms + UTTERANCE_GAP_MS {
+                utterance.end_ms = utterance.end_ms.max(s.end_ms);
+                continue;
+            }
+        }
+        open.insert(speaker, result.len());
+        result.push(Utterance {
+            speaker,
+            start_ms: s.start_ms,
+            end_ms: s.end_ms,
+            first_segment: s.id,
+        });
     }
-    // A candidate is still speaking or pauses briefly when the interrupter starts.
-    let first = by_end.partition_point(|other| other.end_ms + UTTERANCE_GAP_MS <= s.start_ms);
-    by_end[first..]
-        .iter()
-        .copied()
-        .take_while(|other| other.end_ms <= s.start_ms + INTERRUPTION_WINDOW_MS)
-        .filter(|other| other.start_ms < s.start_ms && other.speaker != s.speaker)
-        .map(|other| (other, utterance_end(other, by_end)))
-        .filter(|&(_, end)| {
-            let overlap = end.saturating_sub(s.start_ms);
-            (MIN_INTERRUPTION_OVERLAP_MS..=INTERRUPTION_WINDOW_MS).contains(&overlap)
-                && end <= s.end_ms
-        })
-        .max_by_key(|&(_, end)| end)
+    result
+}
+
+/// For the first segment of each interrupting utterance: the interrupted
+/// speaker and the overlap. B starts while A speaks, A's utterance ends
+/// 300..1500 ms later and not after B's, and B is not a short backchannel.
+fn interruptions<'a>(utterances: &[Utterance<'a>]) -> HashMap<Uuid, (&'a str, u64)> {
+    let mut result = HashMap::new();
+    for (index, b) in utterances.iter().enumerate() {
+        if b.end_ms.saturating_sub(b.start_ms) < MIN_INTERRUPTER_MS {
+            continue;
+        }
+        let interrupted = utterances[..index]
+            .iter()
+            .filter(|a| a.speaker != b.speaker && a.start_ms < b.start_ms && a.end_ms <= b.end_ms)
+            .map(|a| (a, a.end_ms.saturating_sub(b.start_ms)))
+            .filter(|&(_, overlap)| {
+                (MIN_INTERRUPTION_OVERLAP_MS..=INTERRUPTION_WINDOW_MS).contains(&overlap)
+            })
+            .max_by_key(|&(a, _)| a.end_ms);
+        if let Some((a, overlap)) = interrupted {
+            result.insert(b.first_segment, (a.speaker, overlap));
+        }
+    }
+    result
 }
 
 fn metric_markers(raw: &SegmentProsody, baseline: &[Option<MetricBaseline>; 4]) -> Vec<Marker> {
@@ -519,8 +536,31 @@ mod tests {
     }
 
     #[test]
+    fn interruptions_use_utterances_not_asr_segments() {
+        let interrupted = |extra: &[(&str, u64, u64)]| {
+            let (mut transcript, prosody) = fixture();
+            transcript.rename_speaker("b", "Никита");
+            for &(speaker, start, end) in extra {
+                transcript
+                    .segments
+                    .push(segment(speaker, Channel::System, start, end));
+            }
+            prosody.annotated_text(&transcript).contains("перебивает")
+        };
+        // Алёна starts at 60 s. A gap of exactly 500 ms keeps Никита's utterance whole.
+        assert!(interrupted(&[("b", 56_500, 59_500), ("b", 60_000, 61_200)]));
+        // An 800 ms pause ends the utterance: Никита stopped, a later restart is new speech.
+        assert!(interrupted(&[("b", 58_000, 60_500), ("b", 61_300, 63_000)]));
+        // Алёна was already speaking before Никита: her later ASR segment is no interruption.
+        assert!(!interrupted(&[
+            ("a", 57_000, 60_000),
+            ("b", 58_000, 61_000)
+        ]));
+    }
+
+    #[test]
     fn interruption_requires_overlap_a_quick_exit_and_a_non_backchannel() {
-        let (mut transcript, prosody) = fixture();
+        let (mut transcript, mut prosody) = fixture();
         transcript.rename_speaker("b", "Никита");
         let a = segment("b", Channel::System, 59_000, 60_299);
         transcript.segments.insert(4, a);
@@ -557,10 +597,20 @@ mod tests {
         );
         let b = &mut transcript.segments[5];
         b.end_ms = b.start_ms + MIN_INTERRUPTER_MS - 1;
-        // Keep enough audio from this speaker for the duration threshold.
+        // Keep enough audio from this speaker for the duration threshold, with
+        // gaps so her earlier segments stay separate utterances.
         for segment in &mut transcript.segments[..4] {
-            segment.end_ms = segment.start_ms + 15_000;
+            segment.end_ms = segment.start_ms + 14_000;
         }
+        let extra = segment("a", Channel::Mic, 80_000, 90_000);
+        prosody.segments.insert(
+            extra.id,
+            SegmentProsody {
+                loudness_dbfs: Some(-30.0),
+                ..Default::default()
+            },
+        );
+        transcript.segments.push(extra);
         let text = prosody.annotated_text(&transcript);
         assert!(!text.contains("быстрее обычного"));
         assert!(!text.contains("перебивает"));
