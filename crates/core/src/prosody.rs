@@ -7,14 +7,17 @@ use uuid::Uuid;
 use crate::{Channel, Error, Meeting, Result, Segment, Transcript, storage};
 
 pub mod thresholds {
-    pub const MIN_TEMPO_MS: u64 = 1_500;
+    pub const MIN_METRIC_MS: u64 = 3_000;
     pub const MIN_BASELINE_SEGMENTS: usize = 5;
     pub const MIN_BASELINE_MS: u64 = 60_000;
     pub const LOUDNESS_DELTA_DB: f32 = 6.0;
     pub const PITCH_DELTA_ST: f32 = 3.0;
     pub const PITCH_SPREAD_DELTA_ST: f32 = 3.0;
     pub const TEMPO_RATIO: f32 = 1.3;
-    pub const INTERRUPTION_WINDOW_MS: u64 = 500;
+    pub const MAD_SCALE: f32 = 1.4826;
+    pub const MAD_SIGMAS: f32 = 3.0;
+    pub const MIN_INTERRUPTION_OVERLAP_MS: u64 = 300;
+    pub const INTERRUPTION_WINDOW_MS: u64 = 1_500;
     pub const MIN_INTERRUPTER_MS: u64 = 1_000;
 
     pub const FRAME_MS: usize = 40;
@@ -22,6 +25,7 @@ pub mod thresholds {
     pub const MIN_VOICED_FRAMES: usize = 3;
     pub const MIN_F0_HZ: usize = 60;
     pub const MAX_F0_HZ: usize = 500;
+    pub const MAX_FRAME_F0_RATIO: f32 = 1.8;
     pub const YIN_THRESHOLD: f32 = 0.15;
 }
 use thresholds::*;
@@ -102,6 +106,30 @@ struct Baseline {
     end_ms: u64,
 }
 
+#[derive(Clone, Copy)]
+struct MetricBaseline {
+    median: f32,
+    scaled_mad: f32,
+}
+
+impl MetricBaseline {
+    fn from_samples(mut samples: Vec<f32>) -> Option<Self> {
+        if samples.len() < MIN_BASELINE_SEGMENTS {
+            return None;
+        }
+        samples.sort_unstable_by(f32::total_cmp);
+        let median = quantile(&samples, 0.5);
+        for sample in &mut samples {
+            *sample = (*sample - median).abs();
+        }
+        samples.sort_unstable_by(f32::total_cmp);
+        Some(Self {
+            median,
+            scaled_mad: MAD_SCALE * quantile(&samples, 0.5),
+        })
+    }
+}
+
 struct Marker {
     label: String,
     detail: String,
@@ -144,11 +172,16 @@ impl Prosody {
                         })
                         .collect::<Vec<_>>()
                         .join(", ");
-                    Some(format!(
+                    let line = format!(
                         "[{}] {name} [{labels}]: {}",
                         &time[..time.len() - 4],
                         segment.text
-                    ))
+                    );
+                    Some(if diagnostics {
+                        line.replace(['\r', '\n'], " ")
+                    } else {
+                        line
+                    })
                 } else if diagnostics {
                     None
                 } else {
@@ -168,6 +201,10 @@ impl Prosody {
         by_start.sort_by_key(|s| s.start_ms);
         let mut baselines = HashMap::<&str, Baseline>::new();
         for s in &by_start {
+            // Older sidecars may still contain measurements for short segments.
+            if s.end_ms.saturating_sub(s.start_ms) < MIN_METRIC_MS {
+                continue;
+            }
             let Some(raw) = self.segments.get(&s.id) else {
                 continue;
             };
@@ -182,18 +219,17 @@ impl Prosody {
                 samples.extend(value);
             }
         }
-        baselines.retain(|_, baseline| {
-            baseline.duration_ms >= MIN_BASELINE_MS
-                && baseline
-                    .values
+        let baselines: HashMap<_, _> = baselines
+            .into_iter()
+            .filter(|(_, baseline)| baseline.duration_ms >= MIN_BASELINE_MS)
+            .filter_map(|(speaker, baseline)| {
+                let metrics = baseline.values.map(MetricBaseline::from_samples);
+                metrics
                     .iter()
-                    .any(|values| values.len() >= MIN_BASELINE_SEGMENTS)
-        });
-        for baseline in baselines.values_mut() {
-            for values in &mut baseline.values {
-                values.sort_by(f32::total_cmp);
-            }
-        }
+                    .any(Option::is_some)
+                    .then_some((speaker, metrics))
+            })
+            .collect();
         let mut by_end = by_start.clone();
         by_end.sort_by_key(|s| s.end_ms);
         by_start
@@ -201,7 +237,11 @@ impl Prosody {
             .filter_map(|s| {
                 let raw = self.segments.get(&s.id)?;
                 let baseline = baselines.get(s.speaker.0.as_str())?;
-                let mut markers = metric_markers(raw, baseline);
+                let mut markers = if s.end_ms.saturating_sub(s.start_ms) >= MIN_METRIC_MS {
+                    metric_markers(raw, baseline)
+                } else {
+                    Vec::new()
+                };
                 if let Some(previous) = interrupted(s, &by_end) {
                     let name = transcript.speaker_name(&previous.speaker.0);
                     markers.push(Marker {
@@ -219,45 +259,51 @@ fn interrupted<'a>(s: &Segment, by_end: &[&'a Segment]) -> Option<&'a Segment> {
     if s.end_ms.saturating_sub(s.start_ms) < MIN_INTERRUPTER_MS {
         return None;
     }
-    let first = by_end.partition_point(|other| other.end_ms <= s.start_ms);
+    let first = by_end.partition_point(|other| {
+        other.end_ms.saturating_sub(s.start_ms) < MIN_INTERRUPTION_OVERLAP_MS
+    });
     by_end[first..]
         .iter()
         .copied()
         .take_while(|other| other.end_ms - s.start_ms <= INTERRUPTION_WINDOW_MS)
-        .filter(|other| other.start_ms < s.start_ms && other.speaker != s.speaker)
+        .filter(|other| {
+            other.start_ms < s.start_ms && other.end_ms <= s.end_ms && other.speaker != s.speaker
+        })
         .max_by_key(|other| other.end_ms)
 }
 
-fn metric_markers(raw: &SegmentProsody, baseline: &Baseline) -> Vec<Marker> {
+fn metric_markers(raw: &SegmentProsody, baseline: &[Option<MetricBaseline>; 4]) -> Vec<Marker> {
     let definitions = [
         (
             LOUDNESS_DELTA_DB,
             "заметно громче своей нормы",
-            "заметно тише своей нормы",
+            Some("заметно тише своей нормы"),
         ),
-        (PITCH_DELTA_ST, "голос выше обычного", "голос ниже обычного"),
+        (
+            PITCH_DELTA_ST,
+            "голос выше обычного",
+            Some("голос ниже обычного"),
+        ),
         (
             PITCH_SPREAD_DELTA_ST,
             "шире диапазон высоты голоса",
-            "уже диапазон высоты голоса",
+            Some("уже диапазон высоты голоса"),
         ),
-        (TEMPO_RATIO.ln(), "быстрее обычного", "медленнее обычного"),
+        (TEMPO_RATIO.ln(), "быстрее обычного", None),
     ];
     raw.values()
         .into_iter()
-        .zip(&baseline.values)
+        .zip(baseline)
         .zip(definitions)
         .enumerate()
-        .filter_map(|(i, ((value, samples), (threshold, high, low)))| {
+        .filter_map(|(i, ((value, baseline), (threshold, high, low)))| {
             let value = value?;
-            if samples.len() < MIN_BASELINE_SEGMENTS {
-                return None;
-            }
-            let median = quantile(samples, 0.5);
+            let &MetricBaseline { median, scaled_mad } = baseline.as_ref()?;
             let delta = value - median;
-            if delta.abs() < threshold {
+            if delta.abs() <= threshold.max(MAD_SIGMAS * scaled_mad) {
                 return None;
             }
+            let label = if delta > 0.0 { high } else { low? };
             let (value, median, unit) = match i {
                 0 => (value, median, "дБFS"),
                 1 => (
@@ -269,7 +315,7 @@ fn metric_markers(raw: &SegmentProsody, baseline: &Baseline) -> Vec<Marker> {
                 _ => (value.exp(), median.exp(), "симв/с"),
             };
             Some(Marker {
-                label: if delta > 0.0 { high } else { low }.into(),
+                label: label.into(),
                 detail: format!("{value:.1} / {median:.1} {unit}"),
             })
         })
@@ -359,6 +405,64 @@ mod tests {
     }
 
     #[test]
+    fn short_segments_from_older_sidecars_do_not_count_toward_baselines() {
+        let (mut transcript, prosody) = fixture();
+        transcript.segments[0].end_ms = MIN_METRIC_MS - 1;
+        transcript.segments[1].start_ms = 3_000;
+        transcript.segments[1].end_ms = 29_000;
+        assert_eq!(prosody.annotated_text(&transcript), transcript.named_text());
+    }
+
+    #[test]
+    fn adapts_to_the_speakers_natural_variation() {
+        let (transcript, mut prosody) = fixture();
+        for (segment, db) in transcript
+            .segments
+            .iter()
+            .zip([-42.0, -36.0, -30.0, -24.0, -18.0])
+        {
+            prosody.segments.insert(
+                segment.id,
+                SegmentProsody {
+                    loudness_dbfs: Some(db),
+                    ..Default::default()
+                },
+            );
+        }
+        assert_eq!(prosody.annotated_text(&transcript), transcript.named_text());
+        prosody
+            .segments
+            .get_mut(&transcript.segments[4].id)
+            .unwrap()
+            .loudness_dbfs = Some(-2.0);
+        assert!(
+            prosody
+                .diagnostic_text(&transcript)
+                .contains("заметно громче")
+        );
+    }
+
+    #[test]
+    fn only_fast_tempo_is_marked() {
+        let (transcript, mut prosody) = fixture();
+        for segment in &transcript.segments {
+            prosody.segments.insert(
+                segment.id,
+                SegmentProsody {
+                    chars_per_second: Some(10.0),
+                    ..Default::default()
+                },
+            );
+        }
+        prosody
+            .segments
+            .get_mut(&transcript.segments[4].id)
+            .unwrap()
+            .chars_per_second = Some(0.6);
+        assert!(prosody.diagnostic_text(&transcript).is_empty());
+    }
+
+    #[test]
     fn unresolved_system_speaker_counts_only_once_named() {
         let (mut transcript, prosody) = fixture();
         transcript.speaker_names.clear();
@@ -394,8 +498,10 @@ mod tests {
     fn interruption_requires_overlap_a_quick_exit_and_a_non_backchannel() {
         let (mut transcript, prosody) = fixture();
         transcript.rename_speaker("b", "Никита");
-        let a = segment("b", Channel::System, 59_000, 60_200);
+        let a = segment("b", Channel::System, 59_000, 60_299);
         transcript.segments.insert(4, a);
+        assert!(!prosody.annotated_text(&transcript).contains("перебивает"));
+        transcript.segments[4].end_ms = 60_300;
         assert!(
             prosody
                 .annotated_text(&transcript)
@@ -416,10 +522,12 @@ mod tests {
             segment.end_ms = segment.start_ms + 15_000;
         }
         let text = prosody.annotated_text(&transcript);
-        assert!(text.contains("быстрее обычного"));
+        assert!(!text.contains("быстрее обычного"));
         assert!(!text.contains("перебивает"));
         transcript.segments[5].end_ms = 72_000;
-        transcript.segments[4].end_ms = 60_501;
+        transcript.segments[4].end_ms = 61_500;
+        assert!(prosody.annotated_text(&transcript).contains("перебивает"));
+        transcript.segments[4].end_ms = 61_501;
         assert!(!prosody.annotated_text(&transcript).contains("перебивает"));
     }
 }

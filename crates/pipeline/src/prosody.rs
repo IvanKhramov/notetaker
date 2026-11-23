@@ -30,10 +30,17 @@ pub(crate) fn final_pass(
     }
 }
 
-/// Decode retained tracks to temporary WAVs. Obtain current acoustic overlap
-/// intervals independently of the transcript speaker IDs and leave the IDs intact.
+#[derive(Clone, Copy)]
+pub enum ProsodyStage {
+    Decode,
+    Diarize,
+    Measure,
+}
+
+/// Decode retained tracks to temporary WAVs and measure prosody without reassigning speakers.
 pub fn recompute_prosody(
     meeting: &Meeting,
+    mut progress: impl FnMut(ProsodyStage),
     diarize: impl FnOnce(&Path, Duration) -> Result<Vec<SpeakerTurn>>,
 ) -> Result<String> {
     let transcript = meeting.read_transcript()?;
@@ -44,6 +51,7 @@ pub fn recompute_prosody(
         "Аудио этой встречи не сохранено"
     );
     let work = tempfile::tempdir_in(meeting.path().join("audio"))?;
+    progress(ProsodyStage::Decode);
     let decode_track = |channel, input: &Path, name| -> Result<_> {
         if !transcript.segments.iter().any(|s| s.channel == channel) {
             return Ok(None);
@@ -56,10 +64,12 @@ pub fn recompute_prosody(
     let mic = decode_track(Channel::Mic, &mic, "mic.wav")?;
     let system = decode_track(Channel::System, &system, "system.wav")?;
     let system_turns = if let Some((path, count)) = &system {
+        progress(ProsodyStage::Diarize);
         diarize(path, Duration::from_millis(count / 16))?
     } else {
         Vec::new()
     };
+    progress(ProsodyStage::Measure);
     let prosody = measure(
         &transcript,
         system.as_ref().map(|(path, _)| path.as_path()),
@@ -118,7 +128,7 @@ fn measure(
                 same_channel_overlap: duration > 0
                     && preceding > 0
                     && s.start_ms < overlaps[preceding - 1].1,
-                chars_per_second: (duration >= MIN_TEMPO_MS)
+                chars_per_second: (duration >= MIN_METRIC_MS)
                     .then(|| s.text.trim().chars().count() as f32 * 1000.0 / duration as f32),
                 ..Default::default()
             };
@@ -127,7 +137,11 @@ fn measure(
             // Without diarization turns overlap on the system track is unknown,
             // so its mixed audio must not count as one person's voice.
             let overlap_known = channel == Channel::Mic || !system_turns.is_empty();
-            if overlap_known && !raw.same_channel_overlap && end > start {
+            if duration >= MIN_METRIC_MS
+                && overlap_known
+                && !raw.same_channel_overlap
+                && end > start
+            {
                 reader.seek(start)?;
                 let count = (end - start) as usize;
                 let sound = match spec.sample_format {
@@ -212,12 +226,28 @@ fn acoustics(samples: impl Iterator<Item = hound::Result<f32>>) -> hound::Result
         let mean_square = energy_sum / (speech_frames * FRAME_SAMPLES) as f64;
         raw.loudness_dbfs = Some((10.0 * mean_square.log10()) as f32);
     }
-    if pitches.len() >= MIN_VOICED_FRAMES {
-        pitches.sort_unstable_by(f32::total_cmp);
-        raw.f0_hz = Some(quantile(&pitches, 0.5));
-        raw.f0_iqr_st = Some(12.0 * (quantile(&pitches, 0.75) / quantile(&pitches, 0.25)).log2());
+    if let Some((median, iqr)) = pitch_stats(pitches) {
+        raw.f0_hz = Some(median);
+        raw.f0_iqr_st = Some(iqr);
     }
     Ok(raw)
+}
+
+fn pitch_stats(mut pitches: Vec<f32>) -> Option<(f32, f32)> {
+    if pitches.len() < MIN_VOICED_FRAMES {
+        return None;
+    }
+    pitches.sort_unstable_by(f32::total_cmp);
+    let median = quantile(&pitches, 0.5);
+    let min = median / MAX_FRAME_F0_RATIO;
+    let max = median * MAX_FRAME_F0_RATIO;
+    pitches.retain(|&hz| (min..=max).contains(&hz));
+    (pitches.len() >= MIN_VOICED_FRAMES).then(|| {
+        (
+            quantile(&pitches, 0.5),
+            12.0 * (quantile(&pitches, 0.75) / quantile(&pitches, 0.25)).log2(),
+        )
+    })
 }
 
 #[cfg(test)]
@@ -258,6 +288,14 @@ mod tests {
     }
 
     #[test]
+    fn pitch_statistics_discard_octave_errors_before_calculating_spread() {
+        let (median, iqr) = pitch_stats(vec![60.0, 118.0, 120.0, 122.0, 240.0]).unwrap();
+        assert_eq!(median, 120.0);
+        assert!((iqr - 12.0 * (121.0_f32 / 119.0).log2()).abs() < 0.001);
+        assert!(pitch_stats(vec![60.0, 120.0, 240.0]).is_none());
+    }
+
+    #[test]
     fn recompute_excludes_mixed_opus_audio_and_does_not_reassign_speakers() {
         let dir = tempfile::tempdir().unwrap();
         let library = Library::open(dir.path()).unwrap();
@@ -265,13 +303,13 @@ mod tests {
             .create_meeting(MeetingMeta::new("Test", chrono::Utc::now()))
             .unwrap();
         let mut transcript = Transcript::default();
-        for start_ms in [0, 2000] {
+        for (start_ms, end_ms) in [(0, 3000), (3000, 6000), (6000, 8999)] {
             transcript.segments.push(Segment {
                 id: uuid::Uuid::now_v7(),
                 speaker: SpeakerId("edited-speaker".into()),
                 channel: Channel::System,
                 start_ms,
-                end_ms: start_ms + 2000,
+                end_ms,
                 text: "Текст сегмента".into(),
                 source: Source::Final,
                 edited: true,
@@ -290,26 +328,30 @@ mod tests {
 
         let mut audio =
             notetaker_capture::TrackWriter::create(meeting.system_audio_path()).unwrap();
-        for _ in 0..4_000 / FRAME_MS {
+        for _ in 0..9_000 / FRAME_MS {
             audio.write_samples(&yin::tests::sine(120.0, 0.3)).unwrap();
         }
         audio.finish().unwrap();
 
-        recompute_prosody(&meeting, |_, duration| {
-            assert_eq!(duration, Duration::from_secs(4));
-            Ok(vec![
-                SpeakerTurn {
-                    start_ms: 0,
-                    end_ms: 4000,
-                    speaker: "a".into(),
-                },
-                SpeakerTurn {
-                    start_ms: 3000,
-                    end_ms: 3500,
-                    speaker: "b".into(),
-                },
-            ])
-        })
+        recompute_prosody(
+            &meeting,
+            |_| {},
+            |_, duration| {
+                assert_eq!(duration, Duration::from_secs(9));
+                Ok(vec![
+                    SpeakerTurn {
+                        start_ms: 0,
+                        end_ms: 9000,
+                        speaker: "a".into(),
+                    },
+                    SpeakerTurn {
+                        start_ms: 4500,
+                        end_ms: 5500,
+                        speaker: "b".into(),
+                    },
+                ])
+            },
+        )
         .unwrap();
         assert_eq!(meeting.read_transcript().unwrap(), transcript);
         let prosody = meeting.read_prosody().unwrap().unwrap();
@@ -320,11 +362,15 @@ mod tests {
         assert!(mixed.same_channel_overlap);
         assert!(mixed.loudness_dbfs.is_none() && mixed.f0_hz.is_none());
         assert!(mixed.chars_per_second.is_some());
+        let short = &prosody.segments[&transcript.segments[2].id];
+        assert!(short.loudness_dbfs.is_none());
+        assert!(short.f0_hz.is_none() && short.f0_iqr_st.is_none());
+        assert!(short.chars_per_second.is_none());
 
         // No diarization turns: overlap is unknown, so no system acoustics.
-        recompute_prosody(&meeting, |_, _| Ok(Vec::new())).unwrap();
+        recompute_prosody(&meeting, |_| {}, |_, _| Ok(Vec::new())).unwrap();
         let prosody = meeting.read_prosody().unwrap().unwrap();
-        for segment in &transcript.segments {
+        for segment in &transcript.segments[..2] {
             let raw = &prosody.segments[&segment.id];
             assert!(raw.loudness_dbfs.is_none() && raw.f0_hz.is_none());
             assert!(raw.chars_per_second.is_some());
