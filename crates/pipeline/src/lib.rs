@@ -11,6 +11,8 @@ mod audio;
 mod decode;
 mod echo;
 mod import;
+mod prosody;
+pub use prosody::recompute_prosody;
 mod recover;
 pub use echo::suppress_echo;
 pub mod live_speakers;

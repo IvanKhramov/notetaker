@@ -99,7 +99,7 @@ pub(crate) fn run(
             convert(segments.clone(), Channel::System, Source::Final),
         );
     })?;
-    crate::diarization::final_pass(
+    let diarization = crate::diarization::final_pass(
         meeting,
         &mut asr,
         &wav,
@@ -107,6 +107,13 @@ pub(crate) fn run(
         &config.diarization,
         events,
         None,
+    );
+    crate::prosody::final_pass(
+        meeting,
+        Some(&wav),
+        None,
+        diarization.as_ref().map_or(&[], |d| d.turns.as_slice()),
+        events,
     );
     if config.retention == Some(Duration::ZERO) {
         fs::remove_file(meeting.system_audio_path())?;

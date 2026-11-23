@@ -949,7 +949,7 @@ fn run_asr(
                     );
                     crate::echo::suppress_echo(&mut transcript.segments);
                 })?;
-                crate::diarization::final_pass(
+                let diarization = crate::diarization::final_pass(
                     meeting,
                     &mut asr.asr,
                     &wavs[1],
@@ -957,6 +957,13 @@ fn run_asr(
                     diarization,
                     &queue.events,
                     Some((&live_clusters, &live_names)),
+                );
+                crate::prosody::final_pass(
+                    meeting,
+                    Some(&wavs[1]),
+                    Some(&wavs[0]),
+                    diarization.as_ref().map_or(&[], |d| d.turns.as_slice()),
+                    &queue.events,
                 );
             }
         }

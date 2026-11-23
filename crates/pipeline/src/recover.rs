@@ -78,7 +78,7 @@ pub(crate) fn run(
             .find(|(_, channel)| *channel == wanted)
             .map(|(wav, _)| wav.as_path())
     };
-    if let Some(system) = wav_of(Channel::System) {
+    let diarization = wav_of(Channel::System).and_then(|system| {
         crate::diarization::final_pass(
             meeting,
             &mut asr,
@@ -87,8 +87,15 @@ pub(crate) fn run(
             &config.diarization,
             events,
             None,
-        );
-    }
+        )
+    });
+    crate::prosody::final_pass(
+        meeting,
+        wav_of(Channel::System),
+        wav_of(Channel::Mic),
+        diarization.as_ref().map_or(&[], |d| d.turns.as_slice()),
+        events,
+    );
     let mut meta = meeting.read_meta()?;
     if meta.ended_at.is_none() {
         // An interrupted recording never got its end; the audio length is the best estimate.
