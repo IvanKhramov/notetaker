@@ -2057,9 +2057,9 @@ impl AppState {
     }
     pub fn can_exit(&self) -> bool {
         self.exit_requested
-            && self.prosody_running.is_none()
             && (self.shutdown.forced()
-                || (self.pending_ai.is_empty()
+                || (self.prosody_running.is_none()
+                    && self.pending_ai.is_empty()
                     && !self.ktalk.busy
                     && !self.ktalk.learning.busy()
                     && !self.connections.busy()
