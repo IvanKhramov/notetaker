@@ -546,13 +546,19 @@ impl PreparedWrite {
         Ok(Revision::of(Some(bytes)))
     }
     pub(crate) fn persist(self, path: &Path) -> Result<()> {
+        self.persist_if(path, || true).map(|_| ())
+    }
+    pub(crate) fn persist_if(self, path: &Path, publish: impl Fn() -> bool) -> Result<bool> {
         let mut temporary = self.0;
         // Sync clients and antivirus briefly hold the target open on Windows; the
         // rename then fails with PermissionDenied and succeeds a moment later.
         let mut attempt = 0;
         loop {
+            if !publish() {
+                return Ok(false);
+            }
             match temporary.persist(path) {
-                Ok(_) => return Ok(()),
+                Ok(_) => return Ok(true),
                 Err(error)
                     if error.error.kind() == std::io::ErrorKind::PermissionDenied
                         && attempt < 4 =>

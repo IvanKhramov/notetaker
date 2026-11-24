@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
-use notetaker_asr_proto::SpeakerTurn;
+use notetaker_asr_proto::{CancellationHandle, SpeakerTurn};
 use notetaker_core::{
     Channel, Meeting, Segment, Transcript,
     prosody::{Prosody, SegmentProsody, quantile, thresholds::*},
@@ -31,6 +31,7 @@ pub(crate) fn final_pass(
             system,
             mic,
             system_turns,
+            &|| Ok(()),
         )?)?;
         Ok(())
     })();
@@ -65,9 +66,37 @@ pub fn has_prosody_audio(meeting: &Meeting, transcript: &Transcript) -> bool {
 /// Decode retained tracks to temporary WAVs and measure prosody without reassigning speakers.
 pub fn recompute_prosody(
     meeting: &Meeting,
-    mut progress: impl FnMut(ProsodyStage),
+    progress: impl FnMut(ProsodyStage),
     diarize: impl FnOnce(&Path, Duration) -> Result<Vec<SpeakerTurn>>,
 ) -> Result<String> {
+    let (prosody, transcript) =
+        recompute(meeting, &CancellationHandle::default(), progress, diarize)?;
+    Ok(prosody.diagnostic_text(&transcript))
+}
+
+pub fn recompute_prosody_cancellable(
+    meeting: &Meeting,
+    cancel: &CancellationHandle,
+    diarize: impl FnOnce(&Path, Duration) -> Result<Vec<SpeakerTurn>>,
+) -> Result<()> {
+    recompute(meeting, cancel, |_| {}, diarize)?;
+    Ok(())
+}
+
+fn recompute(
+    meeting: &Meeting,
+    cancel: &CancellationHandle,
+    mut progress: impl FnMut(ProsodyStage),
+    diarize: impl FnOnce(&Path, Duration) -> Result<Vec<SpeakerTurn>>,
+) -> Result<(Prosody, Transcript)> {
+    let check = || {
+        ensure!(
+            !cancel.is_cancelled(),
+            "Пересчёт речевых показателей отменён"
+        );
+        Ok(())
+    };
+    check()?;
     let transcript = meeting.read_transcript()?;
     let [mic, system] = retained_tracks(meeting, &transcript);
     ensure!(
@@ -81,18 +110,20 @@ pub fn recompute_prosody(
             return Ok(None);
         };
         let wav = work.path().join(name);
-        let count = decode::decode_recording(input, &wav, |_| Ok(()))
+        let count = decode::decode_recording(input, &wav, |_| check())
             .with_context(|| format!("Чтение {}", input.display()))?;
         Ok(Some((wav, count)))
     };
     let mic = decode_track(mic.as_deref(), "mic.wav")?;
     let system = decode_track(system.as_deref(), "system.wav")?;
+    check()?;
     let system_turns = if let Some((path, count)) = &system {
         progress(ProsodyStage::Diarize);
         diarize(path, Duration::from_millis(count / 16))?
     } else {
         Vec::new()
     };
+    check()?;
     progress(ProsodyStage::Measure);
     let segments = transcript.segments.iter().filter(|s| match s.channel {
         Channel::Mic => mic.is_some(),
@@ -103,9 +134,13 @@ pub fn recompute_prosody(
         system.as_ref().map(|(path, _)| path.as_path()),
         mic.as_ref().map(|(path, _)| path.as_path()),
         &system_turns,
+        &check,
     )?;
-    meeting.write_prosody(&prosody)?;
-    Ok(prosody.diagnostic_text(&transcript))
+    check()?;
+    if !meeting.write_prosody_if(&prosody, || !cancel.is_cancelled())? {
+        check()?;
+    }
+    Ok((prosody, transcript))
 }
 
 fn measure<'a>(
@@ -113,9 +148,11 @@ fn measure<'a>(
     system: Option<&Path>,
     mic: Option<&Path>,
     system_turns: &[SpeakerTurn],
+    check: &impl Fn() -> Result<()>,
 ) -> Result<Prosody> {
     let mut prosody = Prosody::default();
     for (channel, path) in [(Channel::Mic, mic), (Channel::System, system)] {
+        check()?;
         let segments: Vec<_> = segments.clone().filter(|s| s.channel == channel).collect();
         if segments.is_empty() {
             continue;
@@ -146,6 +183,7 @@ fn measure<'a>(
             *end = latest_end;
         }
         for s in segments {
+            check()?;
             let duration = s.end_ms.saturating_sub(s.start_ms);
             let preceding = overlaps.partition_point(|&(start, _)| start < s.end_ms);
             let mut raw = SegmentProsody {
@@ -169,7 +207,9 @@ fn measure<'a>(
                 reader.seek(start)?;
                 let count = (end - start) as usize;
                 let sound = match spec.sample_format {
-                    hound::SampleFormat::Float => acoustics(reader.samples::<f32>().take(count))?,
+                    hound::SampleFormat::Float => {
+                        acoustics(reader.samples::<f32>().take(count), check)?
+                    }
                     hound::SampleFormat::Int => {
                         let scale = 2.0_f32.powi(i32::from(spec.bits_per_sample) - 1);
                         acoustics(
@@ -177,6 +217,7 @@ fn measure<'a>(
                                 .samples::<i32>()
                                 .take(count)
                                 .map(|s| s.map(|s| s as f32 / scale)),
+                            check,
                         )?
                     }
                 };
@@ -224,7 +265,10 @@ fn overlap_spans<'a>(intervals: impl Iterator<Item = (u64, u64, &'a str)>) -> Ve
     spans
 }
 
-fn acoustics(samples: impl Iterator<Item = hound::Result<f32>>) -> hound::Result<SegmentProsody> {
+fn acoustics(
+    samples: impl Iterator<Item = hound::Result<f32>>,
+    check: &impl Fn() -> Result<()>,
+) -> Result<SegmentProsody> {
     let mut frame = [0.0; FRAME_SAMPLES];
     let mut filled = 0;
     let mut energy_sum = 0.0_f64;
@@ -237,6 +281,7 @@ fn acoustics(samples: impl Iterator<Item = hound::Result<f32>>) -> hound::Result
         if filled != frame.len() {
             continue;
         }
+        check()?;
         filled = 0;
         let energy = frame.iter().map(|x| x * x).sum::<f32>();
         if energy >= min_energy {
@@ -287,6 +332,7 @@ mod tests {
                     .into_iter()
                     .flatten()
                     .map(Ok),
+                &|| Ok(()),
             )
             .unwrap()
             .loudness_dbfs
@@ -361,6 +407,14 @@ mod tests {
         }
         audio.finish().unwrap();
         assert!(has_prosody_audio(&meeting, &transcript));
+
+        let cancel = CancellationHandle::default();
+        let result = recompute_prosody_cancellable(&meeting, &cancel, |_, _| {
+            cancel.cancel();
+            Ok(Vec::new())
+        });
+        assert!(result.unwrap_err().to_string().contains("отменён"));
+        assert!(meeting.read_prosody().unwrap().is_none());
 
         recompute_prosody(
             &meeting,

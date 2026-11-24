@@ -253,7 +253,11 @@ pub enum Command {
     },
     Load(Meeting),
     Save(Box<Save>),
-    RecomputeProsody(Meeting),
+    RecomputeProsody {
+        meeting: Meeting,
+        id: uuid::Uuid,
+        cancel: notetaker_asr_proto::CancellationHandle,
+    },
     Rediarize {
         meeting: Meeting,
         expected: Transcript,
@@ -399,7 +403,7 @@ pub enum Event {
         data: Option<notetaker_core::Versioned<Transcript>>,
     },
     ProsodyRecomputed {
-        path: PathBuf,
+        id: uuid::Uuid,
         result: Result<(), String>,
     },
     SpeakersEdited {
@@ -866,32 +870,34 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                         result,
                     });
                 }
-                Command::RecomputeProsody(meeting) => {
+                Command::RecomputeProsody {
+                    meeting,
+                    id,
+                    cancel,
+                } => {
                     let events = events.clone();
                     thread::spawn(move || {
-                        let path = meeting.path().to_owned();
                         let result = (|| -> Result<()> {
                             let transcript = meeting.read_transcript()?;
                             if notetaker_pipeline::has_prosody_audio(&meeting, &transcript)
                                 && meeting.prosody_needs_recompute()?
                             {
-                                notetaker_pipeline::recompute_prosody(
+                                notetaker_pipeline::recompute_prosody_cancellable(
                                     &meeting,
-                                    |_| {},
+                                    &cancel,
                                     |wav, duration| {
                                         let mut client =
-                                            notetaker_asr_proto::AsrClient::spawn_command(
+                                            notetaker_asr_proto::AsrClient::spawn_command_cancellable(
                                                 background_process(&asr_binary()?),
                                                 Duration::from_secs(300),
+                                                cancel.clone(),
                                             )?;
                                         client.set_timeout(
                                             Duration::from_secs(300)
                                                 .saturating_add(duration.saturating_mul(4)),
                                         );
-                                        let result = client.diarize(wav, "system", None, false);
-                                        let shutdown = client.shutdown();
-                                        let turns = result?.turns;
-                                        shutdown?;
+                                        let turns = client.diarize(wav, "system", None, false)?.turns;
+                                        client.shutdown()?;
                                         Ok(turns)
                                     },
                                 )?;
@@ -899,7 +905,7 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                             Ok(())
                         })()
                         .map_err(error_text);
-                        let _ = events.send(Event::ProsodyRecomputed { path, result });
+                        let _ = events.send(Event::ProsodyRecomputed { id, result });
                     });
                 }
                 Command::Rediarize {

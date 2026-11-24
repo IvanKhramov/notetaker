@@ -102,10 +102,14 @@ impl Meeting {
     }
 
     pub fn write_prosody(&self, prosody: &Prosody) -> Result<()> {
-        storage::atomic_write(
-            &self.path().join("prosody.json"),
-            &serde_json::to_vec_pretty(prosody)?,
-        )
+        self.write_prosody_if(prosody, || true).map(|_| ())
+    }
+
+    /// Publish the prepared file only if the measurement is still wanted.
+    pub fn write_prosody_if(&self, prosody: &Prosody, publish: impl Fn() -> bool) -> Result<bool> {
+        let path = self.path().join("prosody.json");
+        storage::PreparedWrite::new(&path, &serde_json::to_vec_pretty(prosody)?)?
+            .persist_if(&path, publish)
     }
 }
 
