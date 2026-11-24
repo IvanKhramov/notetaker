@@ -506,6 +506,7 @@ pub struct AppState {
     pub documents: HashMap<PathBuf, Document>,
     loading: HashSet<PathBuf>,
     prosody_running: Option<ProsodyJob>,
+    prosody_pending: Option<PathBuf>,
     prosody_errors: HashMap<PathBuf, String>,
     pub selected: Option<PathBuf>,
     pub tab: Tab,
@@ -618,6 +619,7 @@ impl AppState {
             request: 0,
             documents: HashMap::new(),
             prosody_running: None,
+            prosody_pending: None,
             prosody_errors: HashMap::new(),
             loading: HashSet::new(),
             selected: None,
@@ -800,12 +802,15 @@ impl AppState {
         }
     }
     fn maybe_recompute_prosody(&mut self, path: &std::path::Path) {
-        if self.prosody_running.is_some()
-            || self.prosody_errors.contains_key(path)
+        if self.prosody_errors.contains_key(path)
             || !self.can_prepare_audio(false)
             || self.enhancing.is_some()
             || self.unsaved()
         {
+            return;
+        }
+        if self.prosody_running.is_some() {
+            self.prosody_pending = Some(path.to_owned());
             return;
         }
         let Some(doc) = self.documents.get(path) else {
@@ -2551,13 +2556,16 @@ impl AppState {
                     .is_some_and(|job| job.id == id)
                 {
                     let job = self.prosody_running.take().expect("matching prosody job");
+                    if let Some(pending) = self.prosody_pending.take()
+                        && pending != job.path
+                        && self.selected.as_ref() == Some(&pending)
+                    {
+                        self.maybe_recompute_prosody(&pending);
+                    }
                     if !job.cancel.is_cancelled()
                         && let Err(error) = result
                     {
                         self.prosody_failed(job.path, error);
-                    }
-                    if let Some(selected) = self.selected.clone() {
-                        self.maybe_recompute_prosody(&selected);
                     }
                 }
             }
@@ -4499,12 +4507,14 @@ mod tests {
             assert!(cancel.is_cancelled());
             assert_eq!(state.prosody_status(&path), None);
             state.recording.phase = Phase::Idle;
-            state.select(meeting);
+            state.select(meeting.clone());
             assert!(commands.try_recv().is_err());
             state.apply(Event::ProsodyRecomputed {
                 id,
                 result: Err("Отменено".into()),
             });
+            assert!(commands.try_recv().is_err());
+            state.select(meeting);
             let Command::RecomputeProsody { id: next_id, .. } = commands.try_recv().unwrap() else {
                 panic!("expected a fresh attempt");
             };
@@ -4512,6 +4522,23 @@ mod tests {
             assert_eq!(state.prosody_status(&path), Some(Ok(())));
             assert!(!state.prosody_errors.contains_key(&path));
         }
+    }
+
+    #[test]
+    fn completed_prosody_does_not_restart_the_same_stale_selection() {
+        let (mut state, commands, _root, path) = prosody_fixture();
+        let doc = state.documents.get_mut(&path).unwrap();
+        add_prosody_audio(doc);
+        let meeting = doc.data.meeting.clone();
+        state.select(meeting.clone());
+        let Command::RecomputeProsody { id, .. } = commands.try_recv().unwrap() else {
+            panic!("expected prosody recompute");
+        };
+        state.select(meeting);
+        assert!(commands.try_recv().is_err());
+        state.apply(Event::ProsodyRecomputed { id, result: Ok(()) });
+        assert!(commands.try_recv().is_err());
+        assert_eq!(state.prosody_status(&path), None);
     }
 
     #[test]
@@ -4539,10 +4566,11 @@ mod tests {
             state.select(second.clone());
             assert!(commands.try_recv().is_err());
             state.apply(Event::ProsodyRecomputed { id, result });
-            assert!(matches!(
-                commands.try_recv().unwrap(),
-                Command::RecomputeProsody { meeting, .. } if meeting.path() == second.path()
-            ));
+            let Command::RecomputeProsody { meeting, id, .. } = commands.try_recv().unwrap() else {
+                panic!("expected prosody for the second meeting");
+            };
+            assert_eq!(meeting.path(), second.path());
+            state.apply(Event::ProsodyRecomputed { id, result: Ok(()) });
             assert!(commands.try_recv().is_err());
         }
     }
