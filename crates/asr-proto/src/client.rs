@@ -332,7 +332,7 @@ impl AsrClient {
                     Err(ClientError::Exited(status.to_string()))
                 };
             }
-            if Instant::now() >= deadline {
+            if self.cancel.is_cancelled() || Instant::now() >= deadline {
                 return Err(ClientError::Timeout);
             }
             thread::sleep(Duration::from_millis(10));

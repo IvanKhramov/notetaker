@@ -253,6 +253,11 @@ pub enum Command {
     },
     Load(Meeting),
     Save(Box<Save>),
+    RecomputeProsody {
+        meeting: Meeting,
+        id: uuid::Uuid,
+        cancel: notetaker_asr_proto::CancellationHandle,
+    },
     Rediarize {
         meeting: Meeting,
         expected: Transcript,
@@ -396,6 +401,10 @@ pub enum Event {
         path: PathBuf,
         result: Result<(), String>,
         data: Option<notetaker_core::Versioned<Transcript>>,
+    },
+    ProsodyRecomputed {
+        id: uuid::Uuid,
+        result: Result<(), String>,
     },
     SpeakersEdited {
         path: PathBuf,
@@ -859,6 +868,52 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                     let _ = events.send(Event::Saved {
                         path: save.meeting.path().to_owned(),
                         result,
+                    });
+                }
+                Command::RecomputeProsody {
+                    meeting,
+                    id,
+                    cancel,
+                } => {
+                    let events = events.clone();
+                    thread::spawn(move || {
+                        // The event must always arrive, even after a panic: the
+                        // state keeps the job and exit waits for it.
+                        let job = std::panic::AssertUnwindSafe(|| -> Result<()> {
+                            let transcript = meeting.read_transcript()?;
+                            if notetaker_pipeline::has_prosody_audio(&meeting, &transcript)
+                                && meeting.prosody_needs_recompute()?
+                            {
+                                notetaker_pipeline::recompute_prosody_cancellable(
+                                    &meeting,
+                                    &cancel,
+                                    |wav, duration| {
+                                        let mut client =
+                                            notetaker_asr_proto::AsrClient::spawn_command_cancellable(
+                                                background_process(&asr_binary()?),
+                                                Duration::from_secs(300),
+                                                cancel.clone(),
+                                            )?;
+                                        client.set_timeout(
+                                            Duration::from_secs(300)
+                                                .saturating_add(duration.saturating_mul(4)),
+                                        );
+                                        let turns =
+                                            client.diarize(wav, "system", None, false)?.turns;
+                                        client.shutdown()?;
+                                        Ok(turns)
+                                    },
+                                )?;
+                            }
+                            Ok(())
+                        });
+                        let result = match std::panic::catch_unwind(job) {
+                            Ok(result) => result.map_err(error_text),
+                            Err(_) => {
+                                Err("Пересчёт речевых показателей завершился аварийно".into())
+                            }
+                        };
+                        let _ = events.send(Event::ProsodyRecomputed { id, result });
                     });
                 }
                 Command::Rediarize {

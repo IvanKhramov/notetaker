@@ -1,12 +1,16 @@
 //! Measure one frame at a time in the final pass and on retained recordings.
 mod yin;
 
-use std::{path::Path, sync::mpsc::Sender, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    sync::mpsc::Sender,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, ensure};
-use notetaker_asr_proto::SpeakerTurn;
+use notetaker_asr_proto::{CancellationHandle, SpeakerTurn};
 use notetaker_core::{
-    Channel, Meeting, Transcript,
+    Channel, Meeting, Segment, Transcript,
     prosody::{Prosody, SegmentProsody, quantile, thresholds::*},
 };
 
@@ -22,7 +26,13 @@ pub(crate) fn final_pass(
 ) {
     let result = (|| -> Result<()> {
         let transcript = meeting.read_transcript()?;
-        meeting.write_prosody(&measure(&transcript, system, mic, system_turns)?)?;
+        meeting.write_prosody(&measure(
+            transcript.segments.iter(),
+            system,
+            mic,
+            system_turns,
+            &|| Ok(()),
+        )?)?;
         Ok(())
     })();
     if let Err(error) = result {
@@ -37,62 +47,114 @@ pub enum ProsodyStage {
     Measure,
 }
 
-/// Decode retained tracks to temporary WAVs and measure prosody without reassigning speakers.
-pub fn recompute_prosody(
-    meeting: &Meeting,
-    mut progress: impl FnMut(ProsodyStage),
-    diarize: impl FnOnce(&Path, Duration) -> Result<Vec<SpeakerTurn>>,
-) -> Result<String> {
-    let transcript = meeting.read_transcript()?;
-    let mic = meeting.mic_audio_path();
-    let system = meeting.system_audio_path();
-    ensure!(
-        mic.is_file() || system.is_file(),
-        "Аудио этой встречи не сохранено"
-    );
-    let work = tempfile::tempdir_in(meeting.path().join("audio"))?;
-    progress(ProsodyStage::Decode);
-    let decode_track = |channel, input: &Path, name| -> Result<_> {
+fn retained_tracks(meeting: &Meeting, transcript: &Transcript) -> Result<[Option<PathBuf>; 2]> {
+    ensure!(!transcript.segments.is_empty(), "В транскрипте нет реплик");
+    let track = |channel, path: PathBuf| {
         if !transcript.segments.iter().any(|s| s.channel == channel) {
             return Ok(None);
         }
+        ensure!(
+            path.is_file(),
+            "Аудиодорожка не сохранена: {}",
+            path.display()
+        );
+        Ok(Some(path))
+    };
+    Ok([
+        track(Channel::Mic, meeting.mic_audio_path())?,
+        track(Channel::System, meeting.system_audio_path())?,
+    ])
+}
+
+pub fn has_prosody_audio(meeting: &Meeting, transcript: &Transcript) -> bool {
+    retained_tracks(meeting, transcript).is_ok()
+}
+
+/// Decode retained tracks to temporary WAVs and measure prosody without reassigning speakers.
+pub fn recompute_prosody(
+    meeting: &Meeting,
+    progress: impl FnMut(ProsodyStage),
+    diarize: impl FnOnce(&Path, Duration) -> Result<Vec<SpeakerTurn>>,
+) -> Result<String> {
+    let (prosody, transcript) =
+        recompute(meeting, &CancellationHandle::default(), progress, diarize)?;
+    Ok(prosody.diagnostic_text(&transcript))
+}
+
+pub fn recompute_prosody_cancellable(
+    meeting: &Meeting,
+    cancel: &CancellationHandle,
+    diarize: impl FnOnce(&Path, Duration) -> Result<Vec<SpeakerTurn>>,
+) -> Result<()> {
+    recompute(meeting, cancel, |_| {}, diarize)?;
+    Ok(())
+}
+
+fn recompute(
+    meeting: &Meeting,
+    cancel: &CancellationHandle,
+    mut progress: impl FnMut(ProsodyStage),
+    diarize: impl FnOnce(&Path, Duration) -> Result<Vec<SpeakerTurn>>,
+) -> Result<(Prosody, Transcript)> {
+    let check = || {
+        ensure!(
+            !cancel.is_cancelled(),
+            "Пересчёт речевых показателей отменён"
+        );
+        Ok(())
+    };
+    check()?;
+    let transcript = meeting.read_transcript()?;
+    let [mic, system] = retained_tracks(meeting, &transcript)?;
+    let work = tempfile::Builder::new()
+        .prefix("notetaker-prosody-")
+        .tempdir()?;
+    progress(ProsodyStage::Decode);
+    let decode_track = |input: Option<&Path>, name| -> Result<_> {
+        let Some(input) = input else {
+            return Ok(None);
+        };
         let wav = work.path().join(name);
-        let count = decode::decode_recording(input, &wav, |_| Ok(()))
+        let count = decode::decode_recording(input, &wav, |_| check())
             .with_context(|| format!("Чтение {}", input.display()))?;
         Ok(Some((wav, count)))
     };
-    let mic = decode_track(Channel::Mic, &mic, "mic.wav")?;
-    let system = decode_track(Channel::System, &system, "system.wav")?;
+    let mic = decode_track(mic.as_deref(), "mic.wav")?;
+    let system = decode_track(system.as_deref(), "system.wav")?;
+    check()?;
     let system_turns = if let Some((path, count)) = &system {
         progress(ProsodyStage::Diarize);
         diarize(path, Duration::from_millis(count / 16))?
     } else {
         Vec::new()
     };
+    check()?;
     progress(ProsodyStage::Measure);
     let prosody = measure(
-        &transcript,
+        transcript.segments.iter(),
         system.as_ref().map(|(path, _)| path.as_path()),
         mic.as_ref().map(|(path, _)| path.as_path()),
         &system_turns,
+        &check,
     )?;
-    meeting.write_prosody(&prosody)?;
-    Ok(prosody.diagnostic_text(&transcript))
+    check()?;
+    if !meeting.write_prosody_if(&prosody, || !cancel.is_cancelled())? {
+        check()?;
+    }
+    Ok((prosody, transcript))
 }
 
-fn measure(
-    transcript: &Transcript,
+fn measure<'a>(
+    segments: impl Iterator<Item = &'a Segment> + Clone,
     system: Option<&Path>,
     mic: Option<&Path>,
     system_turns: &[SpeakerTurn],
+    check: &impl Fn() -> Result<()>,
 ) -> Result<Prosody> {
     let mut prosody = Prosody::default();
     for (channel, path) in [(Channel::Mic, mic), (Channel::System, system)] {
-        let segments: Vec<_> = transcript
-            .segments
-            .iter()
-            .filter(|s| s.channel == channel)
-            .collect();
+        check()?;
+        let segments: Vec<_> = segments.clone().filter(|s| s.channel == channel).collect();
         if segments.is_empty() {
             continue;
         }
@@ -122,6 +184,7 @@ fn measure(
             *end = latest_end;
         }
         for s in segments {
+            check()?;
             let duration = s.end_ms.saturating_sub(s.start_ms);
             let preceding = overlaps.partition_point(|&(start, _)| start < s.end_ms);
             let mut raw = SegmentProsody {
@@ -145,7 +208,9 @@ fn measure(
                 reader.seek(start)?;
                 let count = (end - start) as usize;
                 let sound = match spec.sample_format {
-                    hound::SampleFormat::Float => acoustics(reader.samples::<f32>().take(count))?,
+                    hound::SampleFormat::Float => {
+                        acoustics(reader.samples::<f32>().take(count), check)?
+                    }
                     hound::SampleFormat::Int => {
                         let scale = 2.0_f32.powi(i32::from(spec.bits_per_sample) - 1);
                         acoustics(
@@ -153,6 +218,7 @@ fn measure(
                                 .samples::<i32>()
                                 .take(count)
                                 .map(|s| s.map(|s| s as f32 / scale)),
+                            check,
                         )?
                     }
                 };
@@ -200,7 +266,10 @@ fn overlap_spans<'a>(intervals: impl Iterator<Item = (u64, u64, &'a str)>) -> Ve
     spans
 }
 
-fn acoustics(samples: impl Iterator<Item = hound::Result<f32>>) -> hound::Result<SegmentProsody> {
+fn acoustics(
+    samples: impl Iterator<Item = hound::Result<f32>>,
+    check: &impl Fn() -> Result<()>,
+) -> Result<SegmentProsody> {
     let mut frame = [0.0; FRAME_SAMPLES];
     let mut filled = 0;
     let mut energy_sum = 0.0_f64;
@@ -213,6 +282,7 @@ fn acoustics(samples: impl Iterator<Item = hound::Result<f32>>) -> hound::Result
         if filled != frame.len() {
             continue;
         }
+        check()?;
         filled = 0;
         let energy = frame.iter().map(|x| x * x).sum::<f32>();
         if energy >= min_energy {
@@ -254,6 +324,7 @@ fn pitch_stats(mut pitches: Vec<f32>) -> Option<(f32, f32)> {
 mod tests {
     use super::*;
     use notetaker_core::{Library, MeetingMeta, Segment, Source, SpeakerId};
+    use std::fs;
 
     #[test]
     fn loudness_uses_speech_frames_and_tracks_scale() {
@@ -263,6 +334,7 @@ mod tests {
                     .into_iter()
                     .flatten()
                     .map(Ok),
+                &|| Ok(()),
             )
             .unwrap()
             .loudness_dbfs
@@ -317,6 +389,10 @@ mod tests {
             });
         }
         meeting.write_transcript(&transcript).unwrap();
+        assert!(!has_prosody_audio(&meeting, &transcript));
+        std::fs::write(meeting.mic_audio_path(), []).unwrap();
+        assert!(!has_prosody_audio(&meeting, &transcript));
+        std::fs::remove_file(meeting.mic_audio_path()).unwrap();
         let (events, warnings) = std::sync::mpsc::channel();
         final_pass(&meeting, None, None, &[], &events);
         assert!(matches!(
@@ -332,13 +408,43 @@ mod tests {
             audio.write_samples(&yin::tests::sine(120.0, 0.3)).unwrap();
         }
         audio.finish().unwrap();
+        assert!(has_prosody_audio(&meeting, &transcript));
+        let entries = |path: &Path| {
+            let mut names: Vec<_> = fs::read_dir(path)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            names.sort();
+            names
+        };
+        let audio = meeting.path().join("audio");
+        let before_meeting = entries(meeting.path());
+        let before_audio = entries(&audio);
+        let mut temporary_wav = None;
+        let cancel = CancellationHandle::default();
+        let result = recompute_prosody_cancellable(&meeting, &cancel, |wav, _| {
+            let temp = std::env::temp_dir().canonicalize().unwrap();
+            let canonical_wav = wav.canonicalize().unwrap();
+            assert!(canonical_wav.starts_with(temp));
+            assert!(!canonical_wav.starts_with(meeting.path().canonicalize().unwrap()));
+            assert_eq!(entries(meeting.path()), before_meeting);
+            assert_eq!(entries(&audio), before_audio);
+            temporary_wav = Some(wav.to_owned());
+            cancel.cancel();
+            Ok(Vec::new())
+        });
+        assert!(result.unwrap_err().to_string().contains("отменён"));
+        assert!(meeting.read_prosody().unwrap().is_none());
+        assert!(!temporary_wav.unwrap().parent().unwrap().exists());
+        assert_eq!(entries(meeting.path()), before_meeting);
+        assert_eq!(entries(&audio), before_audio);
 
         recompute_prosody(
             &meeting,
             |_| {},
-            |_, duration| {
+            |wav, duration| {
                 assert_eq!(duration, Duration::from_secs(9));
-                Ok(vec![
+                let turns = vec![
                     SpeakerTurn {
                         start_ms: 0,
                         end_ms: 9000,
@@ -349,10 +455,19 @@ mod tests {
                         end_ms: 5500,
                         speaker: "b".into(),
                     },
-                ])
+                ];
+                final_pass(&meeting, Some(wav), None, &turns, &events);
+                assert!(!meeting.prosody_needs_recompute().unwrap());
+                std::fs::write(
+                    meeting.path().join("prosody.json"),
+                    r#"{"version":1,"segments":{}}"#,
+                )
+                .unwrap();
+                Ok(turns)
             },
         )
         .unwrap();
+        assert!(!meeting.prosody_needs_recompute().unwrap());
         assert_eq!(meeting.read_transcript().unwrap(), transcript);
         let prosody = meeting.read_prosody().unwrap().unwrap();
         let clean = &prosody.segments[&transcript.segments[0].id];
@@ -375,5 +490,22 @@ mod tests {
             assert!(raw.loudness_dbfs.is_none() && raw.f0_hz.is_none());
             assert!(raw.chars_per_second.is_some());
         }
+
+        let mut missing_mic = transcript.segments[0].clone();
+        missing_mic.channel = Channel::Mic;
+        missing_mic.id = uuid::Uuid::now_v7();
+        transcript.segments.push(missing_mic);
+        meeting.write_transcript(&transcript).unwrap();
+        assert!(!has_prosody_audio(&meeting, &transcript));
+        let sidecar = meeting.path().join("prosody.json");
+        let before = fs::read(&sidecar).unwrap();
+        let error = recompute_prosody(
+            &meeting,
+            |_| panic!("unexpected progress"),
+            |_, _| panic!("unexpected diarization"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("mic.opus"));
+        assert_eq!(fs::read(sidecar).unwrap(), before);
     }
 }

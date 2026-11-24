@@ -6,6 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use notetaker_asr_proto::CancellationHandle;
 use notetaker_capture::{CaptureEvent, Inventory};
 use notetaker_core::{Channel, Meeting, Transcript};
 use notetaker_pipeline::{PipelineEvent, StopHandle};
@@ -438,6 +439,12 @@ impl Document {
     }
 }
 
+struct ProsodyJob {
+    path: PathBuf,
+    id: Uuid,
+    cancel: CancellationHandle,
+}
+
 pub struct AppState {
     pub ktalk: crate::ktalk::State,
     pub view_revision: u64,
@@ -498,6 +505,9 @@ pub struct AppState {
     request: u64,
     pub documents: HashMap<PathBuf, Document>,
     loading: HashSet<PathBuf>,
+    prosody_running: Option<ProsodyJob>,
+    prosody_pending: Option<PathBuf>,
+    prosody_errors: HashMap<PathBuf, String>,
     pub selected: Option<PathBuf>,
     pub tab: Tab,
     pub recording: Recording,
@@ -608,6 +618,9 @@ impl AppState {
             listing: false,
             request: 0,
             documents: HashMap::new(),
+            prosody_running: None,
+            prosody_pending: None,
+            prosody_errors: HashMap::new(),
             loading: HashSet::new(),
             selected: None,
             ktalk: Default::default(),
@@ -782,9 +795,85 @@ impl AppState {
         self.tasks_open = false;
         self.refresh_tasks();
         self.selected = Some(path.clone());
-        if !self.documents.contains_key(&path) && self.loading.insert(path) {
+        if self.documents.contains_key(&path) {
+            self.maybe_recompute_prosody(&path);
+        } else if self.loading.insert(path) {
             self.send(Command::Load(meeting));
         }
+    }
+    fn maybe_recompute_prosody(&mut self, path: &std::path::Path) {
+        if self.prosody_errors.contains_key(path)
+            || !self.can_prepare_audio(false)
+            || self.enhancing.is_some()
+            || self.unsaved()
+        {
+            return;
+        }
+        if self.prosody_running.is_some() {
+            self.prosody_pending = Some(path.to_owned());
+            return;
+        }
+        let Some(doc) = self.documents.get(path) else {
+            return;
+        };
+        let meeting = &doc.data.meeting;
+        if !notetaker_pipeline::has_prosody_audio(meeting, &doc.data.transcript) {
+            return;
+        }
+        match meeting.prosody_needs_recompute() {
+            Ok(true) => {
+                let id = Uuid::now_v7();
+                let cancel = CancellationHandle::default();
+                if self
+                    .tx
+                    .send(Command::RecomputeProsody {
+                        meeting: meeting.clone(),
+                        id,
+                        cancel: cancel.clone(),
+                    })
+                    .is_ok()
+                {
+                    self.prosody_running = Some(ProsodyJob {
+                        path: path.to_owned(),
+                        id,
+                        cancel,
+                    });
+                } else {
+                    self.prosody_failed(
+                        path.to_owned(),
+                        "Фоновый поток завершился; перезапустите приложение".into(),
+                    );
+                }
+            }
+            Ok(false) => {}
+            Err(error) => self.prosody_failed(path.to_owned(), error.to_string()),
+        }
+    }
+    fn prosody_failed(&mut self, path: PathBuf, error: String) {
+        notetaker_runtime::diagnostics::event("prosody recompute failed");
+        notetaker_runtime::diagnostics::worker_stderr(&error);
+        self.prosody_errors.insert(path, error);
+    }
+    pub fn prosody_status(&self, path: &std::path::Path) -> Option<Result<(), String>> {
+        if self
+            .prosody_running
+            .as_ref()
+            .is_some_and(|job| job.path == path && !job.cancel.is_cancelled())
+        {
+            Some(Ok(()))
+        } else {
+            self.prosody_errors.get(path).cloned().map(Err)
+        }
+    }
+    fn cancel_prosody(&self) {
+        if let Some(job) = &self.prosody_running {
+            job.cancel.cancel();
+        }
+    }
+    pub fn audio_recalculating(&self) -> bool {
+        self.documents
+            .values()
+            .any(|doc| doc.speaker_ui.recalculating)
     }
     pub fn flush(&mut self) {
         let saves: Vec<_> = self
@@ -814,6 +903,8 @@ impl AppState {
         {
             return;
         }
+        // A user action takes priority over the automatic prosody job.
+        self.cancel_prosody();
         // Saves are serialized ahead of the command. The worker checks the
         // expected transcript and refuses analysis after a failed/conflicting save.
         self.ktalk_end_undo(&path);
@@ -977,10 +1068,7 @@ impl AppState {
             && !self.quickstart.probe_busy
             && !self.draft_busy
             && self.recording.assist.bookmarks_pending == 0
-            && !self
-                .documents
-                .values()
-                .any(|document| document.speaker_ui.recalculating)
+            && !self.audio_recalculating()
     }
     pub fn open_record_options(&mut self) {
         if self.recording.busy() {
@@ -1259,6 +1347,7 @@ impl AppState {
                         .map(|process| process.started_at)
                 })
         });
+        self.cancel_prosody();
         self.recording = Recording {
             phase: Phase::Starting,
             process_id: self.process_id,
@@ -1351,10 +1440,7 @@ impl AppState {
     }
     pub fn start_event(&mut self, event: notetaker_core::calendar::CalendarEvent) {
         if !self.ready
-            || self
-                .documents
-                .values()
-                .any(|doc| doc.speaker_ui.recalculating)
+            || self.audio_recalculating()
             || self.recording.busy()
             || self.recording.assist.bookmarks_pending > 0
             || self.quickstart.probe_busy
@@ -1556,10 +1642,7 @@ impl AppState {
     }
     pub fn import_recording(&mut self, file: PathBuf) {
         if !self.ready
-            || self
-                .documents
-                .values()
-                .any(|doc| doc.speaker_ui.recalculating)
+            || self.audio_recalculating()
             || self.recording.busy()
             || self.recording.assist.bookmarks_pending > 0
             || self.downloading
@@ -1571,6 +1654,7 @@ impl AppState {
         }
         self.flush();
         let settings = self.recording_settings();
+        self.cancel_prosody();
         self.recording = Recording {
             phase: Phase::Starting,
             importing: true,
@@ -1622,10 +1706,7 @@ impl AppState {
     /// Finishes an interrupted meeting from its saved audio.
     pub fn retranscribe(&mut self, path: &std::path::Path) {
         if !self.ready
-            || self
-                .documents
-                .values()
-                .any(|doc| doc.speaker_ui.recalculating)
+            || self.audio_recalculating()
             || self.recording.busy()
             || self.enhancing.is_some()
             || self.downloading
@@ -1643,6 +1724,7 @@ impl AppState {
         settings.folder = document.data.meta.folder.clone();
         settings.folder_mode_override = None;
         let meeting = document.data.meeting.clone();
+        self.cancel_prosody();
         self.recording = Recording {
             phase: Phase::Starting,
             importing: true,
@@ -1968,6 +2050,7 @@ impl AppState {
         self.draft_cancel.cancel();
         self.connections.cancel_all();
         self.ktalk.cancel.cancel();
+        self.cancel_prosody();
         self.recording.request_stop();
         self.flush();
         for action in self.connections.autosaves() {
@@ -1978,7 +2061,8 @@ impl AppState {
     pub fn can_exit(&self) -> bool {
         self.exit_requested
             && (self.shutdown.forced()
-                || (self.pending_ai.is_empty()
+                || (self.prosody_running.is_none()
+                    && self.pending_ai.is_empty()
                     && !self.ktalk.busy
                     && !self.ktalk.learning.busy()
                     && !self.connections.busy()
@@ -2401,7 +2485,7 @@ impl AppState {
             }
             Event::Listed { .. } => {}
             Event::Loaded { path, result } => {
-                self.loading.remove(&path);
+                let opening = self.loading.remove(&path) && self.selected.as_ref() == Some(&path);
                 match result {
                     Ok(data) => {
                         if let Some(document) = self.documents.get_mut(&path) {
@@ -2410,7 +2494,10 @@ impl AppState {
                                 document.changed();
                             }
                         } else {
-                            self.documents.insert(path, Document::new(data));
+                            self.documents.insert(path.clone(), Document::new(data));
+                        }
+                        if opening {
+                            self.maybe_recompute_prosody(&path);
                         }
                     }
                     Err(error) => self.error = Some(error),
@@ -2459,6 +2546,26 @@ impl AppState {
                     }
                 }
                 self.start_semantic_index();
+            }
+            Event::ProsodyRecomputed { id, result } => {
+                if self
+                    .prosody_running
+                    .as_ref()
+                    .is_some_and(|job| job.id == id)
+                {
+                    let job = self.prosody_running.take().expect("matching prosody job");
+                    if let Some(pending) = self.prosody_pending.take()
+                        && pending != job.path
+                        && self.selected.as_ref() == Some(&pending)
+                    {
+                        self.maybe_recompute_prosody(&pending);
+                    }
+                    if !job.cancel.is_cancelled()
+                        && let Err(error) = result
+                    {
+                        self.prosody_failed(job.path, error);
+                    }
+                }
             }
             Event::Rediarized { path, result, data } => {
                 if let Some(document) = self.documents.get_mut(&path) {
@@ -4249,6 +4356,260 @@ mod tests {
         state.selected = Some(path.clone());
         (state, commands, root, path)
     }
+
+    fn add_prosody_audio(document: &mut Document) {
+        document
+            .data
+            .transcript
+            .segments
+            .push(notetaker_core::Segment {
+                id: Uuid::now_v7(),
+                speaker: notetaker_core::SpeakerId("me".into()),
+                channel: Channel::Mic,
+                start_ms: 0,
+                end_ms: 3000,
+                text: "Реплика".into(),
+                source: notetaker_core::Source::Final,
+                edited: false,
+                lang: None,
+            });
+        let meeting = &document.data.meeting;
+        meeting.write_transcript(&document.data.transcript).unwrap();
+        std::fs::write(meeting.mic_audio_path(), []).unwrap();
+    }
+
+    fn prosody_fixture() -> (AppState, Receiver<Command>, tempfile::TempDir, PathBuf) {
+        let (mut state, commands, root, path) = fixture();
+        state.ready = true;
+        state.tasks_busy = true;
+        (state, commands, root, path)
+    }
+
+    #[test]
+    fn opening_a_stale_meeting_starts_prosody_once_and_success_clears_status() {
+        let (mut state, commands, _root, path) = prosody_fixture();
+        let mut document = state.documents.remove(&path).unwrap();
+        add_prosody_audio(&mut document);
+        let meeting = document.data.meeting.clone();
+        std::fs::write(path.join("prosody.json"), r#"{"version":1,"segments":{}}"#).unwrap();
+        state.select(meeting.clone());
+        assert!(matches!(commands.try_recv().unwrap(), Command::Load(_)));
+        state.apply(Event::Loaded {
+            path: path.clone(),
+            result: Ok(document.data),
+        });
+        let Command::RecomputeProsody {
+            meeting: queued,
+            id,
+            ..
+        } = commands.try_recv().unwrap()
+        else {
+            panic!("expected prosody recompute");
+        };
+        assert_eq!(queued.path(), path);
+        assert_eq!(state.prosody_status(&path), Some(Ok(())));
+        state.select(meeting.clone());
+        assert!(commands.try_recv().is_err());
+
+        meeting
+            .write_prosody(&notetaker_core::prosody::Prosody::default())
+            .unwrap();
+        state.apply(Event::ProsodyRecomputed { id, result: Ok(()) });
+        assert_eq!(state.prosody_status(&path), None);
+        state.select(meeting);
+        assert!(commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn prosody_skips_busy_or_ineligible_meetings_and_failed_attempts() {
+        let (mut state, commands, _root, path) = prosody_fixture();
+        let meeting = state.documents[&path].data.meeting.clone();
+        state.select(meeting.clone());
+        assert!(commands.try_recv().is_err());
+        assert_eq!(state.prosody_status(&path), None);
+
+        let doc = state.documents.get_mut(&path).unwrap();
+        add_prosody_audio(doc);
+        let mut system = doc.data.transcript.segments[0].clone();
+        system.channel = Channel::System;
+        system.id = Uuid::now_v7();
+        doc.data.transcript.segments.push(system);
+        state.select(meeting.clone());
+        assert!(commands.try_recv().is_err());
+        assert_eq!(state.prosody_status(&path), None);
+
+        let doc = state.documents.get_mut(&path).unwrap();
+        doc.data.transcript.segments.pop();
+        doc.saving = true;
+        state.select(meeting.clone());
+        assert!(commands.try_recv().is_err());
+        state.documents.get_mut(&path).unwrap().saving = false;
+        state.recording.phase = Phase::Recording;
+        state.select(meeting.clone());
+        assert!(commands.try_recv().is_err());
+        state.recording.phase = Phase::Idle;
+        state.quickstart.probe_busy = true;
+        state.select(meeting.clone());
+        assert!(commands.try_recv().is_err());
+        state.quickstart.probe_busy = false;
+        state.draft_busy = true;
+        state.select(meeting.clone());
+        assert!(commands.try_recv().is_err());
+        state.draft_busy = false;
+        state.select(meeting.clone());
+        let Command::RecomputeProsody { id, .. } = commands.try_recv().unwrap() else {
+            panic!("expected prosody recompute");
+        };
+        state.apply(Event::ProsodyRecomputed {
+            id,
+            result: Err("Нет модели".into()),
+        });
+        assert_eq!(state.prosody_status(&path), Some(Err("Нет модели".into())));
+        state.select(meeting);
+        assert!(commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn starting_audio_work_cancels_prosody_without_blocking_or_recording_an_error() {
+        for operation in ["record", "import", "retranscribe", "rediarize"] {
+            let (mut state, commands, _root, path) = prosody_fixture();
+            let doc = state.documents.get_mut(&path).unwrap();
+            add_prosody_audio(doc);
+            let meeting = doc.data.meeting.clone();
+            state.select(meeting.clone());
+            let Command::RecomputeProsody { id, cancel, .. } = commands.try_recv().unwrap() else {
+                panic!("expected prosody recompute");
+            };
+            assert!(state.can_prepare_recording());
+            assert_eq!(state.busy_reason(), None);
+            match operation {
+                "record" => {
+                    state.start_recording();
+                    assert!(matches!(commands.try_recv().unwrap(), Command::Record(_)));
+                }
+                "import" => {
+                    state.import_recording("recording.wav".into());
+                    assert!(matches!(
+                        commands.try_recv().unwrap(),
+                        Command::Import { .. }
+                    ));
+                }
+                "retranscribe" => {
+                    state.retranscribe(&path);
+                    assert!(matches!(
+                        commands.try_recv().unwrap(),
+                        Command::Retranscribe { .. }
+                    ));
+                }
+                _ => {
+                    std::fs::write(meeting.system_audio_path(), []).unwrap();
+                    state.rediarize(None);
+                    let command = loop {
+                        match commands.try_recv().unwrap() {
+                            Command::Save(_) => continue,
+                            command => break command,
+                        }
+                    };
+                    assert!(matches!(command, Command::Rediarize { .. }));
+                    let doc = state.documents.get_mut(&path).unwrap();
+                    doc.speaker_ui.busy = false;
+                    doc.speaker_ui.recalculating = false;
+                }
+            }
+            assert!(cancel.is_cancelled());
+            assert_eq!(state.prosody_status(&path), None);
+            state.recording.phase = Phase::Idle;
+            state.select(meeting.clone());
+            assert!(commands.try_recv().is_err());
+            state.apply(Event::ProsodyRecomputed {
+                id,
+                result: Err("Отменено".into()),
+            });
+            assert!(commands.try_recv().is_err());
+            state.select(meeting);
+            let Command::RecomputeProsody { id: next_id, .. } = commands.try_recv().unwrap() else {
+                panic!("expected a fresh attempt");
+            };
+            assert_ne!(id, next_id);
+            assert_eq!(state.prosody_status(&path), Some(Ok(())));
+            assert!(!state.prosody_errors.contains_key(&path));
+        }
+    }
+
+    #[test]
+    fn completed_prosody_does_not_restart_the_same_stale_selection() {
+        let (mut state, commands, _root, path) = prosody_fixture();
+        let doc = state.documents.get_mut(&path).unwrap();
+        add_prosody_audio(doc);
+        let meeting = doc.data.meeting.clone();
+        state.select(meeting.clone());
+        let Command::RecomputeProsody { id, .. } = commands.try_recv().unwrap() else {
+            panic!("expected prosody recompute");
+        };
+        state.select(meeting);
+        assert!(commands.try_recv().is_err());
+        state.apply(Event::ProsodyRecomputed { id, result: Ok(()) });
+        assert!(commands.try_recv().is_err());
+        assert_eq!(state.prosody_status(&path), None);
+    }
+
+    #[test]
+    fn prosody_completion_rechecks_the_selected_meeting() {
+        for result in [Ok(()), Err("Нет модели".into())] {
+            let (mut state, commands, root, path) = prosody_fixture();
+            let doc = state.documents.get_mut(&path).unwrap();
+            add_prosody_audio(doc);
+            let first = doc.data.meeting.clone();
+            let second = notetaker_core::Library::open(root.path())
+                .unwrap()
+                .create_meeting(notetaker_core::MeetingMeta::new(
+                    "Second",
+                    chrono::Utc::now(),
+                ))
+                .unwrap();
+            let mut doc = Document::new(DocumentData::read(second.clone()).unwrap());
+            add_prosody_audio(&mut doc);
+            state.documents.insert(second.path().to_owned(), doc);
+
+            state.select(first);
+            let Command::RecomputeProsody { id, .. } = commands.try_recv().unwrap() else {
+                panic!("expected prosody for the first meeting");
+            };
+            state.select(second.clone());
+            assert!(commands.try_recv().is_err());
+            state.apply(Event::ProsodyRecomputed { id, result });
+            let Command::RecomputeProsody { meeting, id, .. } = commands.try_recv().unwrap() else {
+                panic!("expected prosody for the second meeting");
+            };
+            assert_eq!(meeting.path(), second.path());
+            state.apply(Event::ProsodyRecomputed { id, result: Ok(()) });
+            assert!(commands.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn exit_cancels_prosody_and_waits_for_cleanup() {
+        let (mut state, commands, _root, path) = prosody_fixture();
+        let doc = state.documents.get_mut(&path).unwrap();
+        add_prosody_audio(doc);
+        let meeting = doc.data.meeting.clone();
+        state.select(meeting);
+        let Command::RecomputeProsody { id, cancel, .. } = commands.try_recv().unwrap() else {
+            panic!("expected prosody recompute");
+        };
+        state.exit();
+        assert!(cancel.is_cancelled());
+        assert!(!state.can_exit());
+        assert_eq!(state.prosody_status(&path), None);
+        state.apply(Event::ProsodyRecomputed {
+            id,
+            result: Err("Отменено".into()),
+        });
+        assert!(state.can_exit());
+        assert!(state.prosody_errors.is_empty());
+        assert!(commands.try_recv().is_err());
+    }
+
     #[test]
     fn semantic_hit_selects_anchor_and_ready_results_refresh_without_reindex_loop() {
         let (mut state, commands, _root, path) = fixture();

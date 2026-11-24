@@ -12,7 +12,9 @@ mod decode;
 mod echo;
 mod import;
 mod prosody;
-pub use prosody::{ProsodyStage, recompute_prosody};
+pub use prosody::{
+    ProsodyStage, has_prosody_audio, recompute_prosody, recompute_prosody_cancellable,
+};
 mod recover;
 pub use echo::suppress_echo;
 pub mod live_speakers;
