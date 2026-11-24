@@ -1240,7 +1240,7 @@ impl NotetakerApp {
         let folder_enabled = self.organization.meeting_editable(&self.state);
         let skipped_summary = self.state.skipped_summary_notice(&path);
         let prosody_status = self.state.prosody_status(&path);
-        let audio_recalculating = self.state.audio_recalculating() || self.state.prosody_running();
+        let audio_recalculating = self.state.audio_recalculating();
         let can_toggle_tasks = self.state.can_toggle_tasks();
         let readiness = self.state.documents.get(&path).map(|doc| {
             crate::state::summary_provider(

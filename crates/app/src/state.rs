@@ -865,9 +865,6 @@ impl AppState {
             self.prosody_errors.get(path).cloned().map(Err)
         }
     }
-    pub fn prosody_running(&self) -> bool {
-        self.prosody_running.is_some()
-    }
     fn cancel_prosody(&self) {
         if let Some(job) = &self.prosody_running {
             job.cancel.cancel();
@@ -894,7 +891,6 @@ impl AppState {
         };
         if speakers.is_some_and(|n| !(1..=8).contains(&n))
             || self.recording.busy()
-            || self.prosody_running.is_some()
             || self.recording.assist.bookmarks_pending > 0
             || self.enhancing.is_some()
             || self.settings_pending
@@ -907,6 +903,8 @@ impl AppState {
         {
             return;
         }
+        // A user action takes priority over the automatic prosody job.
+        self.cancel_prosody();
         // Saves are serialized ahead of the command. The worker checks the
         // expected transcript and refuses analysis after a failed/conflicting save.
         self.ktalk_end_undo(&path);
@@ -4473,7 +4471,7 @@ mod tests {
 
     #[test]
     fn starting_audio_work_cancels_prosody_without_blocking_or_recording_an_error() {
-        for operation in ["record", "import", "retranscribe"] {
+        for operation in ["record", "import", "retranscribe", "rediarize"] {
             let (mut state, commands, _root, path) = prosody_fixture();
             let doc = state.documents.get_mut(&path).unwrap();
             add_prosody_audio(doc);
@@ -4496,12 +4494,26 @@ mod tests {
                         Command::Import { .. }
                     ));
                 }
-                _ => {
+                "retranscribe" => {
                     state.retranscribe(&path);
                     assert!(matches!(
                         commands.try_recv().unwrap(),
                         Command::Retranscribe { .. }
                     ));
+                }
+                _ => {
+                    std::fs::write(meeting.system_audio_path(), []).unwrap();
+                    state.rediarize(None);
+                    let command = loop {
+                        match commands.try_recv().unwrap() {
+                            Command::Save(_) => continue,
+                            command => break command,
+                        }
+                    };
+                    assert!(matches!(command, Command::Rediarize { .. }));
+                    let doc = state.documents.get_mut(&path).unwrap();
+                    doc.speaker_ui.busy = false;
+                    doc.speaker_ui.recalculating = false;
                 }
             }
             assert!(cancel.is_cancelled());

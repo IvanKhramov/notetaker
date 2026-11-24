@@ -877,7 +877,9 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                 } => {
                     let events = events.clone();
                     thread::spawn(move || {
-                        let result = (|| -> Result<()> {
+                        // The event must always arrive, even after a panic: the
+                        // state keeps the job and exit waits for it.
+                        let job = std::panic::AssertUnwindSafe(|| -> Result<()> {
                             let transcript = meeting.read_transcript()?;
                             if notetaker_pipeline::has_prosody_audio(&meeting, &transcript)
                                 && meeting.prosody_needs_recompute()?
@@ -896,15 +898,21 @@ pub fn spawn() -> (Sender<Command>, Receiver<Event>) {
                                             Duration::from_secs(300)
                                                 .saturating_add(duration.saturating_mul(4)),
                                         );
-                                        let turns = client.diarize(wav, "system", None, false)?.turns;
+                                        let turns =
+                                            client.diarize(wav, "system", None, false)?.turns;
                                         client.shutdown()?;
                                         Ok(turns)
                                     },
                                 )?;
                             }
                             Ok(())
-                        })()
-                        .map_err(error_text);
+                        });
+                        let result = match std::panic::catch_unwind(job) {
+                            Ok(result) => result.map_err(error_text),
+                            Err(_) => {
+                                Err("Пересчёт речевых показателей завершился аварийно".into())
+                            }
+                        };
                         let _ = events.send(Event::ProsodyRecomputed { id, result });
                     });
                 }
