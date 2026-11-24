@@ -1239,6 +1239,8 @@ impl NotetakerApp {
         );
         let folder_enabled = self.organization.meeting_editable(&self.state);
         let skipped_summary = self.state.skipped_summary_notice(&path);
+        let prosody_status = self.state.prosody_status(&path);
+        let audio_recalculating = self.state.audio_recalculating();
         let can_toggle_tasks = self.state.can_toggle_tasks();
         let readiness = self.state.documents.get(&path).map(|doc| {
             crate::state::summary_provider(
@@ -1315,7 +1317,8 @@ impl NotetakerApp {
             Some("Аудио этой встречи не сохранено, пересчитать собеседников нельзя")
         } else if document.speaker_ui.recalculating {
             Some("Пересчитываю собеседников…")
-        } else if document.saving
+        } else if audio_recalculating
+            || document.saving
             || speaker_busy
             || document.attachments_pending > 0
             || self.state.enhancing.is_some()
@@ -1617,6 +1620,18 @@ impl NotetakerApp {
                 }
             });
         });
+        if let Some(status) = prosody_status {
+            match status {
+                Ok(()) => {
+                    ui.weak("Пересчитываю речевые показатели…");
+                }
+                Err(error) => {
+                    ui.small(format!(
+                        "Не удалось пересчитать речевые показатели. {error}"
+                    ));
+                }
+            }
+        }
         let summary = if document.data.enhanced.is_empty() {
             &document.data.notes
         } else {

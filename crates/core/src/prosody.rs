@@ -32,6 +32,12 @@ pub mod thresholds {
 use thresholds::*;
 
 const VERSION: u32 = 1;
+// Bump when the acoustic or tempo measurement changes.
+pub const MEASUREMENT_REVISION: u32 = 2;
+
+const fn legacy_measurement_revision() -> u32 {
+    1
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SegmentProsody {
@@ -61,6 +67,8 @@ impl SegmentProsody {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Prosody {
     version: u32,
+    #[serde(default = "legacy_measurement_revision")]
+    algorithm: u32,
     pub segments: BTreeMap<Uuid, SegmentProsody>,
 }
 
@@ -68,12 +76,19 @@ impl Default for Prosody {
     fn default() -> Self {
         Self {
             version: VERSION,
+            algorithm: MEASUREMENT_REVISION,
             segments: BTreeMap::new(),
         }
     }
 }
 
 impl Meeting {
+    pub fn prosody_needs_recompute(&self) -> Result<bool> {
+        Ok(self
+            .read_prosody()?
+            .is_none_or(|prosody| prosody.algorithm < MEASUREMENT_REVISION))
+    }
+
     pub fn read_prosody(&self) -> Result<Option<Prosody>> {
         let path = self.source_path("prosody.json")?;
         let Some(bytes) = storage::read_bytes(&path)? else {
@@ -368,6 +383,26 @@ fn metric_markers(raw: &SegmentProsody, baseline: &[Option<MetricBaseline>; 4]) 
 mod tests {
     use super::*;
     use crate::{Source, SpeakerId};
+
+    #[test]
+    fn recompute_detects_missing_legacy_and_current_measurements() {
+        let root = tempfile::tempdir().unwrap();
+        let library = crate::Library::open(root.path()).unwrap();
+        let meeting = library
+            .create_meeting(crate::MeetingMeta::new("Prosody", chrono::Utc::now()))
+            .unwrap();
+        let path = meeting.path().join("prosody.json");
+        assert!(meeting.prosody_needs_recompute().unwrap());
+        std::fs::write(&path, r#"{"version":1,"segments":{}}"#).unwrap();
+        assert_eq!(meeting.read_prosody().unwrap().unwrap().algorithm, 1);
+        assert!(meeting.prosody_needs_recompute().unwrap());
+        std::fs::write(&path, r#"{"version":1,"algorithm":1,"segments":{}}"#).unwrap();
+        assert!(meeting.prosody_needs_recompute().unwrap());
+        meeting.write_prosody(&Prosody::default()).unwrap();
+        let saved = meeting.read_prosody().unwrap().unwrap();
+        assert_eq!(saved.algorithm, MEASUREMENT_REVISION);
+        assert!(!meeting.prosody_needs_recompute().unwrap());
+    }
 
     fn segment(speaker: &str, channel: Channel, start_ms: u64, end_ms: u64) -> Segment {
         Segment {
