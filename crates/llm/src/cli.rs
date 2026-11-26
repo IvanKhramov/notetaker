@@ -317,13 +317,25 @@ fn file_tail(path: &Path) -> String {
 }
 
 /// The last lines of what a failed CLI printed, short enough for a settings card.
+/// A JSON report (Claude `result`, Codex `message`) is reduced to its text.
 fn failure_tail(output: &str) -> String {
     let lines: Vec<&str> = output
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .collect();
-    let tail = lines[lines.len().saturating_sub(3)..].join(" ");
+    let reported = lines.iter().rev().find_map(|line| {
+        let value: serde_json::Value = serde_json::from_str(line).ok()?;
+        ["result", "error", "message"].iter().find_map(|key| {
+            let text = match &value[*key] {
+                serde_json::Value::String(text) => text.as_str(),
+                serde_json::Value::Object(error) => error.get("message")?.as_str()?,
+                _ => return None,
+            };
+            (!text.trim().is_empty()).then(|| text.trim().to_owned())
+        })
+    });
+    let tail = reported.unwrap_or_else(|| lines[lines.len().saturating_sub(3)..].join(" "));
     tail.chars().take(300).collect()
 }
 
@@ -875,6 +887,18 @@ mod login_tests {
             "two three four"
         );
         assert_eq!(failure_tail(&"я".repeat(1000)).chars().count(), 300);
+        assert_eq!(
+            failure_tail(
+                r#"{"type":"result","is_error":true,"duration_api_ms":0,"usage":{"input_tokens":0},"result":"Not logged in · Please run /login"}"#
+            ),
+            "Not logged in · Please run /login"
+        );
+        assert_eq!(
+            failure_tail(
+                "{\"type\":\"turn.started\"}\n{\"type\":\"error\",\"message\":\"usage limit\"}"
+            ),
+            "usage limit"
+        );
     }
     #[test]
     fn login_arguments_are_the_sign_in_command_of_each_cli() {

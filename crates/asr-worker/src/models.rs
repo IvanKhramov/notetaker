@@ -1,7 +1,6 @@
 #[path = "../../model_download.rs"]
 mod model_download;
 use anyhow::{Context, Result, bail, ensure};
-use bzip2::read::BzDecoder;
 use directories::ProjectDirs;
 use sha2::{Digest, Sha256};
 use std::{
@@ -11,110 +10,124 @@ use std::{
     time::Duration,
 };
 
+/// Every model is a set of files pinned by size and SHA-256 under an immutable
+/// root. GitHub release assets of sherpa-onnx were replaced twice in November
+/// 2026, so models come from Hugging Face commits where one exists.
 pub struct ModelManifest {
     pub id: &'static str,
-    pub source: Source,
-    pub directory: &'static str,
-    /// Required installed files and their pinned, unpacked byte lengths.
-    pub files: &'static [(&'static str, u64)],
-}
-pub enum Source {
-    /// One file or a `.tar.bz2` archive, verified as a whole.
-    Archive {
-        url: &'static str,
-        sha256: &'static str,
-        size: u64,
-    },
-    /// Each of `files` from `{root}/{name}`, verified by the SHA-256 at the same index.
-    Files {
-        root: &'static str,
-        sha256: &'static [&'static str],
-    },
+    /// Each file is fetched from `{root}/{name}`.
+    pub root: &'static str,
+    /// Installed files: name, byte length and SHA-256.
+    pub files: &'static [(&'static str, u64, &'static str)],
 }
 
 pub const GIGAAM: ModelManifest = ModelManifest {
     id: "gigaam-v3",
-    source: Source::Archive {
-        url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-transducer-punct-giga-am-v3-russian-2025-12-16.tar.bz2",
-        sha256: "f9620a0099019c6afcee26525ef9ed3297fa50dd5691c1902af0c948fc1a470b",
-        size: 170_197_019,
-    },
-    directory: "sherpa-onnx-nemo-transducer-punct-giga-am-v3-russian-2025-12-16",
+    root: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-transducer-punct-giga-am-v3-russian-2025-12-16/resolve/a6039be7cee829a9044a69ac0ebaf1c191217c97",
     files: &[
-        ("encoder.int8.onnx", 224_570_820),
-        ("decoder.onnx", 4_600_132),
-        ("joiner.onnx", 2_712_896),
-        ("tokens.txt", 13_354),
+        (
+            "encoder.int8.onnx",
+            224_570_820,
+            "369f35a71bf288d3b8e0391fabd8dba5f2314088d440bca474056b7b4b6e66bf",
+        ),
+        (
+            "decoder.onnx",
+            4_600_132,
+            "38fc7475443ea2a26f63211ca350f73ac50fff824ab7a3876ee2bd610c53bbc4",
+        ),
+        (
+            "joiner.onnx",
+            2_712_896,
+            "602ff7017a93311aad34df1437c8d7f49911353c13d6eae7a6ee7b041339465c",
+        ),
+        (
+            "tokens.txt",
+            13_354,
+            "39abae20e692998290c574e606f11a9edef2902a1995463fcff63d1490cf22b7",
+        ),
     ],
 };
-// The GitHub release asset was re-exported on 2026-11-07 with different weights.
-// Pin the files of the original export by Hugging Face commit: installed copies stay valid.
+// The GitHub asset was re-exported on 2026-11-07 with different weights; this
+// commit holds the original export that installed copies came from.
 pub const PARAKEET: ModelManifest = ModelManifest {
     id: "parakeet-v3",
-    source: Source::Files {
-        root: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/2bda32ec70b097a55adaa07d9a7173915b43cc78",
-        sha256: &[
-            "acfc2b4456377e15d04f0243af540b7fe7c992f8d898d751cf134c3a55fd2247",
-            "179e50c43d1a9de79c8a24149a2f9bac6eb5981823f2a2ed88d655b24248db4e",
-            "3164c13fc2821009440d20fcb5fdc78bff28b4db2f8d0f0b329101719c0948b3",
-            "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d",
-        ],
-    },
-    directory: "",
+    root: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/2bda32ec70b097a55adaa07d9a7173915b43cc78",
     files: &[
-        ("encoder.int8.onnx", 652_184_281),
-        ("decoder.int8.onnx", 11_845_275),
-        ("joiner.int8.onnx", 6_355_277),
-        ("tokens.txt", 93_939),
+        (
+            "encoder.int8.onnx",
+            652_184_281,
+            "acfc2b4456377e15d04f0243af540b7fe7c992f8d898d751cf134c3a55fd2247",
+        ),
+        (
+            "decoder.int8.onnx",
+            11_845_275,
+            "179e50c43d1a9de79c8a24149a2f9bac6eb5981823f2a2ed88d655b24248db4e",
+        ),
+        (
+            "joiner.int8.onnx",
+            6_355_277,
+            "3164c13fc2821009440d20fcb5fdc78bff28b4db2f8d0f0b329101719c0948b3",
+        ),
+        (
+            "tokens.txt",
+            93_939,
+            "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d",
+        ),
     ],
 };
+// No Hugging Face copy of this version exists; the asset is unchanged since 2025-07.
 pub const SILERO: ModelManifest = ModelManifest {
     id: "silero-vad",
-    source: Source::Archive {
-        url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx",
-        sha256: "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
-        size: 643_854,
-    },
-    directory: "",
-    files: &[("silero_vad.onnx", 643_854)],
+    root: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models",
+    files: &[(
+        "silero_vad.onnx",
+        643_854,
+        "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
+    )],
 };
 
-/// Multilingual tiny, not tiny.en. Only int8 weights are retained after download.
+/// Multilingual tiny, not tiny.en. Only the int8 weights are downloaded.
 pub const WHISPER_TINY: ModelManifest = ModelManifest {
     id: "whisper-tiny",
-    source: Source::Archive {
-        url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-tiny.tar.bz2",
-        sha256: "c46116994e539aa165266d96b325252728429c12535eb9d8b6a2b10f129e66b1",
-        size: 116_204_861,
-    },
-    directory: "sherpa-onnx-whisper-tiny",
+    root: "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny/resolve/65176e2deb88badc814a94058666cadccc29b61c",
     files: &[
-        ("tiny-encoder.int8.onnx", 12_937_772),
-        ("tiny-decoder.int8.onnx", 89_855_401),
+        (
+            "tiny-encoder.int8.onnx",
+            12_937_772,
+            "d24fb083ae3b1041fc24e97971d60e280c9342201fbb67b0ab428a8b4a51a434",
+        ),
+        (
+            "tiny-decoder.int8.onnx",
+            89_855_401,
+            "d2fece8dd42771f1df975c6c0445770d0c292bf7547c2cae04a6c0cc57540925",
+        ),
     ],
 };
 
 pub const PYANNOTE: ModelManifest = ModelManifest {
     id: "pyannote-3.0",
-    source: Source::Archive {
-        url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2",
-        sha256: "24615ee884c897d9d2ba09bb4d30da6bb1b15e685065962db5b02e76e4996488",
-        size: 6_958_444,
-    },
-    directory: "sherpa-onnx-pyannote-segmentation-3-0",
-    files: &[("model.int8.onnx", 1_540_506), ("LICENSE", 1_061)],
+    root: "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/9403a6902bb58e3d5ae8c7e77c3422de279db2e0",
+    files: &[
+        (
+            "model.int8.onnx",
+            1_540_506,
+            "d582f4b4c6b48205de7e0643c57df0df5615a3c176189be3fc461e9d18827b5d",
+        ),
+        (
+            "LICENSE",
+            1_061,
+            "14d7016ad68e7394d6e6b78d96cc2ae431c905287b89674cfdf021e79e62b8ba",
+        ),
+    ],
 };
+// The GitHub asset was replaced on 2026-11-19 with a file one byte longer.
 pub const ERES2NET: ModelManifest = ModelManifest {
     id: "eres2net-base",
-    source: Source::Archive {
-        url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
-        sha256: "1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b",
-        size: 39_593_761,
-    },
-    directory: "",
+    root: "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/0743f301363dec56491a490f6d6cbc9d67f9a3bf",
     files: &[(
         "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
         39_593_761,
+        "1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b",
     )],
 };
 
@@ -167,7 +180,7 @@ pub fn installed(root: &Path, model: &ModelManifest) -> Result<PathBuf> {
     Ok(path)
 }
 fn check_files(path: &Path, model: &ModelManifest) -> Result<()> {
-    for (file, expected) in model.files {
+    for (file, expected, _) in model.files {
         let metadata = fs::metadata(path.join(file))?;
         ensure!(
             metadata.is_file() && *expected > 0 && metadata.len() == *expected,
@@ -202,35 +215,6 @@ fn verify(mut reader: impl Read, size: u64, sha256: &str, label: &str) -> Result
     Ok(())
 }
 
-fn unpack_archive(archive: impl Read, extracted: &Path, model: &ModelManifest) -> Result<()> {
-    let mut tar = tar::Archive::new(BzDecoder::new(archive));
-    for entry in tar.entries()? {
-        let mut entry = entry?;
-        ensure!(
-            entry.header().entry_type().is_file() || entry.header().entry_type().is_dir(),
-            "unsupported archive entry"
-        );
-        ensure!(
-            entry.path()?.starts_with(model.directory),
-            "unexpected archive root"
-        );
-        // The tiny archive also contains float weights. Keep just the
-        // files used for language ID, without deleting installed artifacts.
-        if model.id == WHISPER_TINY.id {
-            let path = entry.path()?;
-            if !model
-                .files
-                .iter()
-                .any(|(name, _)| path == Path::new(model.directory).join(name))
-            {
-                continue;
-            }
-        }
-        ensure!(entry.unpack_in(extracted)?, "unsafe archive path");
-    }
-    Ok(())
-}
-
 /// Download `url` to a resumable partial and keep it only if it matches the pin.
 fn fetch(url: &str, partial: &Path, size: u64, sha256: &str, label: &str) -> Result<()> {
     model_download::download(url, partial, size, label, Duration::from_secs(60))?;
@@ -248,58 +232,38 @@ fn download_one(root: &Path, model: &ModelManifest) -> Result<()> {
         fs::remove_dir_all(staging)?;
         return Ok(());
     }
+    // Whole-archive partials of versions up to 0.37.0 can never be resumed.
+    let archive = root.join(format!(".{}.part", model.id));
+    if archive.exists() {
+        fs::remove_file(&archive)?;
+    }
     let extracted = staging.join("extracted");
     fs::create_dir(&extracted)?;
-    let archive = root.join(format!(".{}.part", model.id));
-    let mut partials = vec![archive.clone()];
-    match model.source {
-        Source::Archive { url, sha256, size } => {
-            fetch(url, &archive, size, sha256, model.id)?;
-            if model.directory.is_empty() {
-                // The installed inode must never have been open as a writable partial.
-                fs::copy(&archive, extracted.join(model.files[0].0))?;
-            } else {
-                unpack_archive(File::open(&archive)?, &extracted, model)?;
-            }
-        }
-        Source::Files { root: base, sha256 } => {
-            ensure!(
-                sha256.len() == model.files.len(),
-                "{}: pin mismatch",
-                model.id
-            );
-            // An archive partial of an earlier source can never be resumed.
-            if archive.exists() {
-                fs::remove_file(&archive)?;
-            }
-            for ((name, size), sha256) in model.files.iter().zip(sha256) {
-                let label = format!("{}/{name}", model.id);
-                let partial = root.join(format!(".{}-{name}.part", model.id));
-                fetch(&format!("{base}/{name}"), &partial, *size, sha256, &label)?;
-                fs::copy(&partial, extracted.join(name))?;
-                eprintln!("NOTETAKER_MODEL_INSTALLED {label}");
-                partials.push(partial);
-            }
-        }
+    let mut partials = Vec::new();
+    for (name, size, sha256) in model.files {
+        let label = format!("{}/{name}", model.id);
+        let partial = root.join(format!(".{}-{name}.part", model.id));
+        fetch(
+            &format!("{}/{name}", model.root),
+            &partial,
+            *size,
+            sha256,
+            &label,
+        )?;
+        // The installed inode must never have been open as a writable partial.
+        fs::copy(&partial, extracted.join(name))?;
+        eprintln!("NOTETAKER_MODEL_INSTALLED {label}");
+        partials.push(partial);
     }
-    let source = extracted.join(model.directory);
-    check_files(&source, model)?;
-    if let Source::Archive { sha256, .. } = model.source {
-        fs::write(source.join("SHA256"), sha256)?;
-    }
+    check_files(&extracted, model)?;
     if root.join(model.id).exists() {
         fs::remove_dir_all(root.join(model.id))?;
     }
-    fs::rename(source, root.join(model.id))?;
+    fs::rename(&extracted, root.join(model.id))?;
     for partial in partials {
-        if partial.exists() {
-            fs::remove_file(partial)?;
-        }
+        fs::remove_file(partial)?;
     }
     fs::remove_dir_all(staging)?;
-    if let Source::Archive { .. } = model.source {
-        eprintln!("NOTETAKER_MODEL_INSTALLED {}", model.id);
-    }
     eprintln!(
         "Installed {} in {}",
         model.id,
@@ -326,16 +290,9 @@ pub fn download_plan(id: &str) -> Result<()> {
     let root = models_dir()?;
     for model in downloads(id)? {
         let ready = u8::from(installed(&root, model).is_ok());
-        match model.source {
-            Source::Archive { size, .. } => {
-                println!("NOTETAKER_DOWNLOAD_PLAN {} {size} {ready}", model.id);
-            }
-            // Progress and installation are reported per file under these ids.
-            Source::Files { .. } => {
-                for (name, size) in model.files {
-                    println!("NOTETAKER_DOWNLOAD_PLAN {}/{name} {size} {ready}", model.id);
-                }
-            }
+        // Progress and installation are reported per file under these ids.
+        for (name, size, _) in model.files {
+            println!("NOTETAKER_DOWNLOAD_PLAN {}/{name} {size} {ready}", model.id);
         }
     }
     Ok(())
@@ -352,39 +309,6 @@ pub fn download(id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn tiny_install_keeps_only_int8_weights_and_creates_parent_directory() {
-        let encoder = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::fast());
-        let mut archive = tar::Builder::new(encoder);
-        for name in [
-            "tiny-encoder.int8.onnx",
-            "tiny-decoder.int8.onnx",
-            "tiny-encoder.onnx",
-            "tiny-decoder.onnx",
-        ] {
-            let mut header = tar::Header::new_gnu();
-            header.set_size(3);
-            header.set_mode(0o644);
-            header.set_cksum();
-            archive
-                .append_data(
-                    &mut header,
-                    format!("{}/{name}", WHISPER_TINY.directory),
-                    &b"abc"[..],
-                )
-                .unwrap();
-        }
-        let compressed = archive.into_inner().unwrap().finish().unwrap();
-        let temporary = tempfile::tempdir().unwrap();
-        unpack_archive(compressed.as_slice(), temporary.path(), &WHISPER_TINY).unwrap();
-        let installed = temporary.path().join(WHISPER_TINY.directory);
-        for (name, _) in WHISPER_TINY.files {
-            assert_eq!(fs::read(installed.join(name)).unwrap(), b"abc");
-        }
-        assert!(!installed.join("tiny-encoder.onnx").exists());
-        assert!(!installed.join("tiny-decoder.onnx").exists());
-    }
-
     #[test]
     fn checksum_rejects_corruption() {
         let sha = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
@@ -408,13 +332,12 @@ mod installation_tests {
     fn model(url: String) -> ModelManifest {
         ModelManifest {
             id: "neutral",
-            source: Source::Archive {
-                url: Box::leak(url.into_boxed_str()),
-                sha256: Box::leak(format!("{:x}", Sha256::digest(b"abcdef")).into_boxed_str()),
-                size: 6,
-            },
-            directory: "",
-            files: &[("model.bin", 6)],
+            root: Box::leak(url.into_boxed_str()),
+            files: Box::leak(Box::new([(
+                "model.bin",
+                6,
+                &*Box::leak(format!("{:x}", Sha256::digest(b"abcdef")).into_boxed_str()),
+            )])),
         }
     }
     fn headers(stream: &mut std::net::TcpStream) {
@@ -518,7 +441,7 @@ mod installation_tests {
     #[test]
     fn stale_writable_descriptor_cannot_truncate_the_installed_inode() {
         let root = tempfile::tempdir().unwrap();
-        let partial = root.path().join(".neutral.part");
+        let partial = root.path().join(".neutral-model.bin.part");
         fs::write(&partial, b"abcdef").unwrap();
         let stale = fs::OpenOptions::new().write(true).open(&partial).unwrap();
         download_one(root.path(), &model("http://127.0.0.1:1/unused".into())).unwrap();
@@ -566,12 +489,11 @@ mod installation_tests {
         };
         let manifest = ModelManifest {
             id: "pinned",
-            source: Source::Files {
-                root: base,
-                sha256: Box::leak(vec![digest(b"abc"), digest(b"defg")].into_boxed_slice()),
-            },
-            directory: "",
-            files: &[("a.onnx", 3), ("tokens.txt", 4)],
+            root: base,
+            files: Box::leak(Box::new([
+                ("a.onnx", 3, digest(b"abc")),
+                ("tokens.txt", 4, digest(b"defg")),
+            ])),
         };
         let server = thread::spawn(move || {
             let mut paths = Vec::new();
@@ -620,12 +542,11 @@ mod installation_tests {
         assert!(left.is_empty(), "{left:?}");
     }
     #[test]
-    fn archive_install_does_not_require_or_trust_local_markers() {
+    fn install_does_not_require_or_trust_local_markers() {
         let root = tempfile::tempdir().unwrap();
         let manifest = ModelManifest {
             id: "archive",
-            directory: "archive-root",
-            files: &[("encoder.onnx", 3)],
+            files: &[("encoder.onnx", 3, "")],
             ..model(String::new())
         };
         let path = root.path().join(manifest.id);
@@ -651,7 +572,7 @@ mod installation_tests {
             let root = tempfile::tempdir().unwrap();
             let path = root.path().join(model.id);
             fs::create_dir(&path).unwrap();
-            for (name, size) in model.files {
+            for (name, size, _) in model.files {
                 fs::File::create(path.join(name))
                     .unwrap()
                     .set_len(*size)
@@ -661,24 +582,13 @@ mod installation_tests {
             let unreachable = "http://127.0.0.1:1/must-not-download";
             let offline = ModelManifest {
                 id: model.id,
-                source: match model.source {
-                    Source::Archive { sha256, size, .. } => Source::Archive {
-                        url: unreachable,
-                        sha256,
-                        size,
-                    },
-                    Source::Files { sha256, .. } => Source::Files {
-                        root: unreachable,
-                        sha256,
-                    },
-                },
-                directory: model.directory,
+                root: unreachable,
                 files: model.files,
             };
             download_one(root.path(), &offline).unwrap();
             assert!(!path.join("FILES").exists());
             assert!(!path.join("SHA256").exists());
-            for (name, size) in model.files {
+            for (name, size, _) in model.files {
                 fs::OpenOptions::new()
                     .write(true)
                     .open(path.join(name))

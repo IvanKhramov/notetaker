@@ -2878,7 +2878,7 @@ dependencies = [
 
 [[package]]
 name = "notetaker-app"
-version = "0.37.0"
+version = "0.37.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2910,7 +2910,7 @@ dependencies = [
 
 [[package]]
 name = "notetaker-asr-proto"
-version = "0.37.0"
+version = "0.37.1"
 dependencies = [
  "base64 0.22.1",
  "notetaker-runtime",
@@ -2921,10 +2921,9 @@ dependencies = [
 
 [[package]]
 name = "notetaker-asr-worker"
-version = "0.37.0"
+version = "0.37.1"
 dependencies = [
  "anyhow",
- "bzip2 0.6.1",
  "directories",
  "hound",
  "notetaker-asr-proto",
@@ -2934,13 +2933,12 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sherpa-onnx",
- "tar",
  "tempfile",
 ]
 
 [[package]]
 name = "notetaker-capture"
-version = "0.37.0"
+version = "0.37.1"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -2964,7 +2962,7 @@ dependencies = [
 
 [[package]]
 name = "notetaker-cli"
-version = "0.37.0"
+version = "0.37.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2986,7 +2984,7 @@ dependencies = [
 
 [[package]]
 name = "notetaker-core"
-version = "0.37.0"
+version = "0.37.1"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -3012,7 +3010,7 @@ dependencies = [
 
 [[package]]
 name = "notetaker-detect"
-version = "0.37.0"
+version = "0.37.1"
 dependencies = [
  "anyhow",
  "notetaker-capture",
@@ -3023,7 +3021,7 @@ dependencies = [
 
 [[package]]
 name = "notetaker-embed-worker"
-version = "0.37.0"
+version = "0.37.1"
 dependencies = [
  "anyhow",
  "libc",
@@ -3041,7 +3039,7 @@ dependencies = [
 
 [[package]]
 name = "notetaker-llm"
-version = "0.37.0"
+version = "0.37.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3052,6 +3050,7 @@ dependencies = [
  "pulldown-cmark",
  "reqwest",
  "security-framework",
+ "security-framework-sys",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -3064,7 +3063,7 @@ dependencies = [
 
 [[package]]
 name = "notetaker-pipeline"
-version = "0.37.0"
+version = "0.37.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3083,7 +3082,7 @@ dependencies = [
 
 [[package]]
 name = "notetaker-runtime"
-version = "0.37.0"
+version = "0.37.1"
 dependencies = [
  "anyhow",
  "directories",
