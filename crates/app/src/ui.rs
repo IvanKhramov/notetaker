@@ -514,6 +514,13 @@ impl NotetakerApp {
             .filter(|s| !s.is_empty())
             .unwrap_or("Встречи");
         theme::page_heading(ui, title);
+        #[cfg(target_os = "macos")]
+        if crate::macos::outside_applications() {
+            theme::callout(ui, theme::icons::INFO, |ui| {
+                ui.label("Перенесите notetaker в папку Applications");
+                ui.weak("Сейчас приложение запущено из образа диска или из загрузок. Выйдите через ⌘Q, перетащите notetaker в Applications и откройте его оттуда.");
+            });
+        }
         if crate::permissions::panel(
             ui,
             &self.state.permissions,
@@ -752,7 +759,10 @@ impl NotetakerApp {
             {
                 theme::recording_status(ui, &status.text, status.warning, status.progress);
                 if self.state.permissions.recording_help(&self.state.recording) {
-                    crate::permissions::open_settings(ui);
+                    crate::permissions::open_settings(
+                        ui,
+                        self.state.permissions.blocked().is_none(),
+                    );
                 }
                 if let Some(next) = self.state.next_meeting(chrono::Utc::now())
                     && crate::calendar_ui::next_meeting(ui, &next)
@@ -2580,8 +2590,6 @@ impl NotetakerApp {
             if self.state.inventory_pending{crate::theme::spinner(ui);}
             if let Some(error)=&self.state.inventory_error{theme::callout(ui,theme::icons::CIRCLE_ALERT,|ui|{ui.small(error);});}
             for warning in &self.state.inventory.warnings {theme::callout(ui,theme::icons::INFO,|ui|{ui.small(warning);});}
-            #[cfg(target_os="macos")]
-            theme::callout(ui,theme::icons::INFO,|ui|{ui.small("macOS: весь системный звук, кроме notetaker. Нужны разрешения Microphone и System Audio Recording.");});
             #[cfg(not(any(windows,target_os="macos")))]
             theme::callout(ui,theme::icons::INFO,|ui|{ui.small("Захват звука доступен на Windows и macOS. На этой ОС работают библиотека, поиск, правки и конспекты.");});
             if self.state.quickstart.models.missing(&self.state.settings.model).is_some(){crate::quickstart::model_status(ui,&mut self.state);}else{
@@ -3032,6 +3040,10 @@ impl eframe::App for NotetakerApp {
         if crate::macos::quit_requested() {
             self.exit();
         }
+        #[cfg(target_os = "macos")]
+        if crate::macos::reopen_requested() {
+            self.show_main(ctx, true);
+        }
         self.organization.poll(ctx, &mut self.state);
         self.quickstart.tick(&mut self.state);
         if self.maintenance.tick(
@@ -3079,6 +3091,10 @@ impl eframe::App for NotetakerApp {
         if self.state.can_exit() {
             #[cfg(not(test))]
             notetaker_runtime::process::terminate_all();
+            #[cfg(target_os = "macos")]
+            if crate::macos::finish_termination() {
+                return;
+            }
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         } else if self.state.exit_requested {
             self.show_main(ctx, false);

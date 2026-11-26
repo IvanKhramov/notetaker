@@ -56,6 +56,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <key>LSMinimumSystemVersion</key><string>14.4</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSMicrophoneUsageDescription</key><string>notetaker записывает ваш микрофон для локальной расшифровки встреч.</string>
+<key>NSDocumentsFolderUsageDescription</key><string>notetaker хранит встречи в папке «Документы/notetaker».</string>
 <key>NSAudioCaptureUsageDescription</key><string>notetaker записывает звук собеседников для локальной расшифровки встреч.</string>
 </dict></plist>
 PLIST

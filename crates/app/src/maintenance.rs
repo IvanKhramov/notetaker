@@ -20,6 +20,10 @@ pub struct Maintenance {
 }
 impl Default for Maintenance {
     fn default() -> Self {
+        #[cfg(target_os = "macos")]
+        if let Err(error) = notetaker_runtime::platform::refresh_autostart() {
+            diagnostics::event(&format!("autostart refresh failed: {error:#}"));
+        }
         let message = diagnostics::directory().and_then(|logs| {
             let flag = logs.join("update-failed.flag");
             if flag.is_file() {

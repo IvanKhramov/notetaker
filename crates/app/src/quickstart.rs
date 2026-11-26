@@ -749,7 +749,7 @@ pub fn probe_line(
                     crate::permissions::MICROPHONE_DENIED
                 },
             );
-            crate::permissions::open_settings(ui);
+            crate::permissions::open_settings(ui, mac_system);
         }
         Some(Status::Warning(reason)) => {
             ui.colored_label(Palette::of(ui).warning, format!("{title}: {reason}"));
@@ -776,8 +776,8 @@ pub fn probe_line(
         }
     }
     if mac_system && matches!(status, Some(Status::Warning(_) | Status::Error(_))) {
-        ui.small("Настройки системы → Конфиденциальность и безопасность → Запись экрана и системного звука. Разрешите доступ для notetaker.");
-        crate::permissions::open_settings(ui);
+        ui.small("Системные настройки → Конфиденциальность и безопасность → Запись экрана и системного звука. Разрешите доступ для notetaker.");
+        crate::permissions::open_settings(ui, true);
     }
 }
 

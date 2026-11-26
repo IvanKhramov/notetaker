@@ -123,19 +123,23 @@ impl Access {
         self.blocked().is_some() || self.system_warning().is_some()
     }
 }
-pub fn open_settings(ui: &mut egui::Ui) {
+/// Open the privacy pane for the microphone, or on macOS for system audio
+/// (Screen & System Audio Recording).
+pub fn open_settings(ui: &mut egui::Ui, system: bool) {
     if crate::theme::button(ui, "Открыть настройки", crate::theme::ButtonStyle::Ghost).clicked()
     {
         ui.ctx().open_url(egui::OpenUrl::new_tab(if cfg!(windows) {
             "ms-settings:privacy-microphone"
+        } else if system {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
         } else {
-            "x-apple.systempreferences:com.apple.preference.security"
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
         }));
     }
 }
 pub fn blocked_action(ui: &mut egui::Ui, reason: Option<&str>) {
     if reason == Some(MICROPHONE_DENIED) {
-        open_settings(ui);
+        open_settings(ui, false);
     }
 }
 fn label(permission: Permission) -> &'static str {
@@ -166,7 +170,7 @@ pub fn panel(ui: &mut egui::Ui, access: &Access, all: bool, busy: bool) -> bool 
             ui.weak(if cfg!(windows) {
                 "Параметры → Конфиденциальность и защита → Микрофон."
             } else {
-                "Настройки системы → Конфиденциальность и безопасность → Микрофон."
+                "Системные настройки → Конфиденциальность и безопасность → Микрофон."
             });
             if !cfg!(windows) {
                 ui.weak("После разрешения перезапустите notetaker.");
@@ -178,11 +182,14 @@ pub fn panel(ui: &mut egui::Ui, access: &Access, all: bool, busy: bool) -> bool 
             } else {
                 reason
             });
-            ui.weak("Настройки системы → Конфиденциальность и безопасность → Запись экрана и системного звука.");
+            ui.weak("Системные настройки → Конфиденциальность и безопасность → Запись экрана и системного звука.");
             ui.weak("Если macOS попросит, перезапустите notetaker после разрешения.");
         }
         ui.horizontal_wrapped(|ui| {
-            open_settings(ui);
+            open_settings(
+                ui,
+                access.blocked().is_none() && access.system_warning().is_some(),
+            );
             check = ui
                 .add_enabled_ui(!busy, |ui| {
                     crate::theme::button(ui, "Проверить снова", crate::theme::ButtonStyle::Ghost)
