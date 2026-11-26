@@ -280,26 +280,34 @@ fn launch_agent() -> Result<PathBuf> {
 pub fn autostart() -> bool {
     launch_agent().is_ok_and(|p| p.is_file())
 }
+/// Rewrite an agent written by older versions, which pinned the executable path.
+#[cfg(target_os = "macos")]
+pub fn refresh_autostart() -> Result<()> {
+    match fs::read_to_string(launch_agent()?) {
+        Ok(text) if !text.contains("<string>-b</string>") => set_autostart(true),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
 #[cfg(target_os = "macos")]
 pub fn set_autostart(enabled: bool) -> Result<()> {
     let path = launch_agent()?;
     if enabled {
-        let executable = crate::paths::executable()?;
-        let executable = xml(&executable.to_string_lossy());
         fs::create_dir_all(path.parent().context("Нет каталога LaunchAgents")?)?;
         fs::write(
             path,
-            format!(
-                r#"<?xml version="1.0" encoding="UTF-8"?>
+            // Launch by bundle id: the agent keeps working after the app moves
+            // or a new version replaces it.
+            r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>Label</key><string>com.notetaker.app</string>
-<key>ProgramArguments</key><array><string>{executable}</string></array>
+<key>ProgramArguments</key><array><string>/usr/bin/open</string><string>-b</string><string>com.notetaker.app</string></array>
 <key>RunAtLoad</key><true/>
 <key>ProcessType</key><string>Interactive</string>
 </dict></plist>
-"#
-            ),
+"#,
         )?;
     } else {
         match fs::remove_file(path) {
@@ -310,15 +318,6 @@ pub fn set_autostart(enabled: bool) -> Result<()> {
     }
     // RunAtLoad applies on the next login. Loading it now would start a copy.
     Ok(())
-}
-#[cfg(any(target_os = "macos", test))]
-fn xml(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
 }
 
 #[cfg(test)]
@@ -390,9 +389,5 @@ mod tests {
         assert!(wait_for_unlock(dir.path(), Duration::from_millis(20)).is_err());
         drop(file);
         drop(request.join().unwrap());
-    }
-    #[test]
-    fn plist_escapes_paths() {
-        assert_eq!(xml("/a&b/<c>\"'"), "/a&amp;b/&lt;c&gt;&quot;&apos;");
     }
 }

@@ -129,15 +129,18 @@ impl Updates {
         match crate::theme::update_prompt(
             ctx,
             format!("Доступен notetaker {}", release.tag_name),
-            "Скачайте DMG, завершите запись и закройте notetaker. Замените приложение в Applications.",
-            "Открыть релиз / скачать DMG",
+            "Скачайте и откройте DMG. Затем выйдите из notetaker через ⌘Q и перетащите новую версию в Applications с заменой.",
+            "Скачать DMG",
             true,
             true,
             None,
         ) {
-            crate::theme::UpdateAction::Install => {
-                let _ = notetaker_runtime::unix::open_url(&release.notes_url());
-            }
+            crate::theme::UpdateAction::Install => match release.dmg() {
+                Ok(asset) => {
+                    let _ = notetaker_runtime::unix::open_url(&asset.browser_download_url);
+                }
+                Err(error) => self.message = Some(format!("{error:#}")),
+            },
             crate::theme::UpdateAction::Later => {
                 self.dismissed = Some(release.tag_name.clone());
                 self.release = None;

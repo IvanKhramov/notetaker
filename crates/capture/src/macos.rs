@@ -24,18 +24,18 @@ use rtrb::{Producer, RingBuffer};
 
 use crate::{
     AudioFrame, AudioSource, CaptureEvent, CaptureMessage, Channel, DeviceInfo, FRAME_SAMPLES,
-    FallbackReason, Inventory, LiveOptions, Normalizer, SourceTask, sample_offset,
+    Inventory, LiveOptions, Normalizer, SourceTask, sample_offset,
     source::{recover_default, send},
 };
 
 const GLOBAL: u32 = kAudioObjectPropertyScopeGlobal;
 const INPUT: u32 = kAudioObjectPropertyScopeInput;
-const PERMISSION: &str = "Проверьте System Settings > Privacy & Security: Microphone и System Audio Recording для notetaker, затем перезапустите приложение";
+const PERMISSION: &str = "Проверьте доступ notetaker в Системных настройках → Конфиденциальность и безопасность: «Микрофон» и «Запись экрана и системного звука», затем перезапустите приложение";
 
 fn status(code: i32, operation: &str) -> Result<()> {
     ensure!(
         code == 0,
-        "{operation}: Core Audio OSStatus {code}. {PERMISSION}"
+        "{operation}: ошибка Core Audio {code}. {PERMISSION}"
     );
     Ok(())
 }
@@ -224,7 +224,7 @@ pub fn inventory() -> Result<Inventory> {
             }
         }
     }
-    result.warnings.push("macOS: записывается весь системный звук, кроме notetaker. Выбор отдельного приложения недоступен. При тишине проверьте разрешение System Audio Recording.".into());
+    result.warnings.push("macOS: записывается весь системный звук, кроме notetaker. Выбор отдельного приложения недоступен. При тишине проверьте доступ к записи системного звука.".into());
     Ok(result)
 }
 
@@ -252,19 +252,8 @@ impl AudioSource for LiveSource {
             if stop.load(Ordering::Relaxed) {
                 return Ok(());
             }
-            if options.process_id.is_some() && channel == Channel::System {
-                send(
-                    sender,
-                    stop,
-                    CaptureMessage::Event(CaptureEvent::Fallback {
-                        at: options.origin.elapsed(),
-                        reason: FallbackReason::ActivationFailed {
-                            message: "macOS: используется весь системный звук, кроме notetaker"
-                                .into(),
-                        },
-                    }),
-                );
-            }
+            // Whole system audio is the normal macOS mode, not a fallback: a call
+            // process id only matches the meeting and never narrows capture.
             recover_default(
                 stop,
                 channel == Channel::Mic,
