@@ -5309,6 +5309,7 @@ mod tests {
             auto: crate::quickstart::Status::Ready,
             diarization: crate::quickstart::Status::Ready,
             semantic: crate::quickstart::Status::Ready,
+            local_llm: crate::quickstart::Status::Ready,
         };
         crate::quickstart::auto_download(&mut state);
         assert!(next_state_wake(&state, Instant::now()).unwrap() >= Duration::from_secs(59));
@@ -6435,6 +6436,7 @@ mod direct_action_tests {
             auto: crate::quickstart::Status::Ready,
             diarization: crate::quickstart::Status::Ready,
             semantic: crate::quickstart::Status::Ready,
+            local_llm: crate::quickstart::Status::Ready,
         };
     }
     #[test]

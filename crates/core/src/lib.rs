@@ -13,6 +13,7 @@ pub mod calendar;
 pub mod embedding;
 mod excerpt;
 mod export;
+pub mod local_llm;
 pub use excerpt::plain_excerpt;
 mod identity;
 mod index;

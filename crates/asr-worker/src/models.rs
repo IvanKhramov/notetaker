@@ -19,6 +19,9 @@ pub struct ModelManifest {
     pub root: &'static str,
     /// Installed files: name, byte length and SHA-256.
     pub files: &'static [(&'static str, u64, &'static str)],
+    /// An archive among `files`, unpacked with the system tar (macOS and
+    /// Windows 10+ ship bsdtar, which also reads zip), and the file it must yield.
+    pub unpack: Option<(&'static str, &'static str)>,
 }
 
 pub const GIGAAM: ModelManifest = ModelManifest {
@@ -46,6 +49,7 @@ pub const GIGAAM: ModelManifest = ModelManifest {
             "39abae20e692998290c574e606f11a9edef2902a1995463fcff63d1490cf22b7",
         ),
     ],
+    unpack: None,
 };
 // The GitHub asset was re-exported on 2026-11-07 with different weights; this
 // commit holds the original export that installed copies came from.
@@ -74,6 +78,7 @@ pub const PARAKEET: ModelManifest = ModelManifest {
             "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d",
         ),
     ],
+    unpack: None,
 };
 // No Hugging Face copy of this version exists; the asset is unchanged since 2025-07.
 pub const SILERO: ModelManifest = ModelManifest {
@@ -84,6 +89,7 @@ pub const SILERO: ModelManifest = ModelManifest {
         643_854,
         "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
     )],
+    unpack: None,
 };
 
 /// Multilingual tiny, not tiny.en. Only the int8 weights are downloaded.
@@ -102,6 +108,7 @@ pub const WHISPER_TINY: ModelManifest = ModelManifest {
             "d2fece8dd42771f1df975c6c0445770d0c292bf7547c2cae04a6c0cc57540925",
         ),
     ],
+    unpack: None,
 };
 
 pub const PYANNOTE: ModelManifest = ModelManifest {
@@ -119,6 +126,7 @@ pub const PYANNOTE: ModelManifest = ModelManifest {
             "14d7016ad68e7394d6e6b78d96cc2ae431c905287b89674cfdf021e79e62b8ba",
         ),
     ],
+    unpack: None,
 };
 // The GitHub asset was replaced on 2026-11-19 with a file one byte longer.
 pub const ERES2NET: ModelManifest = ModelManifest {
@@ -129,6 +137,64 @@ pub const ERES2NET: ModelManifest = ModelManifest {
         39_593_761,
         "1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b",
     )],
+    unpack: None,
+};
+
+/// llama.cpp server for the built-in local AI, pinned to build b12292 (2026-11-11).
+const LLAMA_ROOT: &str = "https://github.com/ggml-org/llama.cpp/releases/download/b12292";
+#[cfg(target_os = "macos")]
+pub const LLAMA_SERVER: ModelManifest = ModelManifest {
+    id: notetaker_runtime::local_llm::SERVER_ID,
+    root: LLAMA_ROOT,
+    files: &[(
+        "llama-b12292-bin-macos-arm64.tar.gz",
+        16_870_580,
+        "94b860a529a64aecfe20c4b9ccb9ca6fb4cf9126b019f3380ee02d7951ca11ef",
+    )],
+    unpack: Some((
+        "llama-b12292-bin-macos-arm64.tar.gz",
+        notetaker_runtime::local_llm::SERVER,
+    )),
+};
+// The CPU build runs everywhere; the Vulkan one needs a GPU driver.
+#[cfg(windows)]
+pub const LLAMA_SERVER: ModelManifest = ModelManifest {
+    id: notetaker_runtime::local_llm::SERVER_ID,
+    root: LLAMA_ROOT,
+    files: &[(
+        "llama-b12292-bin-win-cpu-x64.zip",
+        25_057_882,
+        "12017843d67f560ce1bacf771dccdb189ff651a2dde684cbb49634c29df5b751",
+    )],
+    unpack: Some((
+        "llama-b12292-bin-win-cpu-x64.zip",
+        notetaker_runtime::local_llm::SERVER,
+    )),
+};
+#[cfg(not(any(target_os = "macos", windows)))]
+pub const LLAMA_SERVER: ModelManifest = ModelManifest {
+    id: notetaker_runtime::local_llm::SERVER_ID,
+    root: LLAMA_ROOT,
+    files: &[(
+        "llama-b12292-bin-ubuntu-x64.tar.gz",
+        23_283_641,
+        "ffaf53f17a4601493e6ffb5869c9f0c7d400bb7e124fe0096eee3b65a5862568",
+    )],
+    unpack: Some((
+        "llama-b12292-bin-ubuntu-x64.tar.gz",
+        notetaker_runtime::local_llm::SERVER,
+    )),
+};
+/// Weights of the built-in local AI.
+pub const LOCAL_LLM: ModelManifest = ModelManifest {
+    id: notetaker_runtime::local_llm::MODEL_ID,
+    root: "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/e87f176479d0855a907a41277aca2f8ee7a09523",
+    files: &[(
+        notetaker_runtime::local_llm::MODEL_FILE,
+        2_740_937_888,
+        "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+    )],
+    unpack: None,
 };
 
 pub fn check(id: &str) -> Result<()> {
@@ -140,6 +206,9 @@ pub fn check(id: &str) -> Result<()> {
     } else if id == "diarization" {
         installed(&root, &PYANNOTE)?;
         installed(&root, &ERES2NET)?;
+    } else if id == "local-llm" {
+        installed(&root, &LLAMA_SERVER)?;
+        installed(&root, &LOCAL_LLM)?;
     } else {
         installed(&root, manifest(id)?)?;
         if id == GIGAAM.id || id == PARAKEET.id {
@@ -180,6 +249,14 @@ pub fn installed(root: &Path, model: &ModelManifest) -> Result<PathBuf> {
     Ok(path)
 }
 fn check_files(path: &Path, model: &ModelManifest) -> Result<()> {
+    if let Some((_, required)) = model.unpack {
+        ensure!(
+            path.join(required).is_file(),
+            "Файл отсутствует: {}; повторите notetaker-asr download {}",
+            path.join(required).display(),
+            model.id
+        );
+    }
     for (file, expected, _) in model.files {
         let metadata = fs::metadata(path.join(file))?;
         ensure!(
@@ -255,6 +332,19 @@ fn download_one(root: &Path, model: &ModelManifest) -> Result<()> {
         eprintln!("NOTETAKER_MODEL_INSTALLED {label}");
         partials.push(partial);
     }
+    if let Some((archive, _)) = model.unpack {
+        let status = std::process::Command::new("tar")
+            .arg("-xf")
+            .arg(extracted.join(archive))
+            .arg("-C")
+            .arg(&extracted)
+            .status()
+            .context("Не удалось запустить tar")?;
+        ensure!(
+            status.success(),
+            "Не удалось распаковать {archive}: {status}"
+        );
+    }
     check_files(&extracted, model)?;
     if root.join(model.id).exists() {
         fs::remove_dir_all(root.join(model.id))?;
@@ -276,6 +366,7 @@ fn downloads(id: &str) -> Result<Vec<&'static ModelManifest>> {
     Ok(match id {
         "auto" => vec![&GIGAAM, &PARAKEET, &SILERO, &WHISPER_TINY],
         "diarization" => vec![&PYANNOTE, &ERES2NET],
+        "local-llm" => vec![&LLAMA_SERVER, &LOCAL_LLM],
         _ => {
             let model = manifest(id)?;
             if id == GIGAAM.id || id == PARAKEET.id {
@@ -332,6 +423,7 @@ mod installation_tests {
     fn model(url: String) -> ModelManifest {
         ModelManifest {
             id: "neutral",
+            unpack: None,
             root: Box::leak(url.into_boxed_str()),
             files: Box::leak(Box::new([(
                 "model.bin",
@@ -489,6 +581,7 @@ mod installation_tests {
         };
         let manifest = ModelManifest {
             id: "pinned",
+            unpack: None,
             root: base,
             files: Box::leak(Box::new([
                 ("a.onnx", 3, digest(b"abc")),
@@ -568,6 +661,7 @@ mod installation_tests {
             &WHISPER_TINY,
             &PYANNOTE,
             &ERES2NET,
+            &LOCAL_LLM,
         ] {
             let root = tempfile::tempdir().unwrap();
             let path = root.path().join(model.id);
@@ -584,6 +678,7 @@ mod installation_tests {
                 id: model.id,
                 root: unreachable,
                 files: model.files,
+                unpack: model.unpack,
             };
             download_one(root.path(), &offline).unwrap();
             assert!(!path.join("FILES").exists());

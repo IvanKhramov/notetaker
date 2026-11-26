@@ -56,9 +56,28 @@ pub struct HttpProvider {
     endpoint: reqwest::Url,
     key: Option<String>,
     cancel: crate::Cancellation,
+    /// Keeps the built-in server running for this provider.
+    _lease: Option<crate::local::Lease>,
 }
 
 impl HttpProvider {
+    /// The built-in local AI, started on demand.
+    pub fn builtin(config: ProviderConfig, mode: Mode) -> Result<Self> {
+        ensure!(config.kind == ProviderKind::Builtin, "Not the built-in AI");
+        config.validate(mode)?;
+        let (base_url, key, lease) = crate::local::acquire()?;
+        let mut provider = Self::build(
+            ProviderConfig {
+                kind: ProviderKind::Openai,
+                base_url,
+                ..config
+            },
+            mode,
+            Some(key),
+        )?;
+        provider._lease = Some(lease);
+        Ok(provider)
+    }
     pub fn with_cancellation(mut self, cancel: crate::Cancellation) -> Self {
         self.cancel = cancel;
         self
@@ -123,6 +142,7 @@ impl HttpProvider {
             endpoint,
             key,
             cancel: crate::Cancellation::default(),
+            _lease: None,
         })
     }
 

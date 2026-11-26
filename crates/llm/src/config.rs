@@ -59,6 +59,8 @@ pub enum ProviderKind {
     Anthropic,
     ClaudeCli,
     CodexCli,
+    /// The llama.cpp server notetaker downloads and runs on loopback.
+    Builtin,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -217,6 +219,14 @@ impl ProviderConfig {
             self.context_tokens > 0,
             "LLM context_tokens must be positive"
         );
+        if self.kind == ProviderKind::Builtin {
+            // The address is chosen at launch and is always 127.0.0.1.
+            ensure!(
+                self.key_source == KeySource::Env && self.api_key_env.is_none(),
+                "Встроенный AI не использует ключи"
+            );
+            return Ok(reqwest::Url::parse("http://127.0.0.1/").expect("static URL"));
+        }
         if self.kind.is_cli() {
             ensure!(
                 mode != Mode::Local,
