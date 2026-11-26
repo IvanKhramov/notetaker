@@ -2343,14 +2343,11 @@ impl AppState {
                                     report.skipped = old.skipped.clone();
                                 }
                             }
-                            self.quickstart.calendar_error =
-                                reports.iter().find_map(|report| report.error.clone());
                             self.calendar_reports = reports;
                             self.rebuild_calendar_events();
                             self.update_calendar_reminder(chrono::Utc::now());
                         }
                         Err(error) => {
-                            self.quickstart.calendar_error = Some(error.clone());
                             self.calendar_error = Some(error);
                         }
                     }
@@ -3089,7 +3086,6 @@ impl AppState {
                             .retain(|id, value| self.settings_secrets_sent.get(id) != Some(value));
                         self.settings_secrets_sent.clear();
                         if calendar_changed {
-                            self.quickstart.calendar_error = None;
                             self.calendar_reports.retain(|report| {
                                 !timezone_changed
                                     && !changed_secrets.contains(&report.id)
@@ -3155,9 +3151,6 @@ impl AppState {
                         self.refresh();
                     }
                     Err(error) => {
-                        if !self.calendar_secrets.is_empty() {
-                            self.quickstart.calendar_error = Some(error.clone());
-                        }
                         self.settings_autosave.pending = true;
                         self.settings_autosave.llm |= persist_llm;
                         self.settings_autosave.error = Some(error);

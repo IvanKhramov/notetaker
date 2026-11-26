@@ -649,6 +649,17 @@ impl NotetakerApp {
                     ) {
                         self.state.toggle_recording();
                     }
+                    if empty
+                        && self.state.settings.calendars.is_empty()
+                        && ui
+                            .vertical_centered(|ui| {
+                                theme::button(ui, "Подключить календарь", theme::ButtonStyle::Ghost)
+                            })
+                            .inner
+                            .clicked()
+                    {
+                        calendar_settings = true;
+                    }
                 }
                 if self.state.listing {
                     crate::theme::spinner(ui);
@@ -2640,7 +2651,6 @@ impl NotetakerApp {
     }
     fn exit(&mut self) {
         self.settings_panel.blur(&mut self.state);
-        self.quickstart.blur(&mut self.state);
         self.state.exit();
     }
     fn exit_dialog(&mut self, ctx: &egui::Context, now: Instant) {
@@ -3056,7 +3066,6 @@ impl eframe::App for NotetakerApp {
             #[cfg(any(windows, target_os = "macos"))]
             if self.desktop.is_some() && !self.state.exit_requested {
                 self.settings_panel.blur(&mut self.state);
-                self.quickstart.blur(&mut self.state);
                 self.set_main_visible(ctx, false);
             } else {
                 self.exit();
