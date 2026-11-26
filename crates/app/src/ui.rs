@@ -3066,7 +3066,6 @@ impl eframe::App for NotetakerApp {
             #[cfg(any(windows, target_os = "macos"))]
             if self.desktop.is_some() && !self.state.exit_requested {
                 self.settings_panel.blur(&mut self.state);
-                self.quickstart.blur(&mut self.state);
                 self.set_main_visible(ctx, false);
             } else {
                 self.exit();
