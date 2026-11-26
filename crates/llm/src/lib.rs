@@ -18,6 +18,7 @@ pub mod trackers;
 pub use people::{PeopleBrief, person_brief, person_brief_in_folder, summarize_digest};
 mod enhance;
 pub use drafts::{Brief, FollowupKind, brief, followup, render_followup, strip_internal};
+mod local;
 mod provider;
 mod template;
 
@@ -42,6 +43,10 @@ pub fn create_provider(
 ) -> anyhow::Result<Box<dyn Provider>> {
     if config.kind.is_cli() {
         Ok(Box::new(CliProvider::new(config, mode, cancel)?))
+    } else if config.kind == ProviderKind::Builtin {
+        Ok(Box::new(
+            HttpProvider::builtin(config, mode)?.with_cancellation(cancel),
+        ))
     } else {
         Ok(Box::new(
             HttpProvider::new(config, mode)?.with_cancellation(cancel),

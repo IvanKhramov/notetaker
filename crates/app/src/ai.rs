@@ -10,6 +10,62 @@ use notetaker_llm::{
 
 use crate::config::{LlmSettings, ProviderSettings};
 
+/// Provider id of the built-in local AI.
+pub const BUILTIN: &str = "builtin";
+
+/// What makes notes and answers in chat; one explicit choice in Settings.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Choice {
+    Subscription,
+    Gateway,
+    Local,
+}
+impl Choice {
+    pub const ALL: [Self; 3] = [Self::Subscription, Self::Gateway, Self::Local];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Subscription => "Подписка",
+            Self::Gateway => "Flant LLM Gateway",
+            Self::Local => "Локально",
+        }
+    }
+    /// Indices of `Connections` cards offered for this choice.
+    pub fn cards(self) -> &'static [usize] {
+        match self {
+            Self::Subscription => &[0, 1],
+            Self::Gateway => &[2, 3],
+            Self::Local => &[],
+        }
+    }
+    /// The saved choice; `None` until one of the offered AIs is in use
+    /// (the initial placeholder and hand-written providers are none of them).
+    pub fn of(llm: &LlmSettings) -> Option<Self> {
+        match llm.defaults.hybrid.as_str() {
+            BUILTIN => Some(Self::Local),
+            "claude-subscription" | "codex-subscription" => Some(Self::Subscription),
+            "flant" | "custom-gateway" => Some(Self::Gateway),
+            _ => None,
+        }
+    }
+}
+
+/// In local mode both defaults are the built-in AI, so no meeting leaves the computer.
+pub fn local_selected(llm: &LlmSettings) -> bool {
+    llm.defaults.hybrid == BUILTIN
+}
+
+pub fn builtin_provider() -> ProviderSettings {
+    ProviderSettings {
+        id: BUILTIN.into(),
+        kind: BUILTIN.into(),
+        base_url: String::new(),
+        model: notetaker_runtime::local_llm::MODEL_ID.into(),
+        api_key_env: None,
+        key_source: "env".into(),
+        context_tokens: notetaker_runtime::local_llm::CONTEXT_TOKENS,
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
     Check,
@@ -257,24 +313,22 @@ impl Connections {
             }
         }
     }
-    pub fn ui(&mut self, ui: &mut egui::Ui, default: &str, can_default: bool) -> Vec<Action> {
-        self.cards_ui(ui, default, can_default, None)
-    }
-    fn cards_ui(
+    /// Cards of one choice: `Choice::cards()` indices.
+    pub fn ui(
         &mut self,
         ui: &mut egui::Ui,
         default: &str,
         can_default: bool,
-        selected: Option<usize>,
+        shown: &[usize],
     ) -> Vec<Action> {
         let mut actions = Vec::new();
         for (index, card) in self.cards.iter_mut().enumerate() {
-            if selected.is_some_and(|selected| selected != index) {
+            if !shown.contains(&index) {
                 continue;
             }
             let usable = card.cli.is_none() || card.installed;
             ui.push_id(index, |ui| { crate::theme::settings_group(ui,"",|ui| {crate::theme::disclosure(card.title).status(status_chip(&card.status, usable, default == card.provider.id))
-                .default_open(default == card.provider.id || selected.is_some()).show(ui, |ui| {
+                .default_open(default == card.provider.id || shown.len() == 1).show(ui, |ui| {
                 if usable { status_line(ui, &card.status); }
                 let before = serde_json::to_value(&card.provider).expect("provider serialize");
                 let mut operation = None;
@@ -324,11 +378,11 @@ impl Connections {
                                 for model in &card.models { crate::theme::select_value(ui, &mut card.provider.model, model.clone(), model); }
                             });
                         }
-                        if selected.is_none() && crate::theme::button(ui, "Загрузить список моделей", crate::theme::ButtonStyle::Ghost).clicked() { operation = Some(Operation::Models); }
+                        if crate::theme::button(ui, "Загрузить список моделей", crate::theme::ButtonStyle::Ghost).clicked() { operation = Some(Operation::Models); }
                     }
                     if usable { ui.add_space(4.0); ui.horizontal(|ui| {
                         if ui.add(crate::theme::styled_button(crate::theme::Palette::of(ui), "Проверить", crate::theme::ButtonStyle::Secondary).icon(crate::theme::icons::REFRESH_CW)).clicked() { operation = Some(Operation::Check); }
-                        if default != card.provider.id && ui.add_enabled(can_default, crate::theme::styled_button(crate::theme::Palette::of(ui),if selected.is_some() { "Подключить" } else { "Использовать по умолчанию" },crate::theme::ButtonStyle::Secondary)).clicked() { operation = Some(Operation::Default); }
+                        if default != card.provider.id && ui.add_enabled(can_default, crate::theme::styled_button(crate::theme::Palette::of(ui),"Использовать",crate::theme::ButtonStyle::Secondary)).clicked() { operation = Some(Operation::Default); }
                     }); }
                 });
                 if before != serde_json::to_value(&card.provider).expect("provider serialize") {
@@ -645,5 +699,30 @@ mod tests {
         assert!(connections.autosaves().is_empty());
         assert!(connections.has_save_errors());
         assert!(!connections.cards[3].busy);
+    }
+}
+
+#[cfg(test)]
+mod choice_tests {
+    use super::*;
+    #[test]
+    fn local_choice_sends_every_request_to_the_built_in_ai() {
+        let (mut state, _commands, _events) = crate::test_ui::state();
+        assert!(Choice::of(&state.llm_draft).is_none());
+        state.llm_draft.scenarios.chat.provider = "flant".into();
+        state.llm_draft.embeddings.provider = "flant".into();
+        state.use_local_ai();
+        let llm = &state.llm_draft;
+        assert_eq!(llm.defaults.local, BUILTIN);
+        assert_eq!(llm.defaults.hybrid, BUILTIN);
+        assert!(llm.scenarios.chat.provider.is_empty());
+        assert!(llm.embeddings.provider.is_empty());
+        assert_eq!(llm.providers.iter().filter(|p| p.id == BUILTIN).count(), 1);
+        assert_eq!(state.settings_draft.mode, Mode::Local);
+        assert!(Choice::of(llm) == Some(Choice::Local));
+        // The saved provider passes the Local privacy check without a URL.
+        let config = builtin_provider().config().unwrap();
+        assert!(config.validate(Mode::Local).is_ok());
+        assert_eq!(config.kind, ProviderKind::Builtin);
     }
 }

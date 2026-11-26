@@ -54,6 +54,8 @@ pub struct Panel {
     usage: Option<(u64, u64)>,
     usage_checked: Option<std::time::Instant>,
     usage_paths: Option<(std::path::PathBuf, std::path::PathBuf)>,
+    /// The AI choice being looked at; the saved one until the user switches.
+    ai_view: Option<crate::ai::Choice>,
 }
 #[derive(Default)]
 struct Edits {
@@ -672,12 +674,61 @@ impl Panel {
                 });
             }
             Section::Ai => {
-                let actions =
-                    state
-                        .connections
-                        .ui(ui, &state.llm_draft.defaults.hybrid, state.ready);
-                for action in actions {
-                    state.send(Command::Ai(action));
+                let active = crate::ai::Choice::of(&state.llm_draft);
+                let mut view = self
+                    .ai_view
+                    .or(active)
+                    .unwrap_or(crate::ai::Choice::Subscription);
+                theme::settings_group(
+                    ui,
+                    "Чем делать конспекты и отвечать в чате",
+                    |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            for choice in crate::ai::Choice::ALL {
+                                let label = if Some(choice) == active {
+                                    format!("{} · выбрано", choice.label())
+                                } else {
+                                    choice.label().into()
+                                };
+                                let style = if choice == view {
+                                    ButtonStyle::Secondary
+                                } else {
+                                    ButtonStyle::Ghost
+                                };
+                                if theme::button(ui, &label, style).clicked() {
+                                    view = choice;
+                                }
+                            }
+                        });
+                        hint(
+                            ui,
+                            match view {
+                                crate::ai::Choice::Subscription => {
+                                    "Claude или ChatGPT по вашей подписке. Текст встречи уходит в облако, аудио остаётся на компьютере."
+                                }
+                                crate::ai::Choice::Gateway => {
+                                    "Flant LLM Gateway (GPT-4o и другие модели) по ключу шлюза. Нужен VPN Фланта."
+                                }
+                                crate::ai::Choice::Local => {
+                                    "Ничего не уходит с компьютера: конспекты, чат и поиск работают здесь. Медленнее и проще облачных моделей."
+                                }
+                            },
+                        );
+                    },
+                );
+                self.ai_view = Some(view);
+                if view == crate::ai::Choice::Local {
+                    local_ai(ui, state, active == Some(crate::ai::Choice::Local));
+                } else {
+                    let actions = state.connections.ui(
+                        ui,
+                        &state.llm_draft.defaults.hybrid,
+                        state.ready,
+                        view.cards(),
+                    );
+                    for action in actions {
+                        state.send(Command::Ai(action));
+                    }
                 }
                 theme::settings_disclosure(ui, "Для опытных", |ui| {
                     scenarios(ui, &mut state.llm_draft, &mut edits);
@@ -1072,6 +1123,50 @@ fn setting<R>(ui: &mut egui::Ui, label: &str, value: impl FnOnce(&mut egui::Ui) 
     theme::settings_row_desc(ui, label, description, value)
 }
 
+/// The built-in AI: choose it, then follow its download like the other models.
+fn local_ai(ui: &mut egui::Ui, state: &mut AppState, active: bool) {
+    theme::settings_group(ui, "Встроенный AI", |ui| {
+        let size = 2.8;
+        if !active {
+            hint(
+                ui,
+                &format!(
+                    "notetaker скачает модель Qwen3.5 4B и сервер llama.cpp, около {size} ГБ. Нужно 8 ГБ памяти, лучше 16."
+                ),
+            );
+            if ui
+                .add_enabled(
+                    state.ready && state.can_save_settings(),
+                    theme::styled_button(
+                        Palette::of(ui),
+                        "Использовать локально",
+                        ButtonStyle::Primary,
+                    ),
+                )
+                .clicked()
+            {
+                state.use_local_ai();
+            }
+            return;
+        }
+        match state.quickstart.models.get("local-llm") {
+            crate::quickstart::Status::Ready => {
+                ui.label("Готово. Модель запускается при первом запросе и выгружается через 10 минут простоя.");
+            }
+            _ => {
+                if !(state.downloading
+                    && state.quickstart.download_model.as_deref() == Some("local-llm"))
+                    && !state.quickstart.optional_errors.contains_key("local-llm")
+                {
+                    ui.weak(
+                        "Ждёт загрузки. Она начнётся сама, когда освободится загрузчик моделей.",
+                    );
+                }
+            }
+        }
+        crate::quickstart::optional_download_status(ui, state);
+    });
+}
 #[cfg(test)]
 mod tests {
     use super::*;

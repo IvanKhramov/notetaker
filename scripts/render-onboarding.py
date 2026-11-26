@@ -475,7 +475,7 @@ fn main() -> eframe::Result {
         state.settings.models_folder = Some(state.settings.library.with_file_name("models"));
         state.settings_draft = state.settings.clone();
         state.quickstart.models = quickstart::Models { gigaam: quickstart::Status::Ready, parakeet: quickstart::Status::Ready,
-            auto: quickstart::Status::Ready, diarization: quickstart::Status::Ready, semantic: quickstart::Status::Ready };
+            auto: quickstart::Status::Ready, diarization: quickstart::Status::Ready, semantic: quickstart::Status::Ready, local_llm: quickstart::Status::Ready };
         if screen == 0 { state.downloading = true; state.quickstart.models = Default::default(); }
         let library = notetaker_core::Library::open(&state.settings.library).unwrap();
         let mut folders=library.load_folders().unwrap();folders.value.insert("Команда".into(),Default::default());library.save_folders(&folders.value,folders.revision).unwrap();

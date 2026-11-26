@@ -1929,6 +1929,20 @@ impl AppState {
                 || self.settings.models_path() == self.settings_draft.models_path()
                 || (!self.downloading && !self.semantic_running))
     }
+    /// Notes, chat and search stay on this computer: every default and scenario
+    /// points to the built-in AI, remote embeddings are off and new meetings are Local.
+    pub fn use_local_ai(&mut self) {
+        let provider = crate::ai::builtin_provider();
+        let llm = &mut self.llm_draft;
+        llm.providers.retain(|existing| existing.id != provider.id);
+        llm.providers.push(provider);
+        llm.defaults.local = crate::ai::BUILTIN.into();
+        llm.defaults.hybrid = crate::ai::BUILTIN.into();
+        llm.scenarios = Default::default();
+        llm.embeddings = Default::default();
+        self.settings_draft.mode = notetaker_core::Mode::Local;
+        self.save_settings();
+    }
     pub fn save_settings(&mut self) {
         self.settings_edited(false, true);
     }

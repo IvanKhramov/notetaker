@@ -27,6 +27,7 @@ pub struct Models {
     pub auto: Status,
     pub diarization: Status,
     pub semantic: Status,
+    pub local_llm: Status,
 }
 impl Models {
     pub fn get(&self, model: &str) -> &Status {
@@ -35,6 +36,7 @@ impl Models {
             "parakeet-v3" => &self.parakeet,
             "auto" => &self.auto,
             "semantic" => &self.semantic,
+            "local-llm" => &self.local_llm,
             _ => &self.diarization,
         }
     }
@@ -45,6 +47,7 @@ impl Models {
             "auto" => self.auto = status,
             "diarization" => self.diarization = status,
             "semantic" => self.semantic = status,
+            "local-llm" => self.local_llm = status,
             _ => {}
         }
     }
@@ -156,7 +159,8 @@ impl Transfer {
             && now.saturating_duration_since(self.last_byte) >= Duration::from_secs(30)
     }
     pub fn text(&self, model: &str, _phase: usize) -> String {
-        let label = match self.file.as_str() {
+        // Progress ids are "<model>/<file>"; older workers sent the model alone.
+        let label = match self.file.split('/').next().unwrap_or_default() {
             "gigaam-v3" => "модель русской речи",
             "parakeet-v3" => "модель многоязычной речи",
             "silero-vad" => "определение пауз",
@@ -165,9 +169,12 @@ impl Transfer {
             "eres2net-base" => "распознавание голосов",
             "model.onnx" => "модель поиска по смыслу",
             "tokenizer.json" => "словарь поиска по смыслу",
+            "llama-server" => "локальный AI",
+            notetaker_runtime::local_llm::MODEL_ID => "модель локального AI",
             _ => match model {
                 "diarization" => "разделение собеседников",
                 "semantic" => "поиск по смыслу",
+                "local-llm" => "локальный AI",
                 _ => "модель распознавания речи",
             },
         };
@@ -217,7 +224,7 @@ pub struct Runtime {
 }
 
 pub fn optional(model: &str) -> bool {
-    matches!(model, "diarization" | "semantic")
+    matches!(model, "diarization" | "semantic" | "local-llm")
 }
 fn next_download(state: &AppState) -> Option<String> {
     let models = &state.quickstart.models;
@@ -236,6 +243,12 @@ fn next_download(state: &AppState) -> Option<String> {
         && !state.quickstart.optional_errors.contains_key("semantic")
     {
         return Some("semantic".into());
+    }
+    if crate::ai::local_selected(&state.llm)
+        && models.local_llm != Status::Ready
+        && !state.quickstart.optional_errors.contains_key("local-llm")
+    {
+        return Some("local-llm".into());
     }
     None
 }
@@ -338,6 +351,7 @@ pub fn check_models() -> Models {
         } else {
             Status::Missing
         },
+        local_llm: check_speech("local-llm"),
     }
 }
 /// Shared phase and per-file byte progress for welcome, library and storage.
@@ -443,7 +457,7 @@ pub fn optional_download_status(ui: &mut egui::Ui, state: &mut AppState) {
     {
         transfer_status(ui, state);
     }
-    for model in ["diarization", "semantic"] {
+    for model in ["diarization", "semantic", "local-llm"] {
         if let Some(error) = state.quickstart.optional_errors.get(model).cloned() {
             ui.horizontal(|ui| {
                 if theme::button(ui, "Повторить", theme::ButtonStyle::Ghost).clicked() {
@@ -454,10 +468,10 @@ pub fn optional_download_status(ui: &mut egui::Ui, state: &mut AppState) {
                     egui::Label::new(
                         egui::RichText::new(format!(
                             "{}: {error}",
-                            if model == "semantic" {
-                                "Поиск по смыслу"
-                            } else {
-                                "Разделение собеседников"
+                            match model {
+                                "semantic" => "Поиск по смыслу",
+                                "local-llm" => "Локальный AI",
+                                _ => "Разделение собеседников",
                             }
                         ))
                         .small()

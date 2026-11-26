@@ -73,7 +73,7 @@ fn main() -> anyhow::Result<()> {
     {
         notetaker_core::embedding::set_models_dir(folder);
     }
-    match command {
+    let result = match command {
         Command::Ktalk(args) => cmd_ktalk::run(args),
         Command::Search(args) => cmd_search::search(args),
         Command::Reindex(args) => cmd_search::reindex(args),
@@ -92,5 +92,9 @@ fn main() -> anyhow::Result<()> {
         Command::Transcribe(args) => cmd_transcribe::run(args),
         Command::Rediarize(args) => cmd_rediarize::run(args),
         Command::Prosody(args) => cmd_prosody::run(args),
-    }
+    };
+    // Children run in their own process group: the built-in AI server would
+    // otherwise outlive the command that started it.
+    notetaker_runtime::process::terminate_all();
+    result
 }
