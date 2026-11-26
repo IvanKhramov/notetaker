@@ -799,10 +799,15 @@ mod tests {
         assert_eq!(state.settings_draft.onboarding_complete, Some(true));
         // An existing name is never replaced by the account name.
         assert_eq!(state.settings_draft.user_name, "Before");
+        // Before a sound check desktop platforms offer the check and a skip.
         crate::test_ui::click(
             &ctx,
             &mut |ui| panel.show(ui.ctx(), &mut state),
-            "Начать работу",
+            if cfg!(any(windows, target_os = "macos")) {
+                "Пропустить"
+            } else {
+                "Начать работу"
+            },
         );
         assert!(!panel.open);
         assert_eq!(state.settings_draft.user_name, "Before");
