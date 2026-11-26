@@ -2924,7 +2924,6 @@ name = "notetaker-asr-worker"
 version = "0.37.1"
 dependencies = [
  "anyhow",
- "bzip2 0.6.1",
  "directories",
  "hound",
  "notetaker-asr-proto",
@@ -2934,7 +2933,6 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sherpa-onnx",
- "tar",
  "tempfile",
 ]
 
