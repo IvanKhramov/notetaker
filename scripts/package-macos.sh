@@ -73,19 +73,22 @@ for binary in notetaker-app notetaker-asr notetaker-embed notetaker; do
   test -x "$app/Contents/MacOS/$binary"
 done
 test -s "$app/Contents/Resources/notetaker.icns"
-ln -s /Applications "$staging/Applications"
-# Keep build-only files out of the image.
-image_root="$staging/image"
-mkdir "$image_root"
-mv "$app" "$staging/Applications" "$image_root/"
+# dmgbuild lays out the window through .DS_Store, without scripting Finder.
+python3 -m venv "$staging/venv"
+"$staging/venv/bin/pip" install --quiet --disable-pip-version-check \
+  dmgbuild==1.6.7 ds_store==1.3.3 mac_alias==2.2.3
+tiffutil -cathidpicheck packaging/macos/dmg-background.png packaging/macos/dmg-background@2x.png \
+  -out "$staging/background.tiff"
 dmg="$out/notetaker-$version-macos-arm64.dmg"
 # hdiutil intermittently fails with "Resource busy" on CI runners; retry it.
 for attempt in 1 2 3 4 5; do
-  if hdiutil create -volname "notetaker $version" -srcfolder "$image_root" -ov -format UDZO "$dmg"; then
+  rm -f "$dmg"
+  if "$staging/venv/bin/dmgbuild" -s scripts/dmg-settings.py -D app="$app" \
+    -D background="$staging/background.tiff" "notetaker $version" "$dmg"; then
     break
   fi
   if [ "$attempt" = 5 ]; then
-    echo 'hdiutil create failed after 5 attempts' >&2
+    echo 'dmgbuild failed after 5 attempts' >&2
     exit 1
   fi
   sleep 10
