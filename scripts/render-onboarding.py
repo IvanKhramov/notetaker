@@ -47,9 +47,6 @@ for path in sources:
     if path.stem == "quickstart":
         text = text.replace('index == 1 && cfg!(target_os = "macos")', 'index == 1')
         text += 'impl Panel {pub fn fixture_sound(&mut self, scene: usize) {self.probe_status=Some([Status::Ready, sound_status(if scene==78 {0} else {100}, scene!=80, true)]);}}'
-        text = text.replace("    step: usize,", "    pub(crate) step: usize,\n    pub(crate) expanded: bool,")
-        text = text.replace('crate::theme::disclosure("Календарь")', 'crate::theme::disclosure("Календарь").default_open(self.expanded)')
-        text = text.replace('crate::theme::disclosure("AI для конспектов")', 'crate::theme::disclosure("AI для конспектов").default_open(self.expanded)')
     if path.stem == "settings":
         text = text.replace('.id_salt(("settings-page", self.section as u8))', '.id_salt(("settings-page", self.section as u8)).vertical_scroll_offset(ui.ctx().data(|data| data.get_temp::<f32>(egui::Id::unique("fixture-recording-settings-offset")).unwrap_or(0.0)))')
     if path.stem == "people":
@@ -169,11 +166,10 @@ impl NotetakerApp {
         }
 
         app.home = ![4,5,12,14,15].contains(&screen);
-        if screen < 3 { app.quickstart.open = true; app.quickstart.step = screen; }
+        if screen < 3 || screen == 13 { app.quickstart.open = true; }
         if scene==87 {app.state.downloading=true;app.state.quickstart.models=Default::default();let at=Instant::now()-std::time::Duration::from_secs(10);let mut transfer=crate::quickstart::Transfer::waiting(at);for line in ["NOTETAKER_DOWNLOAD_PLAN gigaam-v3 170197019 0","NOTETAKER_DOWNLOAD_PLAN silero-vad 2327524 0","NOTETAKER_DOWNLOAD_PLAN_END 1","NOTETAKER_DOWNLOAD gigaam-v3 84000000 170197019"] { transfer.update(line,Instant::now()); }app.state.quickstart.transfer=Some(transfer);}
         if scene==88 {app.state.settings_draft.user_aliases=String::new();}
         if (78..=80).contains(&scene) {app.quickstart.fixture_sound(scene);app.state.downloading=true;app.state.quickstart.models=Default::default();}
-        if screen == 13 { app.quickstart.open = true; app.quickstart.step = 2; app.quickstart.expanded = true; }
         if (6..12).contains(&screen) {
             app.show_settings = true;
             app.settings_panel.section = crate::settings::Section::ALL[screen - 6];

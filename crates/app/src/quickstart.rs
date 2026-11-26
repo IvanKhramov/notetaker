@@ -211,7 +211,6 @@ pub struct Runtime {
     pub retry_requested: bool,
     pub download_error: Option<String>,
     pub optional_errors: std::collections::BTreeMap<String, String>,
-    pub calendar_error: Option<String>,
     pub probe_busy: bool,
     pub retry_at: Option<Instant>,
     checked_at: Option<Instant>,
@@ -355,8 +354,19 @@ pub fn model_status(ui: &mut egui::Ui, state: &mut AppState) {
         transfer_status(ui, state);
     } else if !required_ready {
         if let Some(error) = state.quickstart.download_error.clone() {
-            ui.add(egui::Label::new(egui::RichText::new(error).color(Palette::of(ui).red)).wrap());
-            if theme::button(ui, "Повторить", theme::ButtonStyle::Ghost).clicked() {
+            // Retry is automatic. The worker's own message stays one hover away.
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(
+                        "Не удалось скачать модель распознавания. Повторим автоматически через минуту.",
+                    )
+                    .color(Palette::of(ui).red),
+                )
+                .wrap(),
+            )
+            .on_hover_text(error);
+            if theme::button(ui, "Повторить сейчас", theme::ButtonStyle::Ghost).clicked()
+            {
                 state.retry_download();
             }
         } else {
@@ -415,10 +425,6 @@ fn transfer_status(ui: &mut egui::Ui, state: &mut AppState) {
         }
     }
 }
-pub fn optional_status(ui: &mut egui::Ui, state: &mut AppState) {
-    optional_switch(ui, state);
-    optional_download_status(ui, state);
-}
 pub fn optional_switch(ui: &mut egui::Ui, state: &mut AppState) {
     let mut enabled = state.settings_draft.semantic_search;
     if theme::switch(ui, &mut enabled, "Локальный поиск по смыслу").changed()
@@ -469,52 +475,12 @@ pub fn optional_download_status(ui: &mut egui::Ui, state: &mut AppState) {
 pub struct Panel {
     pub open: bool,
     startup_checked: bool,
-    step: usize,
-    selected_ai: usize,
-    calendar_url: String,
     probe: Option<Receiver<ProbeEvent>>,
     probe_status: Option<[Status; 2]>,
 }
 impl Panel {
     pub fn reopen(&mut self) {
         self.open = true;
-        self.step = 0;
-    }
-    fn accept_calendar(&mut self, state: &mut AppState) {
-        if self.calendar_url.trim().is_empty() {
-            return;
-        }
-        let id = state
-            .settings_draft
-            .calendars
-            .first()
-            .map(|c| c.id.clone())
-            .unwrap_or_else(|| format!("calendar-{}", uuid::Uuid::now_v7()));
-        if let Err(error) = crate::settings::validate_calendar_secret(&id, &self.calendar_url) {
-            state.quickstart.calendar_error = Some(error.to_string());
-            return;
-        }
-        if state.settings_draft.calendars.is_empty() {
-            state
-                .settings_draft
-                .calendars
-                .push(notetaker_llm::calendar::Subscription {
-                    id: id.clone(),
-                    name: "Календарь".into(),
-                });
-        }
-        state
-            .calendar_secrets
-            .insert(id, self.calendar_url.trim().to_owned());
-        self.calendar_url.clear();
-        state.quickstart.calendar_error = None;
-        state.save_preferences();
-    }
-    pub fn blur(&mut self, state: &mut AppState) {
-        state.connections.blur();
-        if cfg!(any(windows, target_os = "macos")) {
-            self.accept_calendar(state);
-        }
     }
     pub fn tick(&mut self, state: &mut AppState) {
         if state.ready && !self.startup_checked {
@@ -524,6 +490,11 @@ impl Panel {
                 // Mark the first presentation, so even dismissing the window is
                 // a one-time experience. Explicit reruns never reset this flag.
                 state.settings_draft.onboarding_complete = Some(true);
+                if state.settings_draft.user_name.trim().is_empty()
+                    && let Some(name) = account_name()
+                {
+                    state.settings_draft.user_name = name;
+                }
                 state.save_preferences();
             }
         }
@@ -609,7 +580,6 @@ impl Panel {
             return;
         }
         let mut open = true;
-        let mut next = false;
         let alpha = theme::appearance(ctx, egui::Id::unique("quickstart-fade"));
         let modal=egui::Modal::new(egui::Id::unique("quickstart"))
             .backdrop_color(egui::Color32::from_black_alpha(((if ctx.global_style().visuals.dark_mode {140.0} else {89.0})*alpha) as u8))
@@ -619,10 +589,6 @@ impl Panel {
                 ui.set_width((ctx.content_rect().width() - 64.0).min(520.0));
                 ui.style_mut().text_styles.insert(egui::TextStyle::Heading,theme::semibold(20.0));
                 ui.horizontal(|ui| {
-                    for step in 0..3 {
-                        let (rect, _) = ui.allocate_exact_size(egui::vec2(24.0, 3.0), egui::Sense::hover());
-                        ui.painter().rect_filled(rect,255,if step == self.step { Palette::of(ui).text } else { Palette::of(ui).border_strong });
-                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if theme::icon_button(ui, theme::icons::X, "Закрыть").clicked() { open = false; }
                     });
@@ -630,98 +596,60 @@ impl Panel {
                 ui.add_space(8.0);
                 // Reserve the bar's lane so it never covers the right edge of fields.
                 ui.style_mut().spacing.scroll.floating_allocated_width = theme::SCROLL_LANE;
-                egui::ScrollArea::vertical().max_height((ctx.content_rect().height() - if self.step == 0 { 320.0 } else { 180.0 }).max(80.0))
+                egui::ScrollArea::vertical().max_height((ctx.content_rect().height() - 320.0).max(80.0))
                     .show(ui, |ui| {
-                    match self.step {
-                        0 => {
-                            ui.heading("Встреча идёт. Заметки остаются.");
-                            ui.label("Пишите главное. notetaker запишет разговор и поможет с конспектом.");
-                            ui.add_space(16.0);
-                            ui.label("Проверим звук?");
-                            ui.label("Говорите и включите звук на компьютере. Проверка займёт 5 секунд, аудио не сохраняется.");
-                            for (index, title) in ["Микрофон", "Системный звук"].into_iter().enumerate() {
-                                let denied = Status::Denied;
-                                let status = if state.permissions.channels[index] == notetaker_capture::Permission::Denied { Some(&denied) } else { self.probe_status.as_ref().map(|statuses| &statuses[index]) };
-                                probe_line(ui, title, status, index == 1 && cfg!(target_os = "macos"), state.quickstart.probe_busy);
-                            }
-                            #[cfg(windows)]
-                            ui.small("Если нет доступа: Параметры → Конфиденциальность → Микрофон. Разрешите доступ приложениям.");
-                            #[cfg(not(any(windows, target_os = "macos")))]
-                            ui.small("Проверка и запись звука доступны на macOS и Windows.");
-                            if self.probe_status.is_some() && theme::button(ui, "Проверить ещё раз", crate::theme::ButtonStyle::Ghost).clicked() { self.start_probe(state); }
-
-                        }
-                        1 => {
-                            ui.heading("Как вас зовут?");
-                            ui.label("Этим именем отметим ваш голос в транскрипте.");
-                            let response = ui.add(crate::theme::text_field(&mut state.settings_draft.user_name)
-                                .hint_text("Ваше имя").desired_width(f32::INFINITY));
-                            if response.changed() { state.settings_edited(true, false); }
-                            if response.lost_focus() { state.save_preferences(); }
-                        }
-                        _ => {
-                            ui.heading("Подключить помощников?");
-                            ui.label("Необязательно. Всё можно настроить позже.");
-                            crate::theme::disclosure("Поиск по смыслу").show(ui,|ui| optional_status(ui,state));
-                            crate::theme::disclosure("Календарь").show(ui, |ui| {
-                                ui.label("Встречи из календаря появятся на главном экране.");
-                                if state.settings.calendars.is_empty() {
-                                    ui.add_enabled_ui(cfg!(any(windows, target_os = "macos")), |ui| {
-                                        let response = ui.add(crate::theme::text_field(&mut self.calendar_url)
-                                            .password(true).hint_text("HTTPS URL ICS").desired_width(f32::INFINITY));
-                                        if response.lost_focus() { self.accept_calendar(state); }
-                                    });
-                                    if let Some(error) = &state.quickstart.calendar_error { ui.colored_label(Palette::of(ui).red, error); }
-                                } else { ui.label("Календарь подключён"); }
-                                crate::calendar_ui::setup_help(ui);
-                                if ui.add(theme::styled_button(Palette::of(ui),"Пропустить календарь",theme::ButtonStyle::Ghost).icon(theme::icons::X)).clicked() { self.calendar_url.clear(); }
-                            });
-                            crate::theme::disclosure("AI для конспектов").show(ui, |ui| {
-                                ui.label("Текст встречи будет отправлен выбранному AI. Аудио останется на компьютере.");
-                                for action in state.connections.onboarding_ui(ui, state.ready, &mut self.selected_ai) {
-                                    state.send(Command::Ai(action));
-                                }
-                                ui.weak("Пропустить: оставьте AI без подключения.");
-                            });
-                        }
+                    ui.heading("Встреча идёт. Заметки остаются.");
+                    ui.label("Пишите главное. notetaker запишет разговор и поможет с конспектом.");
+                    ui.add_space(16.0);
+                    ui.label("Проверим звук?");
+                    ui.label("Говорите и включите звук на компьютере. Проверка займёт 5 секунд, аудио не сохраняется.");
+                    for (index, title) in ["Микрофон", "Системный звук"].into_iter().enumerate() {
+                        let denied = Status::Denied;
+                        let status = if state.permissions.channels[index] == notetaker_capture::Permission::Denied { Some(&denied) } else { self.probe_status.as_ref().map(|statuses| &statuses[index]) };
+                        probe_line(ui, title, status, index == 1 && cfg!(target_os = "macos"), state.quickstart.probe_busy);
                     }
+                    #[cfg(windows)]
+                    ui.small("Если нет доступа: Параметры → Конфиденциальность → Микрофон. Разрешите доступ приложениям.");
+                    #[cfg(not(any(windows, target_os = "macos")))]
+                    ui.small("Проверка и запись звука доступны на macOS и Windows.");
+                    if self.probe_status.is_some() && theme::button(ui, "Проверить ещё раз", crate::theme::ButtonStyle::Ghost).clicked() { self.start_probe(state); }
+
                 });
-                if self.step == 0 {
-                    ui.add_space(12.0);
-                    model_status(ui, state);
-                    ui.small(if state.quickstart.models.speech_ready(&state.settings.model) {
-                        "Распознавание готово. Можно начинать запись."
-                    } else { "Запись станет доступна после подготовки распознавания." });
-                }
+                ui.add_space(12.0);
+                model_status(ui, state);
+                ui.small(if state.quickstart.models.speech_ready(&state.settings.model) {
+                    "Распознавание готово. Можно начинать запись."
+                } else { "Запись станет доступна после подготовки распознавания." });
+                ui.small("Календарь и AI для конспектов можно подключить позже в настройках.");
                 ui.add_space(16.0);
                 if let Some(error) = &state.settings_autosave.error { ui.colored_label(Palette::of(ui).red, error); }
                 theme::footer(ui, |ui| {
-                    let check_audio = self.step == 0 && self.probe_status.is_none();
-                    let label = if self.step == 2 { "Начать работу" } else if check_audio { "Проверить звук" } else { "Продолжить" };
+                    let check_audio = self.probe_status.is_none() && cfg!(any(windows, target_os = "macos"));
+                    let label = if check_audio { "Проверить звук" } else { "Начать работу" };
                     if ui.add_enabled(!state.quickstart.probe_busy, theme::styled_button(Palette::of(ui), label, theme::ButtonStyle::Primary)).clicked() {
-                        if check_audio && cfg!(any(windows, target_os = "macos")) { self.start_probe(state); }
-                        else { next = true; }
+                        if check_audio { self.start_probe(state); } else { open = false; }
                     }
-                    if theme::button(ui, "Пропустить", crate::theme::ButtonStyle::Ghost).clicked() { next = true; }
+                    if check_audio && theme::button(ui, "Пропустить", crate::theme::ButtonStyle::Ghost).clicked() { open = false; }
                 });
             });
         if theme::modal_should_close(&modal) {
             open = false;
         }
-        if next {
-            self.blur(state);
-            state.save_preferences();
-            if self.step == 2 {
-                open = false;
-            } else {
-                self.step += 1;
-            }
-        }
         if !open {
-            self.blur(state);
+            state.save_preferences();
         }
         self.open = open;
     }
+}
+
+/// The full name of the macOS account, used as the default speaker name.
+fn account_name() -> Option<String> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let output = std::process::Command::new("id").arg("-F").output().ok()?;
+    let name = String::from_utf8(output.stdout).ok()?.trim().to_owned();
+    (output.status.success() && !name.is_empty()).then_some(name)
 }
 
 pub enum ProbeEvent {
@@ -857,48 +785,29 @@ pub fn probe_line(
 mod tests {
     use super::*;
     #[test]
-    fn quickstart_advances_three_steps_preserving_name_and_reopens_at_start() {
+    fn quickstart_is_one_screen_that_keeps_the_name_and_can_be_reopened() {
         let (mut state, _commands, _events) = crate::test_ui::state();
         state.ready = true;
         state.settings.onboarding_complete = Some(false);
         state.settings_draft = state.settings.clone();
+        state.settings_draft.user_name = "Before".into();
         let ctx = egui::Context::default();
         theme::install(&ctx);
         let mut panel = Panel::default();
-        panel.reopen();
         panel.tick(&mut state);
+        assert!(panel.open);
         assert_eq!(state.settings_draft.onboarding_complete, Some(true));
-        state.settings_draft.user_name = "Before".into();
-        crate::test_ui::click(
-            &ctx,
-            &mut |ui| panel.show(ui.ctx(), &mut state),
-            "Пропустить",
-        );
-        assert_eq!(panel.step, 1);
-        crate::test_ui::replace_text(
-            &ctx,
-            &mut |ui| panel.show(ui.ctx(), &mut state),
-            "Before",
-            "After",
-        );
-        crate::test_ui::click(
-            &ctx,
-            &mut |ui| panel.show(ui.ctx(), &mut state),
-            "Продолжить",
-        );
-        assert_eq!(panel.step, 2);
-        assert_eq!(state.settings_draft.user_name, "After");
+        // An existing name is never replaced by the account name.
+        assert_eq!(state.settings_draft.user_name, "Before");
         crate::test_ui::click(
             &ctx,
             &mut |ui| panel.show(ui.ctx(), &mut state),
             "Начать работу",
         );
         assert!(!panel.open);
-        assert_eq!(state.settings_draft.user_name, "After");
+        assert_eq!(state.settings_draft.user_name, "Before");
         panel.reopen();
         assert!(panel.open);
-        assert_eq!(panel.step, 0);
-        assert_eq!(state.settings_draft.user_name, "After");
     }
 }
 
